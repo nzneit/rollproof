@@ -27,8 +27,9 @@ A check of the revised text against itself followed, also on 2026-11-16: a scrip
 checked mechanically, and three readers who each followed one thread through the whole document.
 They found 48 places. This text carries the corrections. Most follow from what the rest of the
 text already said. Where the text gave no lead, the drafting session filled the gap with the
-smaller choice and listed those choices for the maintainer, who has not yet looked at them. Three
-questions that change a verdict or a reason code are left as they were, for the maintainer.
+smaller choice and listed those choices for the maintainer, who raised no objection. The
+maintainer answered the three questions that change a verdict or a reason code, two of them
+tentatively (section 14, point 22).
 
 This text includes all of it. This written form waits for the maintainer's review. No code exists
 yet.
@@ -300,8 +301,8 @@ Flow of one run: `config`, then `cluster`, then `images`. `config` then fills in
 `deploy` fetches the charts and runs the `setup` commands, and `deploy` installs. `probe` starts.
 For each transition `run` marks the window, `deploy` acts or `watch` restarts, and `watch` waits.
 At the end of each window `run` hands `verdict` what it has so far, and it starts the next
-transition only when `verdict` says that every window so far is a pass. Then `probe` stops, `verdict` decides once more with what
-arrived late, and `report` writes.
+transition only when `verdict` says that every window so far is a pass. Then `probe` stops,
+`verdict` decides once more with what arrived late, and `report` writes.
 
 Three properties the plan must keep:
 
@@ -466,7 +467,9 @@ because the transition may be what cut them.
   when its first observation arrives, and the steady window begins at the moment that line was
   written, by the runtime's timestamp and not by a `t` on the line. If none arrives within
   `limits.timeout`, the run is not verified, and the report shows the state of the probe's pod
-  (section 10).
+  (section 10). A probe that exits before its first observation ends that wait at once: the run
+  is not verified because the probe exited, and nobody waits out the timeout for a probe that is
+  gone.
 - **Exit.** The probe's pod is never restarted: its restart policy is `Never`. The tool reads an
   exit from the state of the container named `probe`. A probe that exits before the tool stops it
   makes the window in which it exited not verified. The silence that follows an exit is not
@@ -1234,8 +1237,9 @@ also reports how far it ran behind its schedule (section 6), which shows a starv
   organization knows what to mirror.
 
 Exit codes of `run`: 0 for pass, 1 for fail, 2 for not verified. A configuration that is rejected
-exits 2. Exit 1 means a fail verdict and nothing else: the tool turns a crash of its own into
-`internal-error` and exits 2.
+exits 2. Exit 1 means a fail verdict and nothing else. The tool turns a crash of its own into the
+reason `internal-error`, and the exit code follows the verdict that section 10 then gives: 2,
+unless the window in progress had already failed.
 
 `--out` names the folder for the results. It holds `result.json` and a folder named `evidence`.
 The tool replaces those two there and touches nothing else in the folder. The default is a new
@@ -1546,7 +1550,7 @@ does not get in their way.
 2. Every window runs to its end, whatever happened in it, so that the evidence is whole. The
    steady window lasts `limits.steady`. A transition's window lasts until the transition has
    finished and the settle time has passed, or until `limits.timeout` when it stalls. Only a
-   signal cuts a window short.
+   signal, or a failure of the tool itself, cuts a window short.
 3. Each condition is placed in a window.
    - A failure belongs to the window that holds its time.
    - Silence belongs to every window it overlaps.
@@ -1554,7 +1558,9 @@ does not get in their way.
      judge, and a transition that replaced no pod belong to their transition's window.
    - A fault of the probe belongs to the window that holds the moment it happened: an early exit,
      a line that breaks the contract, a `t` later than its line.
-   - A signal and a failure of the tool itself belong to the window in progress.
+   - A signal and a failure of the tool itself belong to the window in progress. One that comes
+     while the tool is stopping the probe, before the verdict is decided, belongs to the last
+     window.
 4. The steady window is not verified when anything is placed in it: a failure, silence, a fault
    of the probe, a signal, a failure of the tool. A failure before anything changed points at the
    previous release, at the probe or at the runner, not at a transition.
@@ -1565,7 +1571,8 @@ does not get in their way.
    tool's restart, when a watched workload took a form the tool cannot judge, or when the
    transition finished, its command succeeded and it replaced no pod.
 7. In one window fail outranks not verified, and the report lists every reason. A probe that
-   reports failures and then crashes has shown downtime.
+   reports failures and then crashes has shown downtime. So has a run in which the tool itself
+   failed after the probe had reported failures.
 8. A condition may be placed late, in a window the run has already left: a failure that the probe
    reports late, or silence that began in one window and passed the limit in the next. That
    window is then judged by it all the same. A transition that is in progress at that moment is
@@ -1574,8 +1581,9 @@ does not get in their way.
 9. What happens before the steady window has no window, and each such thing makes the run not
    verified: a rejected configuration, a runner the tool cannot use, a cluster, an image or a
    chart that could not be set up, a `setup` command or an install that failed, nothing to watch,
-   a workload or a target the tool cannot judge, a probe that never started, a clock in the nodes
-   that differs from the runner's, a signal, a failure of the tool.
+   a workload or a target the tool cannot judge, a probe that never started or that exited before
+   its first observation, a clock in the nodes that differs from the runner's, a signal, a
+   failure of the tool.
 10. Nothing that happens after the verdict was decided changes it. The verdict is decided once
     the probe has stopped and its late lines are in (section 5). An error while the tool then
     writes its report, completes the evidence or deletes the cluster is a warning, on the
@@ -1767,6 +1775,11 @@ results: /tmp/rollproof-results-7f3a
   what evidence it can. It leaves the cluster, with the probe's pod in it, for the next run to
   delete (section 9). A cancelled step has about 10 seconds, which is
   not enough to delete a cluster.
+
+  A signal that comes while the tool is stopping the probe, after the last window has ended, is
+  `interrupted` too. Results that the probe had still to write may be lost, so the run is not
+  verified, unless that window had already failed. A signal that comes after the verdict was
+  decided changes nothing and is a warning (rule 10).
 - **GitHub job summary.** The same tables and lists as Markdown, written only when the tool
   detects GitHub Actions.
 - **Evidence folder.**
@@ -1803,8 +1816,8 @@ results: /tmp/rollproof-results-7f3a
 | `nothing-watched` | not verified | `limits.settle` after the install command returned, no Deployment, StatefulSet or DaemonSet matched `deploy.namespace` and `deploy.selector` |
 | `workload-unsupported` | not verified | A watched StatefulSet or DaemonSet has an update strategy other than the rolling one |
 | `target-unsupported` | not verified | The built-in probe's URL names a Service that does not exist, is headless, or routes only within a node, or it names one pod of a headless Service |
-| `probe-not-started` | not verified | No observation arrived inside `limits.timeout` |
-| `probe-exited` | not verified | The probe exited before the tool stopped it |
+| `probe-not-started` | not verified | No observation arrived inside `limits.timeout`, and the probe was still running |
+| `probe-exited` | not verified | The probe exited before the tool stopped it, whether before its first observation or in a window |
 | `probe-line-invalid` | not verified | A line broke the probe contract: its form, a field's type or value, a `t` later than the line, or an observation behind a prefix |
 | `steady-not-clean` | not verified | The probe reported a failure in the steady window |
 | `probe-silent` | not verified | The probe wrote no observation for longer than `limits.silence` |
@@ -1894,8 +1907,8 @@ A line leaves the list when a fixture shows the tool catching what it names.
 **Without a cluster.**
 
 - Table tests for every route through `verdict`: each rule of section 10, each pair of conditions
-  in one window, the decision to go on after a window, a late failure, and the exit code of each
-  verdict.
+  in one window, the decision to go on after a window, a late failure, a signal and a failure of
+  the tool in each phase of a run, and the exit code of each verdict.
 - Configuration validation: unknown keys, a missing or unknown `version`, unset and empty
   variables, an unknown `${…}` form, an image name that `images` does not list, a password
   written in the file, a combination of releases or commands that section 7 rejects, both or
@@ -1904,8 +1917,8 @@ A line leaves the list when a fixture shows the tool catching what it names.
   against each other, a reserved namespace, a host listed twice, and the base of relative paths.
 - Probe lines, on a fake clock: the type and the range of each field, an observation behind a
   prefix, a cut last line, an unknown `v`, assignment to windows, a failure that crosses the
-  start of a transition, silence at a window's start and at its end, the start timeout, and what
-  counts during the drain.
+  start of a transition, silence at a window's start and at its end, the start timeout, a probe
+  that exits before its first observation, and what counts during the drain.
 - The built-in probe against a server in the same process: the rate held while the handler is
   slow, and the lag it reports; each failure class; a status outside the range; a redirect; a
   body cut short; the summary line; the headers and the `Host` as the server received them;
@@ -2109,7 +2122,8 @@ the fourth on gets a plan of its own. The first plan covers steps 1 to 3.
 The plan settles each open point with a test or a reading before anything is built on what it
 decides. Points 6, 17 and 18 are settled and stay here for the record. Points 7 and 16 are settled
 by the fixture runs, and points 13 and 14 before the first release. Point 15 is a caveat with
-nothing to settle. The build order of section 13 says which step proves which point.
+nothing to settle, and point 22 records two rules that stand for now. The build order of
+section 13 says which step proves which point.
 
 1. **Registry order in the nodes.** That a node tries the run's registry first for a host and then
    falls back to the real registry is what the container runtime's documentation and source say
@@ -2227,6 +2241,13 @@ nothing to settle. The build order of section 13 says which step proves which po
       of their own, and what bound the clock check needs.
     - That a privileged node lets a pod under test reach the runner. Section 11 assumes that it
       does.
+22. **Two rules taken tentatively.** The maintainer accepted these on 2026-11-16 with the word
+    "tentatively". They stand until a fixture or a user's case argues otherwise.
+    - A signal that comes while the tool is stopping the probe makes the run not verified, unless
+      a window had already failed (section 10). The other way would keep the verdict and print a
+      warning.
+    - A probe that exits before its first observation is `probe-exited`, at once (section 6). The
+      other way would wait out `limits.timeout` and report `probe-not-started`.
 
 ## 15. Not in the first release
 
@@ -2435,8 +2456,8 @@ a pod in a privileged node can reach the runner; that the fixture for the known 
 a job inside a container can reach the cluster; that a larger sync time of the proxy gives no
 delay that can be set; the two rollouts under a reloader; how a mirror under a path behaves; that
 Podman run as root lets the runner reach the node addresses as Docker does; that a port mapping
-cannot be added to a node after it was created; which Go version Helm's released binaries are built with;
-and where a pod goes when the node its volume is tied to cannot take it. That the hosted runner's
-Docker runs as root is read from the image's install script, which no page states. What is known
-of these is reasoned from the sources above or is the drafting session's own knowledge, and
-section 14 lists those of them that need a test.
+cannot be added to a node after it was created; which Go version Helm's released binaries are
+built with; and where a pod goes when the node its volume is tied to cannot take it. That the
+hosted runner's Docker runs as root is read from the image's install script, which no page
+states. What is known of these is reasoned from the sources above or is the drafting session's
+own knowledge, and section 14 lists those of them that need a test.
