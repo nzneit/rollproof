@@ -11,10 +11,17 @@ followed.
   further agents then looked in documentation and source code for evidence for and against each
   answer to it, and three answers changed. The maintainer accepted the result on 2026-11-16.
 
-This text includes both. This written form waits for the maintainer's review. No code exists yet.
+Two readings of source code on 2026-11-16 then checked what the text said of Helm and of eight
+further points. The maintainer accepted the four changes to the Helm driver that followed, and
+confirmed that a probe on the runner stays out of the first release (section 14, points 17
+and 18).
+
+This text includes all of it. This written form waits for the maintainer's review. No code exists
+yet.
 
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
-Fable model wrote each review, and two AI agents on an Opus model gathered the evidence. Where a
+Fable model wrote each review, and AI agents on an Opus model gathered the evidence and did the
+two readings. Where a
 statement rests on a measurement, a page or a source file that was read, section 16 names the
 source. Everything else is design, not fact, and nothing here has been run.
 
@@ -606,8 +613,11 @@ so a dependency belongs in a namespace of its own.
 | Transition | What the tool runs |
 | --- | --- |
 | install | `helm upgrade --install` of the release that the table above names, into `deploy.namespace`, with `--create-namespace` |
-| deploy | `helm upgrade` to the candidate |
+| deploy | `helm upgrade` to the candidate, with `--reset-values` |
 | rollback | `helm rollback` to the revision the tool read after the install |
+
+Each of the three also gets `--timeout` with the value of `limits.timeout`, and the flags that
+name the test cluster (see "The cluster Helm acts on" below).
 
 On a new cluster the install is revision 1, the deploy revision 2 and the rollback revision 3. A
 rollback applies the manifest that Helm stored for the revision it goes back to, without rendering
@@ -620,14 +630,42 @@ A release description has `chart`, `version` and `values`.
 - `chart` is a path, an `oci://` reference, or a name that the runner's Helm configuration
   resolves, such as a repository alias with a chart name. An alias needs that repository's index
   on the runner, from an earlier `helm repo add` or `helm repo update`. When `chart` is a path
-  that exists, Helm uses it and ignores `version`.
+  that exists, Helm uses it and ignores `version`, so the configuration rejects a `version`
+  beside such a `chart`.
 - `values` is a list whose items are files or inline maps, applied in the order written: a later
   item wins over an earlier one, key by key. The tool writes each inline map to a values file of
-  its own, so types are kept and no key needs a path grammar.
+  its own, so types are kept and no key needs a path grammar. Helm splits the argument that
+  names a values file at a comma, so the configuration rejects a values file whose path holds
+  one.
+
+**The candidate's values.** The deploy passes `--reset-values`. Without it, Helm gives an upgrade
+that passes no values the values of the release's last revision, and a candidate with no `values`
+would be rendered with the previous release's. With it, the candidate is rendered from its own
+chart and its own `values` alone.
 
 Helm runs with the runner's own configuration: its repositories and its registry logins are the
-ones the caller set up before the step. The tool adds the cluster and the namespace, and nothing
-else. The first release names the Helm major versions it is tested with (section 14).
+ones the caller set up before the step. The first release names the Helm major versions it is
+tested with (section 14).
+
+**The cluster Helm acts on.** The tool names the test cluster on every Helm command line: the
+cluster's kubeconfig file with `--kubeconfig`, its context with `--kube-context`, and
+`deploy.namespace` with `--namespace`. Like every command the tool starts, Helm also gets
+`KUBECONFIG` set to that file.
+
+That is not enough by itself. Helm takes cluster settings from its environment as well, and each
+one that is set overrides what the kubeconfig file says, whichever file the command line names. A
+server address among them would send Helm, and the candidate with it, to a cluster other than the
+test cluster. `HELM_DRIVER` moves the place where Helm keeps its release records: with `sql` to a
+database outside the cluster, and with `memory` into the memory of one Helm process. The tool
+therefore takes these variables out of the environment of every command it starts, which are
+Helm, the `setup` commands and the commands of the commands driver:
+
+`HELM_KUBECONTEXT`, `HELM_KUBEAPISERVER`, `HELM_KUBETOKEN`, `HELM_KUBECAFILE`, `HELM_KUBEASUSER`,
+`HELM_KUBEASGROUPS`, `HELM_KUBEINSECURE_SKIP_TLS_VERIFY`, `HELM_KUBETLS_SERVER_NAME`,
+`HELM_NAMESPACE`, `HELM_DRIVER` and `HELM_DRIVER_SQL_CONNECTION_STRING`.
+
+The console names each variable that was set and taken out. Every other variable passes through
+unchanged.
 
 Helm is called without `--wait` and without the flag that rolls a failed upgrade back (`--atomic`
 in Helm 3, `--rollback-on-failure` in Helm 4; in both majors that flag also turns waiting on). In
@@ -637,14 +675,17 @@ transition has finished, so both drivers are judged the same way.
 Helm hooks run as Helm runs them. Three facts about them matter here:
 
 - Helm waits for a hook that is a Job or a Pod even when it is not told to wait, and it bounds
-  each such hook by its own timeout, 5 minutes by default. That time is inside the transition's
-  window and counts towards `limits.timeout`.
+  each such hook by its `--timeout`, which is 5 minutes when none is given. The tool passes
+  `limits.timeout` there, so that a limit raised for a slow chart reaches Helm too. Helm applies
+  it to each hook on its own. The tool's limit covers the whole transition from its start, hooks
+  included, and it alone decides a stall.
 - A rollback runs the rollback hooks that were stored with the revision it goes back to.
 - A hook that fails makes the command exit non-zero, as every other failure of Helm does.
 
 **The commands driver.** Each command is an argument list. The tool starts it directly, with no
-shell, on the runner, with `KUBECONFIG` set to the test cluster. `install` is required. `deploy`
-and `rollback` are optional, as the table above shows.
+shell, on the runner, with `KUBECONFIG` set to the test cluster and without the variables listed
+under "The cluster Helm acts on". `install` is required. `deploy` and `rollback` are optional, as
+the table above shows.
 
 A command must itself bring the change to the watched workloads. It may return as soon as it has
 submitted the change; the tool watches from there. A command that hands the change to a controller
@@ -913,7 +954,7 @@ values; the evidence folder may hold the values.
 | `probe.http.expect-status` | 200 to 299 | A redirect or an error page is not an answer from the workload |
 | `limits.steady` | 10 s | Long enough to show that the probe and the workload work before anything changes: 2,000 checks at the default rate. It is not a control for a failure that is rare without any rollout; the paragraph below the table is for that |
 | `limits.settle` | 15 s | It has to catch the failures that begin only after a transition has finished. In the experiments those ended within about 3 s, in the variant with no readiness probe, and the tool also waits for old pods to be gone before the settle time starts. It does not have to outlast a failure that is already under way: one failure fails the window, and a failed window ends the run. 15 s is several times the 3 s; the fixture runs are to confirm it. It is also how long the tool waits for a second change to begin (section 7) |
-| `limits.timeout` | 5 minutes | The length of Helm's default timeout for one operation. It is not the same bound: Helm applies its timeout to each hook separately, and this limit covers a whole transition from its start, hooks included. One limit covers the install, the probe's start and each transition |
+| `limits.timeout` | 5 minutes | The length of Helm's default timeout for one operation. It is not the same bound: Helm applies its timeout to each hook separately, and this limit covers a whole transition from its start, hooks included. The tool passes the value to Helm as its `--timeout` (section 7). One limit covers the install, the probe's start and each transition |
 | `limits.silence` | 5 s | The built-in probe writes at least one line a second, so 5 s is five missed lines. A custom probe that checks less often raises it |
 
 There is no failure budget. A pass means that the probe reported no failure, which is the claim
@@ -1340,6 +1381,9 @@ A line leaves the list when a fixture shows the tool catching what it names.
 - The built-in probe does not verify a server's certificate. It sends nothing secret, unless the
   caller put a credential into a header, and a header's value is not masked.
 - The tool does not read, copy or change the runner's Helm logins or its container engine's.
+- Every command the tool starts gets the test cluster's kubeconfig, and none of the variables by
+  which Helm would act on another cluster or keep its records elsewhere (section 7). A candidate
+  under test must not reach a cluster that the job's environment names for a later step.
 - kind runs its node containers privileged. That is a property of kind, and it is why the tool
   belongs on a runner that is discarded or trusted.
 - The `setup` commands and the commands driver run the caller's own commands with the caller's own
@@ -1352,14 +1396,16 @@ A line leaves the list when a fixture shows the tool catching what it names.
 - Table tests for every route through `verdict`.
 - Configuration validation: unknown keys, unset variables, an unknown `${…}` form, a password
   written in the file, a combination of releases or commands that section 7 rejects, both or
-  neither of a pair that needs exactly one.
+  neither of a pair that needs exactly one, a `version` beside a chart path that exists, a comma
+  in a values file's path.
 - Probe-line parsing, assignment to windows, and silence detection, on a fake clock.
 - The rules of `watch`, on recorded API objects and a fake clock: when a transition has finished,
   the quiet time and what starts it again, pods counted by UID, nothing to watch, a strategy
   other than the rolling one, a headless Service, the quickest stop.
 - Golden files for the report formats and for the kind configuration and node settings the tool
   generates.
-- The deploy drivers against a fake command runner that records the arguments.
+- The deploy drivers against a fake command runner that records the arguments and the
+  environment: the flags of section 7, and that the variables it lists are gone.
 
 **With a cluster.** The real binary runs against a fixture service. The fixture is a small Go HTTP
 service, copied from the experiments' test service, with switches for start delay and shutdown
@@ -1548,34 +1594,22 @@ The plan settles each of these with a test or a reading before anything is built
     about 1 GB measures disk, pull time and false failures. After it the project decides whether
     the tool pulls the listed images into the nodes before the steady window. It is measured with
     the fixture series, not among the proofs of the build order's second step.
-17. **Four changes to the Helm driver, proposed and not yet accepted.** A reading of Helm's source
-    on 2026-11-16 showed where the driver, as section 7 describes it, goes wrong. Each proposal
-    waits for the maintainer.
-    - Helm gives an upgrade that passes no values the values of the release's last revision. A
-      candidate with no `values` would be rendered with the previous release's. Proposed: the
-      deploy passes `--reset-values`.
-    - Helm bounds each hook by its own timeout, whatever `limits.timeout` says. Proposed: the
-      tool passes `limits.timeout` to Helm as its `--timeout`.
-    - Helm takes cluster settings from the environment, and each one that is set overrides what
-      the kubeconfig file says: `HELM_KUBECONTEXT`, `HELM_KUBEAPISERVER`, `HELM_KUBETOKEN`,
-      `HELM_KUBECAFILE`, `HELM_KUBEASUSER`, `HELM_KUBEASGROUPS`,
-      `HELM_KUBEINSECURE_SKIP_TLS_VERIFY`, `HELM_KUBETLS_SERVER_NAME` and `HELM_NAMESPACE`. A
-      server address among them sends Helm to a cluster other than the test cluster. A context
-      and a namespace named on the command line win over their own variables and leave the
-      others in force. `HELM_DRIVER` moves Helm's release records: with `sql` to a database
-      outside the cluster, which `HELM_DRIVER_SQL_CONNECTION_STRING` names, and with `memory`
-      into the memory of one Helm process. Proposed: the tool names the test cluster's
-      kubeconfig, its context and the namespace on the command line, and takes every variable
-      named here out of Helm's environment. All other variables pass through, `SSL_CERT_FILE`
-      and `SSL_CERT_DIR` among them (section 9).
-    - Helm ignores `version` when `chart` is a path that exists, and splits the path of a values
-      file at a comma. Proposed: the configuration rejects both.
-18. **A probe on the runner, looked at again.** This design first said that the runner cannot
-    reach a Service of a kind cluster. A reading on 2026-11-16 showed that to hold for a
-    Service's cluster address only (section 6). The decision to leave such a probe out of the
-    first release now rests on the size of the contract and on the one path per kind of engine.
-    Proposed: it stays out. The maintainer made the decision with the first reason in front of
-    them and has not confirmed it since.
+17. **Four changes to the Helm driver.** Settled. A reading of Helm's source on 2026-11-16 showed
+    where the driver, as section 7 then described it, went wrong, and the maintainer accepted
+    the four changes that day. Section 7 carries them:
+    - the deploy passes `--reset-values`;
+    - the tool passes `limits.timeout` to Helm as its `--timeout`;
+    - the tool names the test cluster on Helm's command line and takes out of the environment
+      the variables that override it. The same variables are taken from the `setup` commands and
+      from the commands driver, which may run Helm too. That last step is the drafting
+      session's, for the same reason, and the maintainer has not looked at it;
+    - the configuration rejects a `version` beside a chart path that exists, and a comma in a
+      values file's path.
+18. **A probe on the runner.** Settled. This design first said that the runner cannot reach a
+    Service of a kind cluster. A reading on 2026-11-16 showed that to hold for a Service's
+    cluster address only (section 6). With that in front of them, the maintainer confirmed the
+    same day that such a probe stays out of the first release. The reasons are the size of the
+    contract and the one path per kind of engine.
 
 ## 15. Not in the first release
 
@@ -1700,9 +1734,9 @@ which quote each passage, are not filed in the repository.
 Read later on 2026-11-16 by one AI agent on an Opus model, which checked what this design said of
 Helm from memory, and two statements of section 6. It found two of them wrong, one of those in
 part, and eight in need of a correction. This text carries the corrections of wording. Four
-changes to what the tool does follow from the reading and wait for the maintainer (section 14,
-point 17). The drafting session opened the passages that decide a point and found them as
-reported. Nothing was run, and the agent's report is not filed in the repository.
+changes to what the tool does follow from the reading, and the maintainer accepted them that day
+(section 14, point 17). The drafting session opened the passages that decide a point and found
+them as reported. Nothing was run, and the agent's report is not filed in the repository.
 
 | Source | What this design takes from it |
 | --- | --- |
@@ -1717,11 +1751,10 @@ Read last on 2026-11-16 by one AI agent on an Opus model, which took the eight s
 earlier readings had left unverified and that a reading can settle. It found one wrong: this
 design said that the runner cannot reach a Service of a kind cluster, and that holds for a
 Service's cluster address only (section 6). Three needed a correction and one an addition, and
-this text carries them. Whether a probe on the runner stays out of the first release waits for the
-maintainer (section 14, point 18). The addition widens the third proposal of section 14,
-point 17. The drafting session opened the passages that decide a
-point and found them as reported. Nothing was run, and the agent's report is not filed in the
-repository.
+this text carries them. The maintainer then confirmed that a probe on the runner stays out of the
+first release (section 14, point 18). The addition widened the third change of section 14,
+point 17. The drafting session opened the passages that decide a point and found them as
+reported. Nothing was run, and the agent's report is not filed in the repository.
 
 | Source | What this design takes from it |
 | --- | --- |
