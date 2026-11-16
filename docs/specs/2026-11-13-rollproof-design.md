@@ -1,6 +1,6 @@
 # rollproof: design
 
-Date: 2026-11-13. Revised twice on 2026-11-16.
+Date: 2026-11-13. Revised on 2026-11-16.
 
 Status: the design below was agreed section by section in conversation on 2026-11-13. Two reviews
 followed.
@@ -14,16 +14,22 @@ followed.
 Two readings of source code on 2026-11-16 then checked what the text said of Helm and of eight
 further points. The maintainer accepted the four changes to the Helm driver that followed, and
 confirmed that a probe on the runner stays out of the first release (section 14, points 17
-and 18).
+and 18). One step of point 17 is the drafting session's own, and the maintainer has not looked at
+it: the same variables are also taken from the `setup` commands and from the commands driver.
 
-This text includes all of it. This written form waits for the maintainer's review. No code exists
-yet.
+A third review on 2026-11-16 went through the text part by part, to find what is wrong with it
+before anything is built from it. This text carries that review's plain corrections: references,
+counts and wording. Its other findings change what the tool does or promises, and they wait for
+the maintainer.
+
+Apart from those findings, this text includes all of it. This written form waits for the
+maintainer's review. No code exists yet.
 
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
-Fable model wrote each review, and AI agents on an Opus model gathered the evidence and did the
-two readings. Where a
-statement rests on a measurement, a page or a source file that was read, section 16 names the
-source. Everything else is design, not fact, and nothing here has been run.
+Fable model wrote each of the first two reviews. AI agents on an Opus model gathered the evidence,
+did the two readings and wrote the third review, eight of them with one part of the text each.
+Where a statement rests on a measurement, a page or a source file that was read, section 16 names
+the source. Everything else is design, not fact, and nothing here has been run.
 
 `rollproof` is a working name. It has not been checked for collisions.
 
@@ -67,7 +73,7 @@ A pass is necessary, not sufficient. Every pass lists what the run exercised and
 ### Who can use it
 
 The tool runs on Linux, beside a container engine that may run privileged containers (section 8).
-It tests Deployments, StatefulSets and DaemonSets that update by rolling (section 7). The built-in
+It tests Deployments, and StatefulSets and DaemonSets that update by rolling (section 7). The built-in
 probe sends HTTP GET requests; anything else is a custom probe (section 6).
 
 It cannot be used, in the first release:
@@ -76,8 +82,8 @@ It cannot be used, in the first release:
   machine;
 - from a job that itself runs inside a container;
 - for pods that no Deployment, StatefulSet or DaemonSet manages;
-- with a deployer that changes the workload minutes after its command returned, such as a
-  controller that polls a Git repository.
+- with a deployer that begins its change later than the settle time after its command returned,
+  such as a controller that polls a Git repository (section 7).
 
 A real chart may need values of its own for the test before it starts in a small cluster with no
 cloud around it. The pass then covers the manifests with those values (section 9).
@@ -248,7 +254,7 @@ The tool is one Go binary. Each unit has one job.
 | `deploy` | The deploy contract: install, deploy, roll back, restart. A Helm driver and a commands driver. It also runs the caller's `setup` commands, with the commands driver's runner | Helm, or the caller's commands |
 | `watch` | Observes the watched workloads: when a transition finished, whether it stalled, which pods were replaced and how long they took to stop. It follows the pods' status and logs while they live | The Kubernetes API |
 | `probe` | The probe contract: start, stop, collect observations. The built-in HTTP probe and the custom probe | The probe's pod |
-| `run` | Sequences the phases and marks the windows on the timeline | Only the two contracts, `cluster` and `watch` |
+| `run` | Sequences the phases and marks the windows on the timeline | The two contracts as interfaces, and every other unit only as a step it calls |
 | `verdict` | Turns observations and transition results into pass, fail or not verified, with reasons | Nothing. It is a pure function |
 | `report` | Writes the console text, `result.json`, the GitHub job summary and the evidence folder | File formats |
 
@@ -282,7 +288,7 @@ Common case: a user with a workload the built-in probe does not cover writes a s
 ```sh
 # a TCP check as a shell loop
 while true; do
-  if nc -z -w1 orders-db 5432; then echo '{"ok":true}'
+  if nc -z -w1 orders-db.orders 5432; then echo '{"ok":true}'
   else echo '{"ok":false,"class":"refused"}'; fi
   sleep 0.1
 done
@@ -360,7 +366,8 @@ tool, and one path for each kind of engine.
 
 **Lines.** The probe writes one JSON object per line. The tool reads the pod's log, which carries
 the container's standard output and standard error as one stream, so it does not matter which of
-the two a line was written to.
+the two a line was written to. Whether following a log survives the kubelet's rotation of it is
+open (section 14, point 11).
 
 | Field | Required | Meaning |
 | --- | --- | --- |
@@ -433,6 +440,10 @@ real clients hold, and for gRPC those are what a rollout breaks.
 | The probe's container | `probe` |
 
 They follow the tool's name, which is a working name (section 14).
+
+A probe pod is not in the workload's namespace. A probe therefore names its target with the
+namespace: `orders-db.orders`, and not `orders-db`, which resolves only inside the probe's own
+namespace.
 
 The tool creates the namespace before the `setup` commands run (section 7), so that `setup` can
 add to it what a probe needs: rights for its default service account, when a custom probe reads
@@ -685,7 +696,7 @@ Helm hooks run as Helm runs them. Three facts about them matter here:
 **The commands driver.** Each command is an argument list. The tool starts it directly, with no
 shell, on the runner, with `KUBECONFIG` set to the test cluster and without the variables listed
 under "The cluster Helm acts on". `install` is required. `deploy` and `rollback` are optional, as
-the table above shows.
+the table under "Transitions" shows.
 
 A command must itself bring the change to the watched workloads. It may return as soon as it has
 submitted the change; the tool watches from there. A command that hands the change to a controller
@@ -1008,6 +1019,10 @@ action holds no logic beyond fetching the binary and calling it. A caller whose 
 holds the binary needs no action: a plain step that runs `rollproof run` gives the same outputs
 and the same summary.
 
+Two things in this section rest on open points. That `env:` on the step that calls the action
+reaches the action's own steps is not shown (section 14, point 3). Neither is that the `outcome`
+output is kept when the step exits non-zero (point 4).
+
 The action uploads nothing. The documentation shows the caller's own upload step, which uses the
 `out` output.
 
@@ -1103,7 +1118,8 @@ from. A chart that takes only a tag writes the tag with the digest after it,
 `candidate@${images.orders.digest}`. The node's container runtime drops the tag from such a
 reference and asks the registry for the digest alone. Kubernetes still takes the default pull
 policy from the tag: `latest` before the digest gives `Always`, and any other tag gives
-`IfNotPresent`. The pull is by digest in both cases.
+`IfNotPresent`. The pull is by digest in both cases. The fall-back to the real registry and the
+dropped tag are read from the runtime's source and have not been run (section 14, point 1).
 
 `as` names the repository that the real manifests use, for example
 `registry.example/team/orders`. The tool stores the image under that path in the run's registry
@@ -1282,6 +1298,10 @@ results: /tmp/rollproof-orders-7f3a
     settle time started again, the text says what started it.
   - Every pass ends with the lists "exercised" and "not exercised" (see "What every report
     states").
+  - Three items that other sections promise. The probe's lines say how many of its lines were
+    JSON objects with no `ok` field, and, for an `https` URL, that the server's certificate was
+    not verified (section 6). The console names each variable that the tool took out of its
+    commands' environment (section 7).
 - **`result.json`.** The same facts for machines. It is the stable contract for wrappers, and it
   is written on every exit, a rejected configuration included. It holds:
   - a schema version;
@@ -1295,6 +1315,9 @@ results: /tmp/rollproof-orders-7f3a
   - for the Helm driver, the names of the values files and the top-level keys of the inline maps
     that the tool passed for each release, and never a value. Helm keeps the merged values and
     not where they came from, so this is the tool's own record. The commands driver gives none;
+  - how many of the probe's lines were JSON objects with no `ok` field, whether the built-in
+    probe ran without a certificate check, and the names of the variables that the tool took out
+    of its commands' environment;
   - the tool's version;
   - the cluster: its provider, which is `kind`, the provider's version, the Kubernetes version,
     the node image digest and the number of workers.
@@ -1410,7 +1433,9 @@ A line leaves the list when a fixture shows the tool catching what it names.
 **With a cluster.** The real binary runs against a fixture service. The fixture is a small Go HTTP
 service, copied from the experiments' test service, with switches for start delay and shutdown
 behaviour, and a chart whose values produce each variant. The previous release and the candidate
-are two images of it. The suite asserts the outcome and its reason code.
+are two images of it. They differ in content, by a version string built into each: one build
+under two tags has one digest, and a deploy from it to itself would replace no pod. The suite
+asserts the outcome and its reason code.
 
 | Fixture | Expected outcome |
 | --- | --- |
@@ -1509,14 +1534,15 @@ Graduation:
 ### Build order
 
 The design is more than one implementation plan. It is built in this order, and each step from
-the third on gets a plan of its own. The first plan covers steps 1 to 3.
+the fourth on gets a plan of its own. The first plan covers steps 1 to 3.
 
-1. **The host repository.** The decision row, the change to the host's citation check so that it
-   skips `projects/`, and this spec.
-2. **Proofs.** Open points 1 to 6 and 8 to 12 of section 14, as throwaway experiments or readings.
-3. **A walking skeleton.** The Helm driver, the built-in HTTP probe, `watch`, `verdict`, the
-   console report and `result.json`, on a local cluster. The first four fixtures of section 12
-   give their expected outcomes.
+1. **The host repository.** The decision row, the matching lines in the host's two rule files,
+   the change to the host's citation check so that it skips `projects/`, and this spec.
+2. **Proofs.** Open points 1 to 5 and 8 to 12 of section 14, as throwaway experiments or readings.
+3. **A walking skeleton.** `config`, `cluster`, `images` for local images, `run`, the Helm driver,
+   the built-in HTTP probe, `watch`, `verdict`, the console report and `result.json`. The tool
+   creates its own kind cluster and registry on the developer's machine. The first four fixtures
+   of section 12 give their expected outcomes.
 4. **The rest of the two contracts.** The custom probe, the commands driver, the `setup` commands,
    restart-only runs, and the remaining fixtures.
 5. **Enterprise settings.** `registries`, `as` in `images`, and the mirror job.
@@ -1525,7 +1551,10 @@ the third on gets a plan of its own. The first plan covers steps 1 to 3.
 
 ## 14. Open points for the plan
 
-The plan settles each of these with a test or a reading before anything is built on it.
+The plan settles each open point with a test or a reading before anything is built on what it
+decides. Points 6, 17 and 18 are settled and stay here for the record. Points 7 and 16 are settled
+by the fixture runs, and points 13 and 14 before the first release. Point 15 is a caveat with
+nothing to settle.
 
 1. **Registry order in the nodes.** That a node tries the run's registry first for a host and then
    falls back to the real registry is what the container runtime's documentation and source say
@@ -1780,4 +1809,4 @@ added to a node after it was created; which Go version Helm's released binaries 
 and where a pod goes when the node its volume is tied to cannot take it. That the hosted runner's
 Docker runs as root is read from the image's install script, which no page states. What is known
 of these is reasoned from the sources above or is the drafting session's own knowledge, and
-section 14 lists the points that need a test.
+section 14 lists those of them that need a test.
