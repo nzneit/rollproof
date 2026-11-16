@@ -80,6 +80,8 @@ func (c Container) Logs() (string, error) {
 // Creates the cluster rollproof-proof-NAME from cfg and returns when every
 // node is ready. It first deletes a cluster of that name. The kubeconfig is
 // a new file in a new temporary folder; the caller's own is not touched.
+// When kind's Create fails at its wait for a node's log line, Up deletes the
+// cluster and tries again, four attempts in all, and says so on standard error.
 func Up(ctx context.Context, name string, cfg *v1alpha4.Cluster) (*Lab, error) {
 	engine, err := pickEngine(ctx)
 	if err != nil {
@@ -192,16 +194,32 @@ func (l *Lab) up(ctx context.Context, cfg *v1alpha4.Cluster) error {
 		c.ContainerdConfigPatches = append(c.ContainerdConfigPatches, noNewKeyring)
 	}
 
-	start := time.Now()
-	if err := l.provider.Create(l.full,
-		cluster.CreateWithV1Alpha4Config(c),
-		cluster.CreateWithKubeconfigPath(l.kubeconfig),
-		cluster.CreateWithWaitForReady(0),
-		cluster.CreateWithRetain(false),
-		cluster.CreateWithDisplayUsage(false),
-		cluster.CreateWithDisplaySalutation(false),
-	); err != nil {
-		return fmt.Errorf("lab: creating the cluster %s: %w", l.full, withOutput(err))
+	// Through rootless nerdctl, kind's 30-second follow of a node's log
+	// sometimes misses a line that the log already holds (proof p08). Only
+	// that failure is tried again; start is the start of the last attempt.
+	const attempts = 4
+	var start time.Time
+	for attempt := 1; ; attempt++ {
+		start = time.Now()
+		err := l.provider.Create(l.full,
+			cluster.CreateWithV1Alpha4Config(c),
+			cluster.CreateWithKubeconfigPath(l.kubeconfig),
+			cluster.CreateWithWaitForReady(0),
+			cluster.CreateWithRetain(false),
+			cluster.CreateWithDisplayUsage(false),
+			cluster.CreateWithDisplaySalutation(false),
+		)
+		if err == nil {
+			break
+		}
+		createErr := fmt.Errorf("lab: creating the cluster %s: %w", l.full, withOutput(err))
+		if attempt == attempts || !strings.Contains(err.Error(), "could not find a log line that matches") {
+			return createErr
+		}
+		fmt.Fprintf(os.Stderr, "lab: Create attempt %d of %d failed at kind's wait for a node's log line; trying again\n", attempt, attempts)
+		if err := l.provider.Delete(l.full, l.kubeconfig); err != nil {
+			return errors.Join(createErr, fmt.Errorf("lab: deleting %s before attempt %d: %w", l.full, attempt+1, withOutput(err)))
+		}
 	}
 
 	rc, err := clientcmd.BuildConfigFromFlags("", l.kubeconfig)
