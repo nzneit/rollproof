@@ -1,15 +1,22 @@
 # rollproof: design
 
-Date: 2026-11-13. Revised on 2026-11-16.
+Date: 2026-11-13. Revised twice on 2026-11-16.
 
-Status: the design below was agreed section by section in conversation on 2026-11-13. A review on
-2026-11-14 proposed changes that make the public surface smaller and close gaps in the contracts.
-The maintainer accepted them on 2026-11-16, and this text includes them. This written form waits
-for the maintainer's review. No code exists yet.
+Status: the design below was agreed section by section in conversation on 2026-11-13. Two reviews
+followed.
 
-An AI session on a Fable model drafted this document with the maintainer, and a second AI agent on
-a Fable model reviewed it. Where a statement rests on a measurement or on a page that was read,
-section 16 names the source. Everything else is design, not fact, and nothing here has been run.
+- A review on 2026-11-14 proposed changes that make the public surface smaller and close gaps in
+  the contracts. The maintainer accepted them on 2026-11-16.
+- A review on 2026-11-16 asked how general the tool is and how far a pass can be trusted. Two
+  further agents then looked in documentation and source code for evidence for and against each
+  answer to it, and three answers changed. The maintainer accepted the result on 2026-11-16.
+
+This text includes both. This written form waits for the maintainer's review. No code exists yet.
+
+An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
+Fable model wrote each review, and two AI agents on an Opus model gathered the evidence. Where a
+statement rests on a measurement, a page or a source file that was read, section 16 names the
+source. Everything else is design, not fact, and nothing here has been run.
 
 `rollproof` is a working name. It has not been checked for collisions.
 
@@ -28,13 +35,45 @@ any other user.
 
 ### What a pass shows, and what it cannot
 
-A pass shows that, in a real Kubernetes control plane with real kubelets, the workload's manifests,
-probes and shutdown behaviour kept the probe free of failures while every pod was replaced twice.
+A pass shows that, in a real Kubernetes control plane with real kubelets, the manifests, probes
+and shutdown behaviour of the workloads that the report lists kept the probe free of failures
+while their pods were replaced, once by the deploy and once by the rollback.
 
-A pass in kind is necessary, not sufficient. A kind cluster has a handful of Services and applies
-endpoint changes within about a second. A production cluster can take longer to stop routing to a
-terminating pod. Nodes in kind are containers on one machine: there is no real network between
-them, no real node capacity and no cloud load balancer. Every report repeats this in one line.
+A pass is necessary, not sufficient. Every pass lists what the run exercised and what it did not
+(section 10). The main limits:
+
+- **The test cluster is small.** It has a handful of Services, and its nodes stop sending new
+  connections to a stopping pod within about a second. A production cluster can take longer, and
+  an ingress controller or a cloud load balancer learns of the change on a path of its own. A pod
+  that stops sooner than its real cluster stops routing to it refuses connections there and
+  passes here.
+- **The built-in probe opens a new connection for every request.** It sees a pod that takes
+  traffic before it can serve, and a pod that stops while it is still routed to. It does not see
+  a connection that a client kept open, or a request still in flight on a pod after new
+  connections have moved away from it (section 6).
+- **Nodes are containers on one machine.** There is no real network between them, no real node
+  capacity and no cloud load balancer. The probe's load is too small to need the capacity that a
+  rollout takes away.
+- **A custom probe is the caller's.** The tool vouches that it ran and reported, and for nothing
+  that it checks.
+
+### Who can use it
+
+The tool runs on Linux, beside a container engine that may run privileged containers (section 8).
+It tests Deployments, StatefulSets and DaemonSets that update by rolling (section 7). The built-in
+probe sends HTTP GET requests; anything else is a custom probe (section 6).
+
+It cannot be used, in the first release:
+
+- on a runner that is an unprivileged pod or container, or with a container engine on another
+  machine;
+- from a job that itself runs inside a container;
+- for pods that no Deployment, StatefulSet or DaemonSet manages;
+- with a deployer that changes the workload minutes after its command returned, such as a
+  controller that polls a Git repository.
+
+A real chart may need values of its own for the test before it starts in a small cluster with no
+cloud around it. The pass then covers the manifests with those values (section 9).
 
 ## 2. Decisions that shaped the design
 
@@ -65,7 +104,7 @@ Why one tool and a thin action, against a reusable workflow:
 - A reusable workflow is a whole job, so the caller cannot build its image in the same job. An
   action is a step.
 - One self-contained tool is one thing for an organization to allow, mirror and fork, and it gives
-  every user one local command that reproduces a CI failure.
+  every user on Linux one local command that reproduces a CI failure.
 
 Why kind is linked in: the kind that a GitHub-hosted runner carries changes with the runner image.
 Pinning kind inside the binary removes that moving part, and removes one tool the runner must hold.
@@ -82,17 +121,18 @@ these results from them:
 - **The gate needs two signals.** A run passed only when no request failed and
   `kubectl rollout status` exited 0. A variant with no node free for the extra pod failed no
   request; its rollout stalled, and only the exit code showed it.
-- **The client decides what is caught.** A client that opened a new connection per request caught
-  every broken variant in every run. A client that kept connections alive passed a service with no
-  readiness probe in 15 of 15 runs.
+- **The client decides what is caught.** A client that opened a new connection per request saw
+  failed requests in every run of every variant that fails requests. A client that kept
+  connections alive passed a service with no readiness probe in 15 of 15 runs.
 - **Failures continue after the rollout reports done.** For the variants that failed, about half or
   more of the failed requests began after `kubectl rollout status` had returned. That command does
   not wait for old pods to finish terminating. For the variants whose process exits as soon as it
   is told to stop, requests on new connections kept timing out until the load ended, up to about
   40 s after the rollout had finished.
-- **It fits a small runner.** On a 2-CPU hosted runner, 200 requests a second ran with no false
-  failure in 150 jobs. That bounds the false-failure rate at 2.0 % per job (95 %), for that
-  service, load and day. A job took about 4.5 minutes.
+- **It fits a small runner.** On a hosted runner with 2 CPUs, 200 requests a second ran with no
+  false failure in 150 jobs. That bounds the false-failure rate at 2.0 % per job (95 %), for that
+  service, load, runner size and day. A job took about 4.5 minutes. Two CPUs is the size GitHub
+  gives a private repository; a public one gets four.
 - **A digest reference needs a registry.** A pod whose image was referenced by digest did not start
   after either of kind's image-load commands. With a registry container in the job it started; the
   registry cost about 8 seconds to set up.
@@ -100,6 +140,18 @@ these results from them:
 What the experiments did not cover, and this design adds: a change of version, a rollback, a
 workload that is not their own test service, a chart, any registry that needs credentials, and
 anything other than HTTP GET.
+
+What the experiments could not show, and this design therefore does not claim:
+
+- **A pod that ends with work still on it.** No variant served after SIGTERM and then ended
+  without draining, and the kept-alive client's library sends a request again when a reused
+  connection fails. So the experiments say nothing about connections that a client holds open.
+- **How long a pod must keep serving.** The variants served for 0 s or 5 s after SIGTERM. The
+  shortest time that passes was not measured.
+- **That a stall carries over.** The variant with no free node stalled because the cluster had
+  exactly as many nodes as the workload needed. A real cluster usually has spare nodes.
+- **Capacity and latency.** No variant broke the surge numbers, the replica count or the grace
+  period alone, and the load was light: peak load and tail latency were not tested.
 
 ### Prior art
 
@@ -121,8 +173,8 @@ verdict    report, evidence, exit code
 ```
 
 1. **Set up.** Create a kind cluster with several nodes, start a registry container, put the
-   caller's images into it, and run the caller's `setup` commands.
-2. **Install** the previous release and wait until it is ready.
+   caller's images into it, create the probe's namespace, and run the caller's `setup` commands.
+2. **Install** the previous release and wait until it is ready (section 7).
 3. **Start the probe** and hold a steady window before anything changes.
 4. **Deploy the candidate.** Wait for the transition to finish, under a timeout, and keep the
    probe running for the settle time after it.
@@ -136,7 +188,7 @@ The time between the probe's start and its stop is divided into windows with no 
 the steady window, then one window for each transition. A transition's window runs from the moment
 the tool starts the transition until `limits.settle` after the transition has finished
 (section 7). The settle time is part of the window because failures go on after a rollout reports
-done (section 3).
+done (section 3). It has to be quiet: a pod change inside it puts the transition back in progress.
 
 ### When a run passes
 
@@ -147,14 +199,19 @@ A run passes only when all four hold:
 3. The probe produced observations for every window, with no silence longer than `limits.silence`.
 4. Every transition replaced at least one pod.
 
+The report lists, for every transition, how many pods of each watched workload were replaced. A
+workload of which none was replaced is marked "not exercised" and does not change the outcome
+(section 7).
+
 ### Three outcomes
 
 - **Pass.**
 - **Fail.** Downtime was seen, a transition stalled, or the command that performs a deploy or a
   rollback failed.
 - **Not verified.** The run could not judge: set-up broke, a `setup` command failed, the previous
-  release never became ready, the steady window was not clean, the probe gave no verdict for a
-  window, or a transition replaced no pod.
+  release never became ready, the install left nothing to watch or a workload of a form the tool
+  cannot judge, the steady window was not clean, the probe gave no verdict for a window, or a
+  transition replaced no pod.
 
 Not verified fails the job, as fail does. It is reported apart from fail, as "could not test", so
 that nobody reads a broken test as downtime or a skipped test as a pass. Section 10 gives the
@@ -168,6 +225,10 @@ it under the probe, which is what the experiments did. Nothing has to be switche
 transitions follow from what the configuration names (section 7). Every report of such a run says
 that only a restart was tested.
 
+The restart-only run is also the way in for a service that is broken today. While the previous
+release shuts down badly, every deploy fails in its window, whatever the candidate does, until a
+fixed release exists to deploy from. A restart of the candidate alone tests the candidate.
+
 ## 5. Components
 
 The tool is one Go binary. Each unit has one job.
@@ -178,7 +239,7 @@ The tool is one Go binary. Each unit has one job.
 | `cluster` | Creates and deletes the kind cluster and the run's registry, and writes mirror, certificate and credential settings into the nodes | kind, the container engine |
 | `images` | Puts the caller's images into the run's registry and returns their digests | The container engine, image archives |
 | `deploy` | The deploy contract: install, deploy, roll back, restart. A Helm driver and a commands driver. It also runs the caller's `setup` commands, with the commands driver's runner | Helm, or the caller's commands |
-| `watch` | Observes a transition: when it finished, whether it stalled, whether pods were replaced | The Kubernetes API |
+| `watch` | Observes the watched workloads: when a transition finished, whether it stalled, which pods were replaced and how long they took to stop. It follows the pods' status and logs while they live | The Kubernetes API |
 | `probe` | The probe contract: start, stop, collect observations. The built-in HTTP probe and the custom probe | The probe's pod |
 | `run` | Sequences the phases and marks the windows on the timeline | Only the two contracts, `cluster` and `watch` |
 | `verdict` | Turns observations and transition results into pass, fail or not verified, with reasons | Nothing. It is a pure function |
@@ -287,7 +348,8 @@ the two a line was written to.
 | `t` | no | When the check began, RFC 3339. Default: the time the line was written |
 | `n` | no | How many identical checks this line stands for. Default 1 |
 | `class` | no | A short label for the kind of failure, such as `refused` or `timeout` |
-| `ms` | no | How long the check took, in milliseconds |
+| `ms` | no | How long the check took, in milliseconds. On a line with `n`, the longest of them |
+| `lag` | no | How far behind its own schedule the check began, in milliseconds. On a line with `n`, the furthest of them |
 | `detail` | no | Free text for the evidence |
 
 Fields are only ever added to this table. The tool ignores a field it does not know and keeps it
@@ -325,27 +387,87 @@ begin after its result.
   was run. It sends SIGTERM and goes on reading the probe's lines until it exits, for at most 10
   seconds. A late result written in that time counts when its `t` falls inside a window. A probe
   that exits before the tool stops it makes the run not verified.
+- A probe whose results can arrive up to D seconds after a check began needs `limits.settle` of
+  at least D. Otherwise a failure that a transition caused is reported after that transition's
+  window has closed (rule 5 of section 10), or, for the last window, later than the 10 seconds
+  above, and then it is lost. The contract has no value for "not known yet".
 - The probe knows nothing of windows, transitions or thresholds.
 
-**Where probe pods run.** In a namespace of the tool's own, on the control-plane node, so that
-the worker nodes hold only the workload and the tool never watches a probe pod.
+**What the author owns.** The rate and the shape of the load are the probe author's. A loop that
+runs one check after another slows down when the workload does and reports at most one failure
+per timeout, where the built-in probe keeps its rate. What a probe cannot see, the tool cannot
+judge. A probe that opens a new connection for every check sees nothing of the connections that
+real clients hold, and for gRPC those are what a rollout breaks.
+
+**Where probe pods run.** These names are part of the contract:
+
+| What | Name |
+| --- | --- |
+| The namespace of every probe pod | `rollproof-probe` |
+| A label on every probe pod | `app.kubernetes.io/name: rollproof-probe` |
+| The probe's container | `probe` |
+
+They follow the tool's name, which is a working name (section 14).
+
+The tool creates the namespace before the `setup` commands run (section 7), so that `setup` can
+add to it what a probe needs: rights for its default service account, when a custom probe reads
+the Kubernetes API, or the label by which a mesh injects its proxy.
+
+A workload whose chart denies traffic by default needs a rule that lets the probe in. That rule
+belongs in the workload's namespace, beside the rule that denies. It selects the probe's namespace
+by the label `kubernetes.io/metadata.name`, which Kubernetes puts on every namespace, and the
+probe's pod by the label above. The test's values or a `setup` command add it. kind's own network
+plugin enforces such policies.
+
+The tool reads the log of the container named `probe` and judges an early exit by that container
+alone, so a proxy that a mesh injects into the pod does not break the contract. It does change
+what is tested: the probe's requests then pass through the mesh. A mesh's proxy may send a failed
+request again before the probe sees the failure (Istio does so twice by default), which hides
+failures, and a probe that starts before its proxy is ready reports failures in the steady window.
+
+Probe pods run on the control-plane node, so that the worker nodes hold only the workload and the
+tool never watches a probe pod. One consequence: a Service whose traffic policy is local to the
+node has no endpoint for a client on that node, and cannot be probed from there.
+
+The built-in probe's pod meets the `restricted` Pod Security level, so a label that `setup` puts
+on the namespace cannot keep it out. For a custom probe the image decides.
 
 ### The built-in HTTP probe
 
 It speaks the same contract. It is the tool's own binary, started as `rollproof probe http`.
 
 - **Open model.** Request *i* starts at start + *i*/rate, whatever earlier requests did.
+- **Requests.** HTTP GET to `probe.http.url`, with the headers of `probe.http.headers` when the
+  configuration gives any. A `Host` header sets the host that the request names. A URL may be
+  `https`. The probe then does not verify the server's certificate, as the kubelet's own HTTP
+  check does not, and the report says so.
 - **Connections.** It opens a new connection for every request. In the experiments only such a
   client caught a service with no readiness probe; a client that kept connections alive passed it
   in 15 of 15 runs.
+- **What it cannot see.** Once the cluster has stopped sending new connections to a stopping pod,
+  the probe has no connection to that pod. A connection that a real client kept open to it, and a
+  request still in flight on it, can then be cut with no trace in the probe. A pod that serves for
+  some seconds after SIGTERM and then ends without draining therefore passes. Section 12 keeps a
+  fixture for this known miss, and section 15 says why a stream of held connections waits.
 - **A failure** is a response outside the expected status range (default 200 to 299), a connection
   error, or no answer within the request timeout. The class is the status code, or one of
   `refused`, `reset`, `eof`, `timeout`, `other`.
 - **Output.** One line per failed request, with `t`, `class` and `ms`, and one summary line per
-  second for the requests that passed, with `n`.
+  second for the requests that passed: `n`, the longest of them in `ms`, and in `lag` the furthest
+  that any request of that second began behind its schedule.
 - **Names.** It resolves the URL's host once at start and then dials that address, so cluster DNS
   is not on the path of every request. A Service's cluster address does not change during a
-  rollout.
+  rollout. A headless Service has no cluster address: its name resolves to the addresses of pods,
+  and those change. Before it starts the probe, the tool looks up the Service that the URL's host
+  names, when it names one in the cluster, and a headless one makes the run not verified. The
+  text names the two ways out: a Service with a cluster address for the test, or a custom probe.
+
+**What to probe.** An endpoint that does what a caller's request does: it runs through the request
+path and reaches what the service depends on. A health endpoint is cheap and is often not on that
+path, so a probe of it can pass while callers fail. The experiments probed an endpoint that worked
+for 20 ms on every request. A probed request that runs longer than the pod keeps serving after
+SIGTERM is still in flight when the pod ends, and the probe sees it fail. That is the one view the
+built-in probe has of requests in flight.
 
 Inside `run`, a probe is this (a sketch; the plan may adjust it):
 
@@ -454,8 +576,9 @@ in the first release.
 
 **Setup commands.** `setup` is a list of commands. Each is an argument list, and the tool runs it
 the way the commands driver runs its own: directly, with no shell, on the runner, with
-`KUBECONFIG` set to the test cluster. They run in order, after the cluster is ready and the images
-are in the run's registry, and before the install. They are for what the workload needs and its
+`KUBECONFIG` set to the test cluster. They run in order, after the cluster is ready, the images
+are in the run's registry and the probe's namespace exists, and before the install. They are for
+what a probe needs in that namespace (section 6), and for what the workload needs and its
 chart does not bring: a Secret, a custom resource definition, a database, a broker. Whatever they
 create in `deploy.namespace` is watched like the workload, unless `deploy.selector` leaves it out,
 so a dependency belongs in a namespace of its own.
@@ -480,25 +603,45 @@ Helm runs with the runner's own configuration: its repositories and its registry
 ones the caller set up before the step. The tool adds the cluster and the namespace, and nothing
 else. The first release names the Helm major versions it is tested with (section 14).
 
-Helm is called without `--wait` and without `--atomic`. `watch` alone judges when a transition has
-finished, so both drivers are judged the same way. Helm hooks run as Helm runs them.
+Helm is called without `--wait` and without the flag that rolls a failed upgrade back (`--atomic`
+in Helm 3, `--rollback-on-failure` in Helm 4, where it also turns waiting on). In both majors Helm
+then returns before the rollout is complete. `watch` alone judges when a transition has finished,
+so both drivers are judged the same way. Helm hooks run as Helm runs them.
 
 **The commands driver.** Each command is an argument list. The tool starts it directly, with no
-shell, on the runner, with `KUBECONFIG` set to the test cluster. The command returns when the
-change has been applied; whether it also waits does not matter, because the tool watches either
-way. `install` is required. `deploy` and `rollback` are optional, as the table above shows.
+shell, on the runner, with `KUBECONFIG` set to the test cluster. `install` is required. `deploy`
+and `rollback` are optional, as the table above shows.
+
+A command must itself bring the change to the watched workloads. It may return as soon as it has
+submitted the change; the tool watches from there. A command that hands the change to a controller
+is covered only when the controller begins within `limits.settle` of the moment the transition
+looked finished (see "When a transition has finished"). A controller that polls a Git repository
+every few minutes is outside that. A team that deploys through one applies, with this driver, the
+manifests that the controller would apply: the readiness, shutdown and strategy under test are in
+the manifests, not in the controller.
 
 **When a command fails.** For both drivers, a non-zero exit of a `setup` command or of the install
 makes the run not verified, and a non-zero exit of a deploy or a rollback is a fail.
 
 **The restart.** The tool performs it itself, the same way for both drivers: it changes the pod
-template annotation that `kubectl rollout restart` changes, on every watched workload.
+template annotation that `kubectl rollout restart` changes, on every watched workload. A
+dependency that the chart bundles into the same namespace is restarted with the rest, unless
+`deploy.selector` leaves it out.
 
 **What is watched.** The Deployments, StatefulSets and DaemonSets in `deploy.namespace`,
 optionally narrowed by `deploy.selector`, a label selector. The rule is the same for both drivers.
-A chart that places workloads in a second namespace has only the named one watched. The project's
-own tests cover Deployments; StatefulSets and DaemonSets are watched and not tested in the first
-release.
+A chart that places workloads in a second namespace has only the named one watched.
+
+- **Nothing to watch.** When the install leaves no such workload, the run is not verified, and
+  the text names the namespace, the selector and the three kinds. Pods that some other controller
+  manages are not watched (section 15).
+- **Strategies.** A watched StatefulSet or DaemonSet must update by rolling. With `OnDelete`, a
+  changed template replaces no pod until someone deletes one, and `kubectl rollout status` gives
+  no status for any strategy but the rolling one. Such a workload makes the run not verified.
+- **Identity.** A pod is identified by its UID, never by its name. A StatefulSet's pod comes back
+  under the same name and is a new pod.
+- **Tests.** The project's own fixtures are Deployments, with one StatefulSet and one DaemonSet
+  (section 12).
 
 **When a transition has finished.** Both must hold:
 
@@ -507,14 +650,41 @@ release.
 - every pod of a watched workload that existed when the transition began and has been deleted is
   gone, not merely terminating.
 
-The transition's window then stays open for `limits.settle`.
+The transition's window then stays open for `limits.settle`, and that time has to be quiet. If,
+during it, a pod of a watched workload is created or deleted, or the spec of a watched workload
+changes, the transition has not finished after all: both conditions have to hold again, and the
+settle time starts again from there. A change of readiness or a restarted container does not
+start it again, because neither creates a pod or changes a spec.
 
-A transition that has not finished within `limits.timeout` has stalled. The same limit applies to
-the install and to the probe's start.
+The quiet time is what covers a second rollout that follows the first, for example when a
+controller restarts a workload after a Secret changed, and a command whose change begins a little
+after it returned. It does not cover a change that begins later than `limits.settle` after the
+transition looked finished.
 
-**Pods replaced.** A transition replaced pods when at least one pod of a watched workload that
-existed at its start is gone at its end and a new one has taken its place. A transition that
-replaced none is not verified: it changed nothing the test can judge.
+A transition that has not finished within `limits.timeout`, counted from its start, has stalled.
+When the settle time started again, the stall's text says what started it. The same limit applies
+to the install and to the probe's start.
+
+**When the install is ready.** When at least one workload is watched and both conditions hold. The
+settle time does not apply to the install; the steady window follows it.
+
+**Pods replaced.** For each watched workload the tool counts how many of the pods that existed at
+the start of a transition are gone at its end with new ones in their place. A transition replaced
+pods when that count is at least one for at least one workload. A transition that replaced none
+is not verified: it changed nothing the test can judge.
+
+The report lists the count for every workload, and a workload with none is marked "not exercised"
+(section 10). A run still passes when the workload behind the probe is one of those. A deploy that
+leaves a workload alone caused it no downtime, and the report says that its rollout was not
+tested.
+
+**How long old pods took to stop.** For each pod that a transition deleted, the tool notes when
+its own watch first saw the deletion and when the pod was gone. The report gives the shortest of
+these for each transition. It is an upper bound: that pod served for at most this long after it
+was told to stop, and the time includes the kubelet's clean-up. A small figure is a warning for a
+larger cluster (section 1). A large one proves nothing. The pod's own deletion timestamp is not
+used for this: it is the deadline, the time of the request plus the grace period, in whole
+seconds.
 
 Inside `run`, a deploy driver is this (a sketch; the plan may adjust it):
 
@@ -534,7 +704,7 @@ implementation plan.
 
 ### `internal/config` and `action.yml`
 
-Common case: a repo's workflow builds its image, then runs the test with one step; a developer reproduces that run on a laptop with one command.
+Common case: a repo's workflow builds its image, then runs the test with one step; a developer reproduces that run on a Linux laptop with one command.
 
 **A. One config file describes the run; the action takes its path**
 
@@ -554,14 +724,14 @@ deploy:
     previous:  { chart: oci://registry.example/charts/orders, version: "${env.PREVIOUS_VERSION}" }
     candidate: { chart: ./chart, values: [{ image: { digest: "${images.orders.digest}" } }] }
 probe:
-  http: { url: http://orders.orders.svc/healthz }
+  http: { url: http://orders.orders.svc/api/orders/latest }
 
 # the workflow
 - run: docker build -t orders:candidate .
 - uses: OWNER/rollproof@COMMIT
   env: { PREVIOUS_VERSION: 1.4.2 }
 
-# a laptop, the same in bash and fish
+# a Linux laptop
 env PREVIOUS_VERSION=1.4.2 rollproof run
 ```
 
@@ -582,10 +752,10 @@ env PREVIOUS_VERSION=1.4.2 rollproof run
       image.digest=sha256:…
     image: orders:candidate
     image-as: registry.example/team/orders
-    probe-url: http://orders.orders.svc/healthz
+    probe-url: http://orders.orders.svc/api/orders/latest
 
-# a laptop
-rollproof run --release orders --namespace orders --chart ./chart --previous-chart oci://registry.example/charts/orders --previous-version 1.4.2 --set image.digest=sha256:… --image orders:candidate --image-as registry.example/team/orders --probe-url http://orders.orders.svc/healthz
+# a Linux laptop
+rollproof run --release orders --namespace orders --chart ./chart --previous-chart oci://registry.example/charts/orders --previous-version 1.4.2 --set image.digest=sha256:… --image orders:candidate --image-as registry.example/team/orders --probe-url http://orders.orders.svc/api/orders/latest
 ```
 
 **C. A Go library called from the user's own test** (expected to lose)
@@ -604,7 +774,7 @@ Third design: not needed; option A leaves the caller one file and one step.
 | --- | --- | --- | --- |
 | Ease of use for the common caller | One file, one step, one local command | Nothing extra to learn, but long, and retyped locally | Must write Go |
 | Interface size | One schema, three action inputs, four flags | About thirty inputs, each duplicated as a flag | A Go API |
-| Generality | The same file on a laptop, on GitHub and on any other CI | Shaped by GitHub; another CI needs its own mapping | Anything Go can express |
+| Generality | The same file on a Linux laptop, on GitHub and on another CI system that meets the runner's requirements | Shaped by GitHub; another CI needs its own mapping | Anything Go can express |
 | Information hidden | No mapping between action and tool exists | String encodings for lists and maps show through | Library internals become the caller's concern |
 | Implementation simplicity | One loader and validator | Two lists kept in step | A stable public Go API to maintain |
 | Efficiency | No difference | No difference | No difference |
@@ -650,7 +820,8 @@ deploy:                     # section 7
 
 probe:                      # section 6
   http:
-    url: http://orders.orders.svc/healthz
+    url: http://orders.orders.svc/api/orders/latest
+    headers: { Host: orders.example }   # optional
     rate: 200
     timeout: 2s
     expect-status: 200-299
@@ -673,6 +844,11 @@ Exactly one of each pair must be present: `deploy.helm` or `deploy.commands`, `p
 
 `expect-status` is one status code, or one range written with a hyphen, both ends included.
 
+`headers` is a map of header names to values. The built-in probe sends them with every request.
+They are for what the workload needs in order to answer as it answers a caller: a host name, or
+the header that says the caller's connection was encrypted. They are not for a credential (see
+"Secrets").
+
 **Substitution.** It applies inside string values, never to keys. Two forms exist: `${env.NAME}`
 for an environment variable, and `${images.NAME.digest}` or `${images.NAME.ref}` for an image the
 `images` section put into the run's registry. Any other `${…}` is a configuration error, so a form
@@ -681,26 +857,34 @@ variable that is not set is a configuration error, never an empty string.
 
 **Secrets.** The one secret the tool handles is a registry password. `registries[].password` must
 be a single `${env.NAME}`; a password written in the file is rejected. The tool masks the value of
-every such password in everything it writes. The tool masks nothing else. A chart value or a
-probe's environment value is written as it was given, so a caller who passes a real secret there
-keeps the evidence to themselves.
+every such password in everything it writes. The tool masks nothing else. A chart value, a
+probe's environment value or a probe header's value is written as it was given, so a caller who
+passes a real secret there keeps the evidence to themselves. The console, the job summary and
+`result.json` give the names of the probe's headers and of the values files, and none of their
+values; the evidence folder may hold the values.
 
 ### Defaults, and the reason for each
 
 | Setting | Default | Reason |
 | --- | --- | --- |
 | `cluster.node-image` | The default node image of the linked kind release | kind pins it by digest and maintains it. A table of the tool's own would go stale with every kind release |
-| `cluster.workers` | 3 | The experiments' shape. It leaves a node free for the extra pod of a two-replica workload that spreads by node |
-| `probe.http.rate` | 200 a second | Measured to fit a 2-CPU hosted runner with no false failure in 150 jobs |
-| `probe.http.timeout` | 2 s | The experiments' value; the slowest request that succeeded on a hosted runner took 247 ms |
+| `cluster.workers` | 3 | A rolling update that adds a pod before it removes one needs a node for the extra pod. Three workers give that room to two replicas that must not share a node, which was the experiments' shape. A workload with three such replicas needs four workers (section 9) |
+| `probe.http.rate` | 200 a second | Measured to fit a hosted runner with 2 CPUs, with no false failure in 150 jobs, against a handler that sleeps. A handler that costs CPU may not hold this rate on a small runner. The steady window is then not clean, and the rate is lowered |
+| `probe.http.timeout` | 2 s | It is the caller's own latency rule: a slower request is a failure. 2 s is the experiments' value, where the slowest request that passed on a hosted runner took 247 ms. A service with a latency budget writes its budget here |
 | `probe.http.expect-status` | 200 to 299 | A redirect or an error page is not an answer from the workload |
-| `limits.steady` | 10 s | The experiments restarted 10 s after the load began |
-| `limits.settle` | 15 s | It has to catch the failures that begin only after a transition has finished. In the experiments those ended within about 3 s, in the variant with no readiness probe, and the tool also waits for old pods to be gone before the settle time starts. It does not have to outlast a failure that is already under way: one failure fails the window, and a failed window ends the run. 15 s is several times the 3 s; the fixture runs are to confirm it |
+| `limits.steady` | 10 s | Long enough to show that the probe and the workload work before anything changes: 2,000 checks at the default rate. It is not a control for a failure that is rare without any rollout; the paragraph below the table is for that |
+| `limits.settle` | 15 s | It has to catch the failures that begin only after a transition has finished. In the experiments those ended within about 3 s, in the variant with no readiness probe, and the tool also waits for old pods to be gone before the settle time starts. It does not have to outlast a failure that is already under way: one failure fails the window, and a failed window ends the run. 15 s is several times the 3 s; the fixture runs are to confirm it. It is also how long the tool waits for a second change to begin (section 7) |
 | `limits.timeout` | 5 minutes | Helm's own default wait, so a chart that deploys under Helm's default does not stall here. One limit covers the install, the probe's start and each transition |
 | `limits.silence` | 5 s | The built-in probe writes at least one line a second, so 5 s is five missed lines. A custom probe that checks less often raises it |
 
 There is no failure budget. A pass means that the probe reported no failure, which is the claim
 the tool is named for. Thresholds of other kinds are not in the first release (section 15).
+
+**A failure that no pod event explains.** With no budget, one failed request fails a run, and a
+workload may fail one request in some minutes with no rollout at all, or a small runner may
+starve the probe. The check for that is one run with `limits.steady: 5m`. A failure in that
+steady window is the workload's own baseline or the runner, not the rollout. The built-in probe
+also reports how far it ran behind its schedule (section 6), which shows a starved runner.
 
 ### The command line
 
@@ -747,14 +931,30 @@ and the same summary.
 The action uploads nothing. The documentation shows the caller's own upload step, which uses the
 `out` output.
 
-What the runner must hold: Linux, a container engine that kind supports, and `helm` on the PATH
-when the Helm driver is used. On any other system `run` stops with a message and exits 2.
+What the runner must hold: Linux; a container engine that kind supports, on the same host and in
+the same network namespace as the tool, that may run privileged containers; and `helm` on the PATH
+when the Helm driver is used. On a system other than Linux `run` stops with a message and exits 2.
+Section 9 lists the runners that this rules out.
+
+Each release says which CPU architectures it is built for and on which of them its cluster suite
+ran. The first release is built for amd64 and arm64, and its suite runs on amd64.
 
 ## 9. Cluster, images and enterprise settings
 
 ### The cluster
 
-- **Shape.** One control-plane node and `cluster.workers` worker nodes.
+- **Shape.** One control-plane node and `cluster.workers` worker nodes. Each worker carries a zone
+  label of its own (`topology.kubernetes.io/zone`), and the control-plane node carries none. A
+  workload that must spread by zone can then be scheduled. The probe's traffic starts on the
+  control-plane node, and a node with no zone ignores zone hints, so that traffic reaches every
+  endpoint as it would with no zones at all. Kubernetes' own multi-zone test job on kind has this
+  shape. One thing does change: a Service that asks for zone-local routing gets it between the
+  workload's own pods.
+- **What the shape decides.** A rolling update that adds a pod before it removes one needs room
+  for the extra pod. A workload with as many replicas as there are workers, and a rule that
+  forbids two of its pods on one node, has no room here and stalls. That stall shows that the
+  manifests cannot roll in a cluster of this shape. A real cluster usually has spare nodes. The
+  stall's text names `cluster.workers` when a pod could not be scheduled.
 - **Kubernetes version.** The node image decides it. The default is the default node image of the
   kind release the tool links, which kind pins by digest. `cluster.node-image` names another by
   full reference; that is how a mirror is used, and how a job matrix covers several versions. The
@@ -777,6 +977,24 @@ when the Helm driver is used. On any other system `run` stops with a message and
   then a release of this tool. The project accepts that rhythm and automates it: a dependency
   update that moves kind runs the cluster suite, and a green run is released.
 
+### Values for the test
+
+A chart written for production may not start in this cluster as it is. The usual reasons:
+
+- resource requests sized for production nodes, on a runner with two or four CPUs;
+- a storage class by name, where kind has one class, `standard`;
+- node selectors or tolerations for node pools that these nodes are not in;
+- a readiness gate that a cloud controller sets: a condition that nobody sets counts as false,
+  and the pod is never ready;
+- cloud identity or cloud services that the pods need in order to start;
+- a Service of type LoadBalancer, which nothing here fulfils, and an autoscaler, which has no
+  metrics here.
+
+Each is answered by a values file for the test, or by a `setup` command. The pass then covers the
+manifests with those values, and the report names the values files that were used (section 10). A
+values file for the test may change sizes, classes and placement. It should not change what is
+under test: the probes, the update strategy, the grace period and the shutdown hooks.
+
 ### The run's registry
 
 The tool starts a registry container on the cluster's network, after the cluster exists, and
@@ -792,6 +1010,13 @@ where the image is now:
 - `archive: PATH`: an image archive file.
 
 The tool puts the image into the run's registry and records its digest.
+
+The image is stored by digest only, never under a tag. A tag can come to name another image with
+no sign of it. When the run's registry does not hold a tag, or cannot be reached, a node goes on
+to the real registry and runs whatever that tag names there; and a node that already holds an
+image under a tag does not pull that tag again. A digest names one content, wherever it is pulled
+from. A chart that takes only a tag writes the tag with the digest after it,
+`candidate@${images.orders.digest}`: Kubernetes pulls such a reference by its digest alone.
 
 `as` names the repository that the real manifests use, for example
 `registry.example/team/orders`. The tool stores the image under that path in the run's registry
@@ -822,8 +1047,21 @@ copied into a node.
 The entry configures nothing else. Helm runs with the runner's own configuration (section 7), and
 the tool itself pulls from no registry.
 
-A mirror that itself needs credentials is listed as a host of its own. Whether that is enough is
-open (section 14).
+`mirror` is a host, with or without a path. The node's container runtime puts the registry API's
+own path after it. A cache that expects its project name inside that API path, and not before it,
+needs a different node setting, and how `mirror` says which of the two it names is open
+(section 14).
+
+What the source of the kubelet and of the container runtime shows about credentials (read, not
+run; section 16): the kubelet looks credentials up by the registry host in the image's own name,
+and passes them on with no host attached. The container runtime then offers them to every host it
+contacts for that pull. Two things follow.
+
+- An entry's username and password reach the entry's mirror too. The caller must trust the mirror
+  with them.
+- Credentials listed under a mirror's own host are never used for an image that is named after the
+  original host. A mirror that needs credentials of its own needs another mechanism in the node,
+  and that is open (section 14).
 
 Pods may still use `imagePullSecrets` from their own chart. The tool does nothing for them and
 does not get in their way.
@@ -837,11 +1075,18 @@ does not get in their way.
   set up for Helm by the caller, before the step.
 - **Proxies.** kind passes `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` into its nodes. This is
   documentation only.
-- **Runners inside Kubernetes pods.** kind needs privileged containers. This is documented as a
+- **Runners inside Kubernetes pods.** kind needs privileged containers. A runner pod that may run
+  them, with a container engine inside it, is a runner like any other. One that may not cannot
+  run the tool; GitHub's smallest hosted runner is such a container. This is documented as a
   requirement and not solved.
+- **Jobs inside a container, and engines elsewhere.** The tool reaches the cluster's API server
+  and the run's registry on the engine host's own loopback address. A job that runs inside a
+  container is in another network namespace, and an engine on another machine is another host.
+  Neither is supported in the first release (section 15).
 - **Engines other than Docker.** kind marks its Podman and nerdctl providers experimental. Docker
   is the supported engine. The project is developed on nerdctl, so nerdctl is expected to work and
-  is not promised.
+  is not promised. An engine that runs without root counts as one that may run privileged
+  containers.
 
 ## 10. Verdict and report
 
@@ -870,8 +1115,47 @@ in the next run.
 
 ### What a run writes
 
+A run that passed:
+
 ```
-rollproof: FAIL   orders (Helm) on Kubernetes v1.37.0 in kind, probe: built-in HTTP
+rollproof: PASS   orders (Helm) on Kubernetes v1.37.0 in kind
+
+probe       built-in HTTP: GET http://orders.orders.svc/api/orders/latest
+            200 a second (one check every 5 ms), timeout 2 s, status 200-299
+            slowest passed request 212 ms; furthest behind schedule 38 ms
+
+window      length   checks   failed   after finish   result
+steady      10.0 s    2,000        0              -   clean
+deploy      33.4 s    6,680        0              0   pass
+roll back   33.9 s    6,780        0              0   pass
+
+transition  workload            pods replaced   quickest stop
+deploy      deployment/orders   2 of 2          5.3 s
+roll back   deployment/orders   2 of 2          5.2 s
+
+exercised
+  deploy      the candidate's start-up and the previous release's shutdown
+  roll back   the previous release's start-up and the candidate's shutdown
+  values      previous: chart defaults; candidate: inline (image)
+not exercised
+  the delay before a larger cluster stops routing to a stopping pod
+  connections held open, and requests in flight on a pod after new connections left it
+  the path through an ingress, a load balancer or a mesh
+  capacity while pods are down, and autoscaling
+  latency below the timeout
+  data migrations
+  a node drain
+
+results: /tmp/rollproof-orders-7f3a
+```
+
+A run that failed:
+
+```
+rollproof: FAIL   orders (Helm) on Kubernetes v1.37.0 in kind
+
+probe       built-in HTTP: GET http://orders.orders.svc/api/orders/latest
+            200 a second (one check every 5 ms), timeout 2 s, status 200-299
 
 window      length   checks   failed   after finish   result
 steady      10.0 s    2,000        0              -   clean
@@ -879,30 +1163,60 @@ deploy      29.1 s    5,820      243             31   FAIL
 roll back        -        -        -              -   not run
 
 deploy: 243 checks failed (refused 198, timeout 45), first at 10:00:07.31
+  stopping then   orders-6d5f9c-x2k4q (previous release), told to stop 0.3 s before
+  starting then   none
 results: /tmp/rollproof-orders-7f3a
 ```
 
-- **Console.** The summary above. The column "after finish" counts the failures that fell in the
-  settle time.
+- **Console.** The summaries above.
+  - The probe's lines give its target and its settings. A probe or limit value that differs from
+    its default is printed with the default beside it, so that a weakened test shows. A custom
+    probe is named by its image digest, with the line "a custom probe judged this run; the tool
+    does not know what it checks".
+  - The column "after finish" counts the failures that fell in the settle time.
+  - The second table lists every watched workload for every transition. A workload of which no
+    pod was replaced reads "not exercised". "Quickest stop" is the figure of section 7: the old
+    pod that was gone soonest served for at most that long after it was told to stop.
+  - On probe failures, the lines under the count name the watched pods that were stopping
+    (deleted, not gone) or starting (created, not ready) at the moment of the first failure, and
+    the release each belongs to. They say what was happening and name no cause.
+  - On a stall, the console lists each watched workload that is not complete, with its counts,
+    and each pod that is not ready: its phase, why it is not scheduled, the state of its
+    containers and how each last ended. Those come from the pod's status. The last event message
+    follows them; Kubernetes keeps events as best effort. When a pod could not be scheduled, the
+    text names the cluster's shape and `cluster.workers`. When the settle time started again, the
+    text says what started it.
+  - Every pass ends with the lists "exercised" and "not exercised" (see "What every report
+    states").
 - **`result.json`.** The same facts for machines. It is the stable contract for wrappers, and it
   is written on every exit, a rejected configuration included. It holds:
   - a schema version;
   - the outcome, and its reasons, each one a code from the table below with a text beside it;
-  - every window and every transition;
+  - every window, with its counts, the slowest request that passed and the furthest lag that the
+    probe reported;
+  - every transition, with each watched workload's pods replaced and pods at the start, the
+    quickest stop, and what started the settle time again, if anything did;
   - the probes that judged the run, as a list that has one entry in the first release, each with
-    its settings;
+    its settings and their defaults, and with the names of its headers in place of the headers;
+  - for the Helm driver, the names of the values files and the top-level keys of the inline maps
+    that the tool passed for each release, and never a value. Helm keeps the merged values and
+    not where they came from, so this is the tool's own record. The commands driver gives none;
   - the tool's version;
-  - the cluster: its provider, which is `kind`, the provider's version, the Kubernetes version and
-    the node image digest.
+  - the cluster: its provider, which is `kind`, the provider's version, the Kubernetes version,
+    the node image digest and the number of workers.
 
-  Within a schema version, fields and reason codes are added and never changed.
-- **GitHub job summary.** The same table as Markdown, written only when the tool detects GitHub
-  Actions.
+  Within a schema version, fields and reason codes are added and never changed. The list of what
+  a pass did not exercise is text for people: `result.json` carries the facts behind it and no
+  codes for it.
+- **GitHub job summary.** The same tables and lists as Markdown, written only when the tool
+  detects GitHub Actions.
 - **Evidence folder.** The probe's raw lines; the window boundaries; a per-second timeline that
   puts failure counts beside pod events (created, ready, deleted, gone); the namespace's events;
-  the pod lists before and after each transition; the logs of the replaced pods; the commands the
-  tool ran with their output; and kind's own logs when set-up failed. Its layout is not a
-  contract.
+  the pod lists before and after each transition; the logs of every pod of a watched workload,
+  old and new; the commands the tool ran with their output; and kind's own logs when set-up
+  failed. The tool follows each pod's log while the pod lives, because a pod's log cannot be read
+  once the pod is gone, and it adds the previous run of a restarted container where the kubelet
+  still holds it. The folder's layout is not a contract.
 
 ### Reasons
 
@@ -916,6 +1230,8 @@ results: /tmp/rollproof-orders-7f3a
 | `cluster-failed` | not verified | The cluster, the run's registry or an image could not be set up |
 | `setup-failed` | not verified | A `setup` command exited non-zero |
 | `install-failed` | not verified | The install exited non-zero, or the release was not ready inside `limits.timeout` |
+| `nothing-watched` | not verified | After the install, no Deployment, StatefulSet or DaemonSet matched `deploy.namespace` and `deploy.selector` |
+| `workload-unsupported` | not verified | A watched StatefulSet or DaemonSet has an update strategy other than the rolling one, or the built-in probe's URL names a headless Service |
 | `probe-not-started` | not verified | No observation arrived inside `limits.timeout` |
 | `probe-exited` | not verified | The probe exited before the tool stopped it |
 | `probe-line-invalid` | not verified | A line broke the probe contract |
@@ -927,17 +1243,36 @@ results: /tmp/rollproof-orders-7f3a
 
 ### What every report states
 
-- Which probe judged the run. A custom probe is named by its image digest.
-- Which transitions were tested, so a restart-only run cannot be mistaken for a deploy and a
-  rollback.
-- The caveat of section 1: a pass in kind is necessary, not sufficient.
+- Which probe judged the run, with its target and its settings. A custom probe is named by its
+  image digest.
+- Which transitions were tested, and what each exercised. A deploy tests the candidate's start-up
+  and the previous release's shutdown. A rollback tests the previous release's start-up and the
+  candidate's shutdown. A restart tests both, of the one release. A run with a deploy and no
+  rollback says that the candidate's shutdown was not exercised, and a restart-only run cannot be
+  mistaken for a deploy and a rollback.
+- Which workloads had pods replaced, and which had none.
+- On a pass, what was not exercised.
+
+The list of what a pass did not exercise is fixed, and each line has a fact behind it:
+
+| Not exercised | Why |
+| --- | --- |
+| The delay before a larger cluster stops routing to a stopping pod | The test cluster applies the change within about a second (section 1) |
+| Connections held open, and requests in flight on a pod after new connections left it | The built-in probe opens a new connection for every request (section 6). With a custom probe the line reads "whatever the custom probe does not check" |
+| The path through an ingress, a load balancer or a mesh | The built-in probe enters at the Service. Those components learn of a pod change on a path of their own |
+| Capacity while pods are down, and autoscaling | The probe's load needs no capacity, and an autoscaler has no metrics here |
+| Latency below the timeout | A request that answers inside `probe.http.timeout` is a pass. The slowest one is reported |
+| Data migrations | The tool runs none and checks none |
+| A node drain | A drain evicts pods under a disruption budget, and a rolling update is not limited by one. It is another transition |
+
+A line leaves the list when a fixture shows the tool catching what it names.
 
 ### Limits
 
-- **No diagnosis.** The timeline shows when failures happened relative to pods starting and
-  stopping. The tool does not guess the cause.
+- **No diagnosis.** The report says which pods were starting or stopping when the first failure
+  came, and the timeline shows the rest. The tool does not guess the cause.
 - **Workload logs are not masked.** The tool masks registry passwords everywhere it writes, but
-  the logs of the replaced pods are the workload's own text. The caller decides whether to upload
+  the logs of the watched pods are the workload's own text. The caller decides whether to upload
   the evidence.
 
 ## 11. Security
@@ -946,6 +1281,10 @@ results: /tmp/rollproof-orders-7f3a
   Nothing else is masked (section 8). This rule has not had a security review (section 14).
 - The credentials file mounted into the nodes holds only the hosts the configuration lists.
   Temporary files that hold credentials are removed when the run ends.
+- A registry entry's credentials are offered to that entry's mirror as well as to its host
+  (section 9). A caller lists a mirror only when the mirror may see them.
+- The built-in probe does not verify a server's certificate. It sends nothing secret, unless the
+  caller put a credential into a header, and a header's value is not masked.
 - The tool does not read, copy or change the runner's Helm logins or its container engine's.
 - kind runs its node containers privileged. That is a property of kind, and it is why the tool
   belongs on a runner that is discarded or trusted.
@@ -961,6 +1300,9 @@ results: /tmp/rollproof-orders-7f3a
   written in the file, a combination of releases or commands that section 7 rejects, both or
   neither of a pair that needs exactly one.
 - Probe-line parsing, assignment to windows, and silence detection, on a fake clock.
+- The rules of `watch`, on recorded API objects and a fake clock: when a transition has finished,
+  the quiet time and what starts it again, pods counted by UID, nothing to watch, a strategy
+  other than the rolling one, a headless Service, the quickest stop.
 - Golden files for the report formats and for the kind configuration and node settings the tool
   generates.
 - The deploy drivers against a fake command runner that records the arguments.
@@ -972,7 +1314,7 @@ are two images of it. The suite asserts the outcome and its reason code.
 
 | Fixture | Expected outcome |
 | --- | --- |
-| Both releases follow the rules | Pass |
+| Both releases report ready only when they can serve, and after SIGTERM serve on and then drain | Pass |
 | The candidate has no readiness probe | Fail, in the deploy window; the rollback is not run |
 | The candidate exits on SIGTERM | Fail, in the rollback window |
 | No node is free for the extra pod | Fail, the deploy stalls |
@@ -983,24 +1325,50 @@ are two images of it. The suite asserts the outcome and its reason code.
 | The previous release never becomes ready | Not verified |
 | A `setup` command fails | Not verified |
 | No previous release is named | Pass, reported as restart only |
+| Both releases serve for 5 s after SIGTERM and then end without draining | Pass. A known miss of the built-in probe (section 6) |
+| A second rollout starts 5 s after the deploy's first one has finished | Pass, and the deploy's window covers both rollouts |
+| The chart denies traffic by default, and the test's values let the probe in | Pass |
+| A custom probe, the TCP loop of section 6, judges the first fixture | Pass |
+| The same custom probe judges a candidate with no readiness probe | Fail, in the deploy window |
+| The workload is a StatefulSet behind a Service with a cluster address | Pass |
+| The workload is a DaemonSet behind a Service with a cluster address | Pass |
+
+The first row is the fixture that the other rows change one thing of. This document calls it the
+first fixture.
 
 The third row is why the rollback leg exists. A candidate that shuts down badly passes its own
 deploy, because the pods that stop during the deploy belong to the previous release. The fifth row
 is the case that rule 1 of section 10 was written for.
 
-Every fixture is a Deployment. No fixture uses a StatefulSet or a DaemonSet.
+The twelfth row is kept so that the limit is tested and stated, and not found by a user. Its
+expected outcome is reasoned from how the cluster routes; no run has shown it yet. If it ever
+fails, the limit has moved and section 6 is out of date.
+
+The custom-probe rows are the only ones in which a probe the tool did not write judges a real
+transition. Every other fixture uses the built-in probe, and every fixture but the last two is a
+Deployment.
 
 **The mirror job.** Every image comes from a mirror inside the job, and the job fails if anything
-reached a public registry. This is the proof of the mirror and certificate settings.
+reached a public registry. This is the proof of the mirror and certificate settings. It includes a
+mirror that sits under a path of its host.
 
-**The action.** A workflow uses the action from its own repository on the compliant fixture.
+**The action.** A workflow uses the action from its own repository on the first fixture.
 
-**The false-failure bound.** The project states its bound, from repeated runs of the compliant
+**The false-failure bound.** The project states its bound, from repeated runs of the first
 fixture, and its catch counts for the broken ones, as the second experiment did. The statement
-carries its date and the versions it was measured with. It is measured again when something that
-affects it changes: the built-in probe, a timing default, the fixture, or the size of the runner.
-A release in between carries the last statement forward. How many runs is set when the project has
-a public repository.
+carries its date, the versions and the runner's size it was measured with. It is the bound of
+that fixture on that runner: a small service whose handler sleeps. It is measured again when
+something that affects it changes: the built-in probe, a timing default, the fixture, or the size
+of the runner. A release in between carries the last statement forward. How many runs is set when
+the project has a public repository.
+
+Two more measurements go with it:
+
+- **How long a pod must serve here.** The first fixture runs with its time of serving after
+  SIGTERM at 0, 0.5, 1 and 2 s, and the statement gives the shortest that passed. That is the
+  margin this cluster demands; section 1 says why a larger cluster demands more.
+- **A start that costs CPU.** One cell whose start-up uses a full CPU for some seconds, so that a
+  workload that is heavy at its start is in the picture before the README quotes a bound.
 
 ## 13. Layout, incubation and graduation
 
@@ -1060,13 +1428,22 @@ the third on gets a plan of its own. The first plan covers steps 1 to 3.
 The plan settles each of these with a test or a reading before anything is built on it.
 
 1. **Registry order in the nodes.** That a node tries the run's registry first for a host and then
-   falls back to the real registry is known container-runtime behaviour, but it has not been run
-   for this design. First task of the plan.
-2. **Mirrors that need credentials.** Whether the credentials file in a node is used for a mirror
-   host as it is for the original host has not been run. The kubelet matches a node's credentials
-   against the name of the image being pulled, so credentials listed for a mirror's host may never
-   be offered for an image named after the original host, and a second mechanism in the container
-   runtime may be needed. An authenticated mirror is the usual enterprise case. Same task.
+   falls back to the real registry is what the container runtime's documentation and source say
+   (section 16), but it has not been run for this design. First task of the plan. The same task
+   proves three more things:
+   - that a reference by digest is served by the run's registry when its node entry may serve
+     pulls and may not resolve tags, so that a tag is never answered by the run's registry;
+   - that a reference with a tag and a digest is pulled by the digest;
+   - what a mirror under a path needs. The runtime puts the registry API's path after a mirror's
+     path. A cache that wants its project name inside the API path needs the runtime's path
+     override, and `mirror` then needs a way to say which of the two it names.
+2. **Mirrors that need credentials.** Read in source and not run (section 9): an entry's
+   credentials reach its mirror, and credentials listed under the mirror's own host are never
+   used. The task confirms both with a run. It also finds the mechanism for a mirror whose
+   credentials differ from the original host's: the container runtime's own setting per host,
+   which its documentation calls deprecated, or a header in the mirror's node entry. Credentials
+   that a credential-provider plugin of the kubelet supplies were not read. An authenticated
+   mirror is the usual enterprise case. Same task.
 3. **Environment variables into a composite action.** Whether `env:` on the step that calls a
    composite action reaches the action's inner steps was not found in the pages read. The plan
    settles it with a run. If it does not, the values are passed as inputs.
@@ -1075,7 +1452,9 @@ The plan settles each of these with a test or a reading before anything is built
    output depends on it.
 5. **Helm on hosted runners.** The experiments recorded Docker, kind and kubectl on the hosted
    runner image, not Helm. The plan checks it, and names the Helm major versions the first release
-   is tested with.
+   is tested with. Helm 4 differs from Helm 3 where this design touches it: it applies on the
+   server by default, and its flags for waiting and for rolling back on failure have other names
+   (section 7). The fixtures run under each major that the release names.
 6. **A Helm rollback with no revision.** If `helm rollback` without a revision goes back to the
    release before the last one, the tool need not read the revision after the install.
 7. **The settle default.** 15 s rests on one variant of one service. The fixture runs confirm it
@@ -1090,25 +1469,57 @@ The plan settles each of these with a test or a reading before anything is built
     can be imported. Copied rules have to be read again at every Kubernetes minor.
 11. **A pod's log across rotation.** The kubelet rotates a container's log at 10 MiB by default.
     Whether following the log through the API survives a rotation was not checked. A custom probe
-    that prints a line for every check at a high rate reaches that size within minutes.
+    that prints a line for every check at a high rate reaches that size within minutes. The tool
+    follows the log of every watched pod too (section 10), so the answer matters for both.
 12. **Keys on a rootless engine.** How many kernel keys one cluster uses through a run without the
     setting of section 9. The experiments met the quota with four clusters at once. If one cluster
     stays well under it, the setting leaves the tool.
-13. **Masking.** The rule of section 8 needs a security reviewer's eye before the first release.
-14. **The name.**
+13. **Masking, and what leaves the runner.** The rule of section 8 needs a security reviewer's eye
+    before the first release. So do two facts of section 11: a registry entry's credentials reach
+    its mirror, and the value of a probe header is not masked.
+14. **The name.** The probe's namespace and label carry it (section 6).
 15. **Prior art.** The search could not read GitHub Marketplace in full text and did not open
     several tools. Finding an existing tool later would change the project's reason to exist, not
     this design.
+16. **A large image.** The experiments' image was 5.5 MB. Every node keeps its own copy of an
+    image, and kind turns off the kubelet's clean-up of images and its eviction on a full disk,
+    so a full disk is not recovered. A hosted runner has a 14 GB disk. The first pull of the
+    candidate on each node falls inside the deploy's window. A run with the fixture padded to
+    about 1 GB measures disk, pull time and false failures. After it the project decides whether
+    the tool pulls the listed images into the nodes before the steady window. It is measured with
+    the fixture series, not among the proofs of the build order's second step.
 
 ## 15. Not in the first release
 
 - A rollback that interrupts a half-finished deploy.
 - A Helm deploy with no rollback, and a restart after a rollback.
 - Canary and blue-green controllers, and their custom resources.
+- Pods whose chain of controllers does not lead to a Deployment, a StatefulSet or a DaemonSet: an
+  operator that creates its pods itself, or a controller with a workload resource of its own.
+- A StatefulSet or a DaemonSet with an update strategy other than the rolling one.
+- A deployer that begins its change later than the settle time after its command returned, such
+  as a controller that polls a Git repository.
 - Traffic through an ingress as a built-in probe. A custom probe can do it.
 - gRPC as a built-in probe.
-- A built-in probe that keeps connections alive. In the experiments it caught nothing that a new
-  connection per request missed.
+- A stream of held connections in the built-in probe. It would see what the probe misses today
+  (section 6). It waits for a measurement: on HTTP/1.1 a server that shuts down correctly may
+  close an idle connection just as a client sends a request on it, so such a stream can fail
+  against a correct server. The experiments' kept-alive client showed nothing either way: its
+  library sends such a request again, and no variant ended with connections open.
+- A headless Service, or a Service whose traffic policy is local to the node, as the built-in
+  probe's target.
+- A certificate check, a client certificate, or a method other than GET in the built-in probe.
+- A rule that makes a run not verified when no pod behind the probed Service was replaced. The
+  report shows it (section 7).
+- A setting that makes the test cluster slower to stop routing to a stopping pod. The proxy's
+  shortest time between syncs looks, from its source, to delay only a change that follows another
+  closely, so it would not give a delay that can be set. That is a reading, not a run.
+- An image stored under a tag in the run's registry (section 9).
+- A runner that is an unprivileged pod, a job that runs inside a container, and a container engine
+  on another machine. For a job inside a container the sources show a way that nobody has run:
+  the runner mounts the engine's socket into the job's container, and kind can give the cluster's
+  internal address on its own network.
+- Node labels from the configuration, other than the zone label the tool sets.
 - A probe that runs on the runner.
 - More than one probe in a run.
 - A failure budget, and thresholds of other kinds: a share of checks, a longest outage, a latency.
@@ -1168,7 +1579,37 @@ found what the review reported; it did not open the others.
 | Kubernetes documentation, "Well-Known Labels, Annotations and Taints" | The annotation that a restart changes |
 | kind, "Design Principles" and "1.0 Roadmap" | That kind calls itself alpha grade and has no compatibility plan between node images and releases |
 
-Not read for this design: any container-runtime documentation, any Helm documentation, any kubectl
-source, and no Kubernetes documentation beyond the pages above. What sections 6, 7 and 9 say about
-those is from the drafting session's own knowledge, and section 14 lists the points that need a
-test.
+Read on 2026-11-16 by two AI agents on an Opus model, which looked for evidence for and against
+each answer to the second review. Local clones are the ones named above. The other sources were
+fetched that day at the tag or commit given. The drafting session then opened about twenty of the
+passages that decide a point, in the kubelet, kube-proxy, kubectl, the container runtime, Go, the
+runner and the multi-zone job, and found them as reported. Nothing was run. The agents' reports,
+which quote each passage, are not filed in the repository.
+
+| Source | What this design takes from it |
+| --- | --- |
+| Kubernetes source at `v1.37.0`: kubectl's rollout status and restart | The conditions for a complete rollout of each kind, that an unchanged workload is complete at once, that no condition waits for terminating pods, that a strategy other than the rolling one gets no status, and the annotation a restart changes |
+| The same: the API server's graceful deletion | That a pod's deletion timestamp is the request time plus the grace period, in whole seconds |
+| The same: kube-proxy | That established TCP connections to a removed endpoint are left alone, that its shortest time between syncs is 1 s by default, and that a node with no zone ignores zone hints |
+| The same: the kubelet and its credential keyring | That credentials are looked up by the image's own name and passed on with no host attached; that an image is pulled as the first step of starting a container |
+| The same: the scheduler's spread and affinity plugins | How a node without the topology key is treated |
+| containerd at `v2.3.4`: its registry-hosts document, its resolver and its CRI image pull | The order of hosts and the fall-back, that a tag needs a host that may resolve and a digest does not, that a missing tag falls through to the next host, where the API path goes after a mirror's path, and that credentials with no host attached are offered to every host |
+| Go at `go1.27.4`: the HTTP client and server | When the client sends a request again on its own, and what a graceful shutdown does with idle and active connections |
+| RFC 9112, section 9.5, and RFC 9110, section 9.2.2 | The race between a server that closes an idle connection and a client that sends on it |
+| Kubernetes enhancement 3960, the sleep action for a preStop hook | That "sleep, then stop" is promoted for zero-downtime shutdown, and that it speaks of new connections only |
+| Helm at `v3.22.1` and `v4.3.2` | That an upgrade returns before the rollout is complete unless told to wait, the flag names of each major, that an unchanged resource is not patched, and that a release stores the merged values and not their sources |
+| Stakater Reloader at `v1.4.24`, and Argo CD's documentation at `v3.6.1` | That a reloader changes the pod template some time after a Secret changed; that a GitOps controller polls on an interval of minutes |
+| GitHub's runner at `v2.338.2` | That the engine's socket is mounted into a job's container |
+| The `kubernetes/test-infra` repository at `51bd8b7f`, the multi-zone job on kind | The cluster shape with a zone on each worker and none on the control-plane node |
+| Istio's documentation at `167b0ad6` | How a pod is chosen for injection, the default of two retries, and the start-up order of proxy and application |
+| Kubernetes documentation, at the clone named above: pod lifecycle, EndpointSlices, virtual IPs, network policies, StatefulSets, DaemonSet updates, Services, traffic policy, topology spread, topology-aware routing, probes, images, disruptions, Deployments, logging, access control | The facts behind sections 6, 7, 9 and 10 that those sections state without a source of their own |
+| kind at `1a24c920`: its network plugin, its node and cluster settings, its guides on rootless engines and local registries | That its plugin enforces network policies, that nodes can carry labels, that the control-plane node keeps its taint in a cluster of several nodes, the one storage class, the API server's default address, and that image clean-up and disk eviction are off |
+| GitHub Docs, at the clone named above: hosted runners, the runner controller, secrets | The sizes of hosted runners for public and private repositories, the 14 GB disk, the arm64 runners, the smallest runner's limits, the runner controller's container modes, and what is masked in a job log |
+| fortio's and k6's documentation | That open-model load tools report how far they ran behind their schedule, as information |
+
+Still not shown by any run or any page: that the fixture for the known miss passes; that a job
+inside a container can reach the cluster; that a larger sync time of the proxy gives no delay that
+can be set; the two rollouts under a reloader; and how a mirror under a path behaves. What is
+known of them is reasoned from the sources above, and section 14 lists the points that need a
+test. What section 7 says of Helm's rollback, its revisions and its hooks was not read: it is from
+the drafting session's own knowledge.
