@@ -334,9 +334,22 @@ Losers: C, because a crashed probe and real downtime both show as a non-zero exi
 `command`, `args` and `env` that the configuration gives; they mean what they mean in a pod's
 container. A stock image and a shell loop are therefore a complete probe, with no image to build.
 
-A probe that runs on the runner is not in the first release. The runner cannot reach a Service of
-a kind cluster directly, and a port-forward is tied to one pod and breaks when that pod is
-replaced, so such a probe would report failures that the workload did not cause.
+A probe that runs on the runner is not in the first release. One form keeps the contract small,
+and a pod reaches a Service's cluster address in the same way with every container engine. From
+the runner the way in depends on the engine (read, not run; section 16):
+
+- A Service's cluster address is reachable only from within the cluster, with every engine.
+- Where the engine is Docker run as root on Linux, as on GitHub's hosted runners, the runner
+  reaches every node at its address on the cluster's network, and so a Service of type NodePort.
+  That traffic passes through the node's proxy to any ready endpoint, so it follows a rollout.
+- With Docker Desktop, or with Docker run without root, the node addresses cannot be reached. The
+  documents of Podman and nerdctl imply the same for their rootless modes. The way in is then a
+  port mapping from the runner to one node, which kind sets when it creates the node.
+- A port-forward is tied to one pod and ends when that pod is replaced, so a probe through one
+  would report failures that the workload did not cause.
+
+A probe on the runner would therefore need a Service of type NodePort from the chart or from the
+tool, and one path for each kind of engine.
 
 **Lines.** The probe writes one JSON object per line. The tool reads the pod's log, which carries
 the container's standard output and standard error as one stream, so it does not matter which of
@@ -372,7 +385,8 @@ container's output, which is not the moment the probe wrote it. A probe therefor
 line as soon as its check ends and does not buffer its output; a probe that cannot do that gives
 `t`. A line longer than 16 KiB is stored in pieces and comes back with the time of its first
 piece. Putting the probe's lines and the tool's own window marks on one clock is the tool's job,
-never the probe author's. With kind, the runner and the nodes share a clock.
+never the probe author's. With kind, the runner and the nodes share a clock: the nodes are
+containers on the runner's kernel, and Linux gives a container no wall clock of its own.
 
 An observation is assigned to the window that holds its time. One whose time is before the steady
 window began, or after the last window ended, is not counted; the evidence keeps it. One whose `t`
@@ -882,7 +896,9 @@ variable that is not set is a configuration error, never an empty string.
 be a single `${env.NAME}`; a password written in the file is rejected. The tool masks the value of
 every such password in everything it writes. The tool masks nothing else. A chart value, a
 probe's environment value or a probe header's value is written as it was given, so a caller who
-passes a real secret there keeps the evidence to themselves. The console, the job summary and
+passes a real secret there keeps the evidence to themselves. GitHub's own masking does not cover
+the evidence: its documentation promises it for job logs, job summaries and job outputs, and says
+nothing of an uploaded artifact or of a file that a step writes. The console, the job summary and
 `result.json` give the names of the probe's headers and of the values files, and none of their
 values; the evidence folder may hold the values.
 
@@ -992,6 +1008,10 @@ ran. The first release is built for amd64 and arm64, and its suite runs on amd64
   cleans up after a cancelled job: on a runner that persists, a cancelled step has about 10
   seconds before its processes are killed, and deleting a cluster took 12 to 22 s in the
   experiments.
+- **Storage.** kind has one storage class, `standard`. A volume of that class is a folder on one
+  node, and it is tied to that node by the node's host name. A StatefulSet's pod that is deleted
+  and created again keeps its claim, so it returns to the same node, whatever the zone labels
+  say.
 - **Rootless engines.** When the container engine runs without root, the tool sets the option in
   the nodes' container runtime that stops each container from taking a kernel session key. Without
   it, a few clusters exhaust the user's key quota. Whether one cluster needs it is open
@@ -1039,7 +1059,10 @@ no sign of it. When the run's registry does not hold a tag, or cannot be reached
 to the real registry and runs whatever that tag names there; and a node that already holds an
 image under a tag does not pull that tag again. A digest names one content, wherever it is pulled
 from. A chart that takes only a tag writes the tag with the digest after it,
-`candidate@${images.orders.digest}`: Kubernetes pulls such a reference by its digest alone.
+`candidate@${images.orders.digest}`. The node's container runtime drops the tag from such a
+reference and asks the registry for the digest alone. Kubernetes still takes the default pull
+policy from the tag: `latest` before the digest gives `Always`, and any other tag gives
+`IfNotPresent`. The pull is by digest in both cases.
 
 `as` names the repository that the real manifests use, for example
 `registry.example/team/orders`. The tool stores the image under that path in the run's registry
@@ -1097,7 +1120,12 @@ does not get in their way.
 - **Helm's own pulls.** A chart registry that needs a login or a private certificate authority is
   set up for Helm by the caller, before the step. The tool passes Helm no login and no
   certificate flag. Helm reads its repositories and its registry logins from its own files on the
-  runner, and falls back to the logins that Docker stored.
+  runner, and falls back to the logins that Docker stored. Given no certificate flag, Helm trusts
+  the certificate authorities of the runner's system store. A caller adds a private authority to
+  that store, or names a bundle in `SSL_CERT_FILE` or a folder in `SSL_CERT_DIR`. A bundle named
+  that way replaces the system's, so it must also hold the public authorities that are still
+  needed. A repository that was added under an alias with a certificate file keeps that file.
+  The tool passes both variables on to Helm.
 - **Proxies.** kind passes `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` into its nodes. This is
   documentation only.
 - **Runners inside Kubernetes pods.** kind needs privileged containers. A runner pod that may run
@@ -1208,9 +1236,9 @@ results: /tmp/rollproof-orders-7f3a
   - On a stall, the console lists each watched workload that is not complete, with its counts,
     and each pod that is not ready: its phase, why it is not scheduled, the state of its
     containers and how each last ended. Those come from the pod's status. The last event message
-    follows them; Kubernetes keeps events as best effort. When a pod could not be scheduled, the
-    text names the cluster's shape and `cluster.workers`. When the settle time started again, the
-    text says what started it.
+    follows them; Kubernetes keeps events as best effort, and for one hour by default. When a pod
+    could not be scheduled, the text names the cluster's shape and `cluster.workers`. When the
+    settle time started again, the text says what started it.
   - Every pass ends with the lists "exercised" and "not exercised" (see "What every report
     states").
 - **`result.json`.** The same facts for machines. It is the stable contract for wrappers, and it
@@ -1236,12 +1264,13 @@ results: /tmp/rollproof-orders-7f3a
 - **GitHub job summary.** The same tables and lists as Markdown, written only when the tool
   detects GitHub Actions.
 - **Evidence folder.** The probe's raw lines; the window boundaries; a per-second timeline that
-  puts failure counts beside pod events (created, ready, deleted, gone); the namespace's events;
-  the pod lists before and after each transition; the logs of every pod of a watched workload,
-  old and new; the commands the tool ran with their output; and kind's own logs when set-up
-  failed. The tool follows each pod's log while the pod lives, because a pod's log cannot be read
-  once the pod is gone, and it adds the previous run of a restarted container where the kubelet
-  still holds it. The folder's layout is not a contract.
+  puts failure counts beside pod events (created, ready, deleted, gone); the namespace's events,
+  which stay after their pod is gone, for the one hour that the API server keeps an event by
+  default; the pod lists before and after each transition; the logs of every pod of a watched
+  workload, old and new; the commands the tool ran with their output; and kind's own logs when
+  set-up failed. The tool follows each pod's log while the pod lives, because a pod's log cannot
+  be read once the pod is gone, and it adds the previous run of a restarted container where the
+  kubelet still holds it. The folder's layout is not a contract.
 
 ### Reasons
 
@@ -1458,7 +1487,8 @@ The plan settles each of these with a test or a reading before anything is built
    proves three more things:
    - that a reference by digest is served by the run's registry when its node entry may serve
      pulls and may not resolve tags, so that a tag is never answered by the run's registry;
-   - that a reference with a tag and a digest is pulled by the digest;
+   - that a reference with a tag and a digest is pulled by the digest, as the runtime's source
+     says;
    - what a mirror under a path needs. The runtime puts the registry API's path after a mirror's
      path. A cache that wants its project name inside the API path needs the runtime's path
      override, and `mirror` then needs a way to say which of the two it names.
@@ -1476,7 +1506,8 @@ The plan settles each of these with a test or a reading before anything is built
    exits non-zero, and whether a composite action passes them on, was not checked. The `outcome`
    output depends on it.
 5. **Helm's two majors.** GitHub's hosted images carry Helm: 3.22 on the image that `ubuntu-latest`
-   names today, and 4.3 on the next one (read on 2026-11-16, section 16). A job on `ubuntu-latest`
+   names today, and 4.3 on the next one, on x64 and arm64 alike (read twice on 2026-11-16,
+   section 16). A job on `ubuntu-latest`
    therefore changes Helm major when that label moves, so the first release is tested with both.
    The command lines of section 7 exist in both with the same meaning. Helm 4 differs in what they
    do: it applies objects on the server by default, a rollback included, and such an apply fails
@@ -1525,12 +1556,26 @@ The plan settles each of these with a test or a reading before anything is built
       deploy passes `--reset-values`.
     - Helm bounds each hook by its own timeout, whatever `limits.timeout` says. Proposed: the
       tool passes `limits.timeout` to Helm as its `--timeout`.
-    - Helm reads `HELM_KUBECONTEXT`, `HELM_KUBEAPISERVER` and their like from the environment,
-      and they can point it at a cluster other than the test cluster. Proposed: the tool names
-      the test cluster's kubeconfig and context on the command line, and takes those variables
-      out of Helm's environment.
+    - Helm takes cluster settings from the environment, and each one that is set overrides what
+      the kubeconfig file says: `HELM_KUBECONTEXT`, `HELM_KUBEAPISERVER`, `HELM_KUBETOKEN`,
+      `HELM_KUBECAFILE`, `HELM_KUBEASUSER`, `HELM_KUBEASGROUPS`,
+      `HELM_KUBEINSECURE_SKIP_TLS_VERIFY`, `HELM_KUBETLS_SERVER_NAME` and `HELM_NAMESPACE`. A
+      server address among them sends Helm to a cluster other than the test cluster. A context
+      and a namespace named on the command line win over their own variables and leave the
+      others in force. `HELM_DRIVER` moves Helm's release records: with `sql` to a database
+      outside the cluster, which `HELM_DRIVER_SQL_CONNECTION_STRING` names, and with `memory`
+      into the memory of one Helm process. Proposed: the tool names the test cluster's
+      kubeconfig, its context and the namespace on the command line, and takes every variable
+      named here out of Helm's environment. All other variables pass through, `SSL_CERT_FILE`
+      and `SSL_CERT_DIR` among them (section 9).
     - Helm ignores `version` when `chart` is a path that exists, and splits the path of a values
       file at a comma. Proposed: the configuration rejects both.
+18. **A probe on the runner, looked at again.** This design first said that the runner cannot
+    reach a Service of a kind cluster. A reading on 2026-11-16 showed that to hold for a
+    Service's cluster address only (section 6). The decision to leave such a probe out of the
+    first release now rests on the size of the contract and on the one path per kind of engine.
+    Proposed: it stays out. The maintainer made the decision with the first reason in front of
+    them and has not confirmed it since.
 
 ## 15. Not in the first release
 
@@ -1563,7 +1608,9 @@ The plan settles each of these with a test or a reading before anything is built
   the runner mounts the engine's socket into the job's container, and kind can give the cluster's
   internal address on its own network.
 - Node labels from the configuration, other than the zone label the tool sets.
-- A probe that runs on the runner.
+- A probe that runs on the runner. The sources show a way that nobody has run (section 6): a
+  Service of type NodePort at a node's address where the engine is Docker run as root, and a port
+  mapping that the tool sets when it creates the cluster for the other engines.
 - More than one probe in a run.
 - A failure budget, and thresholds of other kinds: a share of checks, a longest outage, a latency.
 - `junit.xml`. It needs a case for set-up, a case for every reason of section 10, and a suite name
@@ -1666,10 +1713,38 @@ reported. Nothing was run, and the agent's report is not filed in the repository
 | containerd at `v2.4.2`: its log writer; the kubelet's log reader at `v1.37.0` | That a log line's time is the runtime's clock when it has read the whole line, and how a line over 16 KiB is stored and returned |
 | kubectl at `v1.37.0`: port-forward | That a port-forward to a Service picks one pod at its start and ends when that pod ends |
 
+Read last on 2026-11-16 by one AI agent on an Opus model, which took the eight statements that the
+earlier readings had left unverified and that a reading can settle. It found one wrong: this
+design said that the runner cannot reach a Service of a kind cluster, and that holds for a
+Service's cluster address only (section 6). Three needed a correction and one an addition, and
+this text carries them. Whether a probe on the runner stays out of the first release waits for the
+maintainer (section 14, point 18). The addition widens the third proposal of section 14,
+point 17. The drafting session opened the passages that decide a
+point and found them as reported. Nothing was run, and the agent's report is not filed in the
+repository.
+
+| Source | What this design takes from it |
+| --- | --- |
+| kind at `1a24c920`: "Configuration", "Known Issues", "Ingress", "LoadBalancer", "Rootless", and its Docker provider | That with Docker on Linux, without Docker Desktop, the host sends traffic to the node addresses with no port mapping; that Docker Desktop does not expose them; that a port mapping is an argument of the node container when it is created, and that kind's own guide uses one to reach a NodePort |
+| Docker's documentation at `67007394`: port publishing, and the rootless mode's troubleshooting page | That every port of a container on a bridge network is reachable from the Docker host; that a container's address is not reachable from the host when the engine runs without root |
+| Podman at `d8e8bb84` and nerdctl at `e192ef14`: their documents on rootless networking | That the containers' network is in a network namespace of its own. Neither says outright that a container's address cannot be reached from the host |
+| Kubernetes documentation, at the clone named above: Services, virtual IPs | That every node listens on a node port and forwards to a ready endpoint, and that a cluster address is reachable only from within the cluster |
+| Kubernetes source at `v1.37.0`: the defaults of a Service and of a container, the API server's options, the event recorders | That the external traffic policy defaults to all ready endpoints; that the default pull policy is taken from the tag; that an event carries no owner reference and is kept for one hour by default |
+| The same: client-go's `clientcmd` and cli-runtime's configuration flags | That a value Helm passes on from its environment overrides the kubeconfig's own, field by field, and that a context the file does not hold is an error |
+| Helm at `v3.22.1` and `v4.3.2`: its environment settings, its storage drivers, its registry transport, its HTTP getter and its chart downloader | Which variables set the cluster, the identity, the namespace and the place of the release records; that Helm sets no certificate authorities of its own unless it is given a file, and that a repository entry's certificate file is used for a chart named through its alias |
+| Go at `go1.27.4`: `crypto/x509` and `crypto/tls` | That a client with no authorities set uses the host's, where they are read from on Linux, and that `SSL_CERT_FILE` and `SSL_CERT_DIR` replace those places |
+| containerd at `v2.3.4`, the version in kind's node image: its CRI image pull and its log writer; `distribution/reference` at `v0.6.0` | That a reference with a tag and a digest is reduced to the digest before the pull; that the log writer takes the time when it has read a whole line, as was read before at `v2.4.2` |
+| Linux man-pages 6.20, `time_namespaces(7)` | That a time namespace does not change the wall clock |
+| local-path-provisioner at `v0.0.34`, and kind's manifest for it | That a volume is tied to one node by the host-name label |
+| GitHub Docs, at the clone named above: workflow commands, job outputs, secrets, secret scanning | That secrets are masked in job logs, job summaries and job outputs, and that nothing is said of artifacts or of files a step writes |
+| GitHub's runner images at `f40a752b`, read a second time | The same Helm versions as the first reading, on x64 and arm64; that the image's Docker is installed as a system service |
+
 Still not shown by any run or any page: that the fixture for the known miss passes; that a job
 inside a container can reach the cluster; that a larger sync time of the proxy gives no delay that
-can be set; the two rollouts under a reloader; how a mirror under a path behaves; whether a private
-certificate authority in the runner's own trust store is enough for Helm; and that the runner
-cannot reach a Service of a kind cluster directly. What is known of them is reasoned from the
-sources above or is the drafting session's own knowledge, and section 14 lists the points that
-need a test.
+can be set; the two rollouts under a reloader; how a mirror under a path behaves; that Podman run
+as root lets the runner reach the node addresses as Docker does; that a port mapping cannot be
+added to a node after it was created; which Go version Helm's released binaries are built with;
+and where a pod goes when the node its volume is tied to cannot take it. That the hosted runner's
+Docker runs as root is read from the image's install script, which no page states. What is known
+of these is reasoned from the sources above or is the drafting session's own knowledge, and
+section 14 lists the points that need a test.
