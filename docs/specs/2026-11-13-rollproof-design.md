@@ -366,9 +366,13 @@ How a line is read:
 - An object whose `ok` is not `true` or `false`, or whose known field has the wrong type, makes
   the run not verified.
 
-**Time.** The default time of a line is the timestamp the container runtime puts on it in the
-pod's log. Putting the probe's lines and the tool's own window marks on one clock is the tool's
-job, never the probe author's. With kind, the runner and the nodes share a clock.
+**Time.** The default time of a line is the timestamp the node's container runtime puts on it in
+the pod's log. The runtime takes it from its own clock when it has read the whole line from the
+container's output, which is not the moment the probe wrote it. A probe therefore writes each
+line as soon as its check ends and does not buffer its output; a probe that cannot do that gives
+`t`. A line longer than 16 KiB is stored in pieces and comes back with the time of its first
+piece. Putting the probe's lines and the tool's own window marks on one clock is the tool's job,
+never the probe author's. With kind, the runner and the nodes share a clock.
 
 An observation is assigned to the window that holds its time. One whose time is before the steady
 window began, or after the last window ended, is not counted; the evidence keeps it. One whose `t`
@@ -591,22 +595,38 @@ so a dependency belongs in a namespace of its own.
 | deploy | `helm upgrade` to the candidate |
 | rollback | `helm rollback` to the revision the tool read after the install |
 
+On a new cluster the install is revision 1, the deploy revision 2 and the rollback revision 3. A
+rollback applies the manifest that Helm stored for the revision it goes back to, without rendering
+it again, as a new revision. The pod templates are then those of the install, so Kubernetes brings
+the previous release's pods back. The tool names the revision. With none, Helm goes back to the
+highest revision less one, whatever state that one is in.
+
 A release description has `chart`, `version` and `values`.
 
 - `chart` is a path, an `oci://` reference, or a name that the runner's Helm configuration
-  resolves, such as a repository alias with a chart name.
-- `values` is a list whose items are files or inline maps, applied in the order written. The tool
-  writes each inline map to a values file of its own, so types are kept and no key needs a path
-  grammar.
+  resolves, such as a repository alias with a chart name. An alias needs that repository's index
+  on the runner, from an earlier `helm repo add` or `helm repo update`. When `chart` is a path
+  that exists, Helm uses it and ignores `version`.
+- `values` is a list whose items are files or inline maps, applied in the order written: a later
+  item wins over an earlier one, key by key. The tool writes each inline map to a values file of
+  its own, so types are kept and no key needs a path grammar.
 
 Helm runs with the runner's own configuration: its repositories and its registry logins are the
 ones the caller set up before the step. The tool adds the cluster and the namespace, and nothing
 else. The first release names the Helm major versions it is tested with (section 14).
 
 Helm is called without `--wait` and without the flag that rolls a failed upgrade back (`--atomic`
-in Helm 3, `--rollback-on-failure` in Helm 4, where it also turns waiting on). In both majors Helm
-then returns before the rollout is complete. `watch` alone judges when a transition has finished,
-so both drivers are judged the same way. Helm hooks run as Helm runs them.
+in Helm 3, `--rollback-on-failure` in Helm 4; in both majors that flag also turns waiting on). In
+both majors Helm then returns before the rollout is complete. `watch` alone judges when a
+transition has finished, so both drivers are judged the same way.
+
+Helm hooks run as Helm runs them. Three facts about them matter here:
+
+- Helm waits for a hook that is a Job or a Pod even when it is not told to wait, and it bounds
+  each such hook by its own timeout, 5 minutes by default. That time is inside the transition's
+  window and counts towards `limits.timeout`.
+- A rollback runs the rollback hooks that were stored with the revision it goes back to.
+- A hook that fails makes the command exit non-zero, as every other failure of Helm does.
 
 **The commands driver.** Each command is an argument list. The tool starts it directly, with no
 shell, on the runner, with `KUBECONFIG` set to the test cluster. `install` is required. `deploy`
@@ -621,7 +641,10 @@ manifests that the controller would apply: the readiness, shutdown and strategy 
 the manifests, not in the controller.
 
 **When a command fails.** For both drivers, a non-zero exit of a `setup` command or of the install
-makes the run not verified, and a non-zero exit of a deploy or a rollback is a fail.
+makes the run not verified, and a non-zero exit of a deploy or a rollback is a fail. Helm exits
+with the same code for every failure. A deploy that failed because a chart could not be fetched,
+or because a value broke the chart's schema, is therefore a fail like any other, and the command's
+output in the evidence says which it was.
 
 **The restart.** The tool performs it itself, the same way for both drivers: it changes the pod
 template annotation that `kubectl rollout restart` changes, on every watched workload. A
@@ -874,7 +897,7 @@ values; the evidence folder may hold the values.
 | `probe.http.expect-status` | 200 to 299 | A redirect or an error page is not an answer from the workload |
 | `limits.steady` | 10 s | Long enough to show that the probe and the workload work before anything changes: 2,000 checks at the default rate. It is not a control for a failure that is rare without any rollout; the paragraph below the table is for that |
 | `limits.settle` | 15 s | It has to catch the failures that begin only after a transition has finished. In the experiments those ended within about 3 s, in the variant with no readiness probe, and the tool also waits for old pods to be gone before the settle time starts. It does not have to outlast a failure that is already under way: one failure fails the window, and a failed window ends the run. 15 s is several times the 3 s; the fixture runs are to confirm it. It is also how long the tool waits for a second change to begin (section 7) |
-| `limits.timeout` | 5 minutes | Helm's own default wait, so a chart that deploys under Helm's default does not stall here. One limit covers the install, the probe's start and each transition |
+| `limits.timeout` | 5 minutes | The length of Helm's default timeout for one operation. It is not the same bound: Helm applies its timeout to each hook separately, and this limit covers a whole transition from its start, hooks included. One limit covers the install, the probe's start and each transition |
 | `limits.silence` | 5 s | The built-in probe writes at least one line a second, so 5 s is five missed lines. A custom probe that checks less often raises it |
 
 There is no failure budget. A pass means that the probe reported no failure, which is the claim
@@ -1072,7 +1095,9 @@ does not get in their way.
   image and the registry image are pulled by that engine, so the caller gives them as full mirror
   references and logs the engine in beforehand when that is needed.
 - **Helm's own pulls.** A chart registry that needs a login or a private certificate authority is
-  set up for Helm by the caller, before the step.
+  set up for Helm by the caller, before the step. The tool passes Helm no login and no
+  certificate flag. Helm reads its repositories and its registry logins from its own files on the
+  runner, and falls back to the logins that Docker stored.
 - **Proxies.** kind passes `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` into its nodes. This is
   documentation only.
 - **Runners inside Kubernetes pods.** kind needs privileged containers. A runner pod that may run
@@ -1450,13 +1475,17 @@ The plan settles each of these with a test or a reading before anything is built
 4. **Outputs of a step that fails.** Whether the outputs a step wrote are kept when that step then
    exits non-zero, and whether a composite action passes them on, was not checked. The `outcome`
    output depends on it.
-5. **Helm on hosted runners.** The experiments recorded Docker, kind and kubectl on the hosted
-   runner image, not Helm. The plan checks it, and names the Helm major versions the first release
-   is tested with. Helm 4 differs from Helm 3 where this design touches it: it applies on the
-   server by default, and its flags for waiting and for rolling back on failure have other names
-   (section 7). The fixtures run under each major that the release names.
-6. **A Helm rollback with no revision.** If `helm rollback` without a revision goes back to the
-   release before the last one, the tool need not read the revision after the install.
+5. **Helm's two majors.** GitHub's hosted images carry Helm: 3.22 on the image that `ubuntu-latest`
+   names today, and 4.3 on the next one (read on 2026-11-16, section 16). A job on `ubuntu-latest`
+   therefore changes Helm major when that label moves, so the first release is tested with both.
+   The command lines of section 7 exist in both with the same meaning. Helm 4 differs in what they
+   do: it applies objects on the server by default, a rollback included, and such an apply fails
+   when another writer owns a field that the manifest sets, for example a replica count that an
+   autoscaler wrote. Its flag for rolling back on failure has another name, and its `--wait` takes
+   a value. The plan runs the fixtures under each major and looks for such a conflict.
+6. **A Helm rollback with no revision.** Settled by a reading (section 16). With no revision Helm
+   goes back to the highest revision less one, whatever its state. That is the install only when
+   the deploy stored a revision. The tool names the revision, as section 7 says.
 7. **The settle default.** 15 s rests on one variant of one service. The fixture runs confirm it
    or change it.
 8. **kind as a library.** kind's project calls itself alpha grade, has not committed to its
@@ -1488,6 +1517,20 @@ The plan settles each of these with a test or a reading before anything is built
     about 1 GB measures disk, pull time and false failures. After it the project decides whether
     the tool pulls the listed images into the nodes before the steady window. It is measured with
     the fixture series, not among the proofs of the build order's second step.
+17. **Four changes to the Helm driver, proposed and not yet accepted.** A reading of Helm's source
+    on 2026-11-16 showed where the driver, as section 7 describes it, goes wrong. Each proposal
+    waits for the maintainer.
+    - Helm gives an upgrade that passes no values the values of the release's last revision. A
+      candidate with no `values` would be rendered with the previous release's. Proposed: the
+      deploy passes `--reset-values`.
+    - Helm bounds each hook by its own timeout, whatever `limits.timeout` says. Proposed: the
+      tool passes `limits.timeout` to Helm as its `--timeout`.
+    - Helm reads `HELM_KUBECONTEXT`, `HELM_KUBEAPISERVER` and their like from the environment,
+      and they can point it at a cluster other than the test cluster. Proposed: the tool names
+      the test cluster's kubeconfig and context on the command line, and takes those variables
+      out of Helm's environment.
+    - Helm ignores `version` when `chart` is a path that exists, and splits the path of a values
+      file at a comma. Proposed: the configuration rejects both.
 
 ## 15. Not in the first release
 
@@ -1597,7 +1640,7 @@ which quote each passage, are not filed in the repository.
 | Go at `go1.27.4`: the HTTP client and server | When the client sends a request again on its own, and what a graceful shutdown does with idle and active connections |
 | RFC 9112, section 9.5, and RFC 9110, section 9.2.2 | The race between a server that closes an idle connection and a client that sends on it |
 | Kubernetes enhancement 3960, the sleep action for a preStop hook | That "sleep, then stop" is promoted for zero-downtime shutdown, and that it speaks of new connections only |
-| Helm at `v3.22.1` and `v4.3.2` | That an upgrade returns before the rollout is complete unless told to wait, the flag names of each major, that an unchanged resource is not patched, and that a release stores the merged values and not their sources |
+| Helm at `v3.22.1` and `v4.3.2` | That an upgrade returns before the rollout is complete unless told to wait, the flag names of each major, and that a release stores the merged values and not their sources. That Helm 3, and Helm 4 when it patches from the client, send nothing for an unchanged resource, while Helm 4's default applies every object on the server |
 | Stakater Reloader at `v1.4.24`, and Argo CD's documentation at `v3.6.1` | That a reloader changes the pod template some time after a Secret changed; that a GitOps controller polls on an interval of minutes |
 | GitHub's runner at `v2.338.2` | That the engine's socket is mounted into a job's container |
 | The `kubernetes/test-infra` repository at `51bd8b7f`, the multi-zone job on kind | The cluster shape with a zone on each worker and none on the control-plane node |
@@ -1607,9 +1650,26 @@ which quote each passage, are not filed in the repository.
 | GitHub Docs, at the clone named above: hosted runners, the runner controller, secrets | The sizes of hosted runners for public and private repositories, the 14 GB disk, the arm64 runners, the smallest runner's limits, the runner controller's container modes, and what is masked in a job log |
 | fortio's and k6's documentation | That open-model load tools report how far they ran behind their schedule, as information |
 
+Read later on 2026-11-16 by one AI agent on an Opus model, which checked what this design said of
+Helm from memory, and two statements of section 6. It found two of them wrong, one of those in
+part, and eight in need of a correction. This text carries the corrections of wording. Four
+changes to what the tool does follow from the reading and wait for the maintainer (section 14,
+point 17). The drafting session opened the passages that decide a point and found them as
+reported. Nothing was run, and the agent's report is not filed in the repository.
+
+| Source | What this design takes from it |
+| --- | --- |
+| Helm at `v3.22.1` and `v4.3.2`: the upgrade, install and rollback commands and their actions | That an install through an upgrade is revision 1 and each later change the highest revision plus one; that a rollback applies the stored manifest and the stored hooks of the revision it goes back to; what a rollback with no revision goes back to; that later values files win; that a path that exists is used and its version ignored; where repositories and logins are read; that every failure exits with the same code |
+| The same: hooks and timeouts | That a hook that is a Job or a Pod is waited for without a wait flag, each under its own timeout; that the default timeout is 5 minutes and bounds one operation, not a command; that both flags for rolling back on failure turn waiting on |
+| The same: how objects are applied | That Helm 4 applies on the server by default, a rollback included, and that such an apply fails on a field that another writer owns |
+| GitHub's runner images, their software lists at `f40a752b` | Helm 3.22.1 on the Ubuntu 24.04 image, which `ubuntu-latest` names, and Helm 4.3.1 on the 26.04 image |
+| containerd at `v2.4.2`: its log writer; the kubelet's log reader at `v1.37.0` | That a log line's time is the runtime's clock when it has read the whole line, and how a line over 16 KiB is stored and returned |
+| kubectl at `v1.37.0`: port-forward | That a port-forward to a Service picks one pod at its start and ends when that pod ends |
+
 Still not shown by any run or any page: that the fixture for the known miss passes; that a job
 inside a container can reach the cluster; that a larger sync time of the proxy gives no delay that
-can be set; the two rollouts under a reloader; and how a mirror under a path behaves. What is
-known of them is reasoned from the sources above, and section 14 lists the points that need a
-test. What section 7 says of Helm's rollback, its revisions and its hooks was not read: it is from
-the drafting session's own knowledge.
+can be set; the two rollouts under a reloader; how a mirror under a path behaves; whether a private
+certificate authority in the runner's own trust store is enough for Helm; and that the runner
+cannot reach a Service of a kind cluster directly. What is known of them is reasoned from the
+sources above or is the drafting session's own knowledge, and section 14 lists the points that
+need a test.
