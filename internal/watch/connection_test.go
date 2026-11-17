@@ -244,9 +244,10 @@ func TestAnErrorEventIsABreak(t *testing.T) {
 	until(t, w, clock, func(s Transition) bool { return s.Missed.Equal(at(2)) })
 }
 
-// A watch call that fails after a stream ended is a break, timed when the
-// stream ended (T27-2). The call is held while the clock moves on.
-func TestAFailedWatchCallIsABreak(t *testing.T) {
+// A watch call that fails after a stream ended keeps the watch down: the
+// window's Missed is when the stream ended (T27-2, T27-4). The call is held
+// while the clock moves on.
+func TestAFailedWatchCallKeepsTheWatchDown(t *testing.T) {
 	calling, fail := make(chan struct{}, 1), make(chan struct{})
 	var once sync.Once
 	release := func() { once.Do(func() { close(fail) }) }
@@ -274,9 +275,12 @@ func TestAFailedWatchCallIsABreak(t *testing.T) {
 	until(t, w, clock, func(s Transition) bool { return s.Missed.Equal(at(2)) })
 }
 
-// A stream that ends cleanly and a watch from the last version that succeeds
-// are a renewal, not a break: the window ends with no Missed (T27-2).
-func TestACleanRenewalIsNoBreak(t *testing.T) {
+// A renewal inside a window, a stream that ends cleanly and a watch from the
+// last version that succeeds, makes the window not verified, with Missed when
+// the stream ended (T27-4): with a watch timeout of a day, a renewal inside a
+// run is abnormal. Before T27-4 this row was TestACleanRenewalIsNoBreak and
+// gave no Missed.
+func TestARenewalInsideAWindowMakesItNotVerified(t *testing.T) {
 	w, client, clock, first, podWatches := startSteered(t, nil)
 	exited := make(chan struct{})
 	res := make(chan Transition, 1)
@@ -299,8 +303,8 @@ func TestACleanRenewalIsNoBreak(t *testing.T) {
 	}
 	close(exited)
 	tr := drive(t, clock, res)
-	if !tr.Missed.IsZero() || hasCondition(tr.Conditions(true), verdict.InternalError, missedText(2)) {
-		t.Errorf("Missed %v, conditions %v; want no missed changes", tr.Missed, tr.Conditions(true))
+	if !tr.Missed.Equal(at(2)) || !hasCondition(tr.Conditions(true), verdict.InternalError, missedText(2)) {
+		t.Errorf("Missed %v, conditions %v; want Missed at +2 s and its condition", tr.Missed, tr.Conditions(true))
 	}
 }
 
@@ -339,18 +343,20 @@ func TestAWindowThatEndsWhileAWatchIsDown(t *testing.T) {
 	}
 }
 
-// A list after the first one is a break, timed when the stream before it
-// ended (T27-2): a plain list, or a watch that sends the initial events. The
-// connection here is the informers' kind, apart from them: the fake client
-// holds its lock while a reactor holds a call, so a held watch would hold the
-// list too.
-func TestAListAfterTheFirstIsABreak(t *testing.T) {
+// A stream that ends inside a window makes it not verified from that moment
+// (T27-4), and a list again after it, plain or a watch that sends the initial
+// events, keeps that moment. The connection here is apart from the informers:
+// the fake client holds its lock while a reactor holds a call, so a held watch
+// would hold the list too. Before T27-4 this row was
+// TestAListAfterTheFirstIsABreak, and its check before the list gave no
+// Missed.
+func TestAListAgainKeepsTheMomentTheWatchWentDown(t *testing.T) {
 	for _, r := range []struct {
 		name string
 		list func(c *connection) error
 	}{
 		{"a list", func(c *connection) error {
-			_, err := c.List(t.Context(), metav1.ListOptions{})
+			_, err := c.list(t.Context(), metav1.ListOptions{})
 			return err
 		}},
 		{"a watch that sends the initial events", func(c *connection) error {
@@ -367,7 +373,7 @@ func TestAListAfterTheFirstIsABreak(t *testing.T) {
 			follow(t, w, clock.Now())
 			until(t, w, clock, func(s Transition) bool { return s.Name == verdict.Deploy })
 			var streams []*k8swatch.RaceFreeFakeWatcher
-			c := &connection{w: w, kind: "apart", example: &corev1.Pod{},
+			c := &connection{w: w, kind: "apart", example: &corev1.Pod{}, firstUp: make(chan struct{}),
 				list: func(context.Context, metav1.ListOptions) (runtime.Object, error) {
 					return &corev1.PodList{}, nil
 				},
@@ -376,7 +382,7 @@ func TestAListAfterTheFirstIsABreak(t *testing.T) {
 					streams = append(streams, s)
 					return s, nil
 				}}
-			if _, err := c.List(t.Context(), metav1.ListOptions{}); err != nil {
+			if _, err := c.list(t.Context(), metav1.ListOptions{}); err != nil {
 				t.Fatal(err)
 			}
 			first, err := c.Watch(t.Context(), metav1.ListOptions{})
@@ -393,14 +399,14 @@ func TestAListAfterTheFirstIsABreak(t *testing.T) {
 				s, _ := w.tr.State(clock.Now())
 				return s.Missed
 			}
-			if m := missed(); !m.IsZero() {
-				t.Fatalf("Missed %v after the first list and a stream that ended; want none yet", m)
+			if m := missed(); !m.Equal(at(2)) {
+				t.Fatalf("Missed %v after a stream that ended at +2 s; want +2 s", m)
 			}
 			if err := r.list(c); err != nil {
 				t.Fatal(err)
 			}
 			if m := missed(); !m.Equal(at(2)) {
-				t.Errorf("Missed %v, want +2 s, when the stream before the list ended", m)
+				t.Errorf("Missed %v after the list, want +2 s, when the stream before it ended", m)
 			}
 		})
 	}
@@ -420,7 +426,7 @@ func TestNoStreamAfterStop(t *testing.T) {
 // before any call that the informer makes next, a watch that is up included.
 func TestAStreamsStopTellsItsEndFirst(t *testing.T) {
 	w, _, clock := startWatcher(t, nil, base()...)
-	c := &connection{w: w, kind: "apart", example: &corev1.Pod{},
+	c := &connection{w: w, kind: "apart", example: &corev1.Pod{}, firstUp: make(chan struct{}),
 		watch: func(context.Context, metav1.ListOptions) (k8swatch.Interface, error) {
 			return k8swatch.NewRaceFreeFake(), nil
 		}}
@@ -435,5 +441,115 @@ func TestAStreamsStopTellsItsEndFirst(t *testing.T) {
 	w.mu.Unlock()
 	if !ok || !down.Equal(at(1)) {
 		t.Errorf("down %v (%v) when Stop returned; want down at +1 s", down, ok)
+	}
+}
+
+// A watch down across a transition's start makes its window not verified,
+// with Missed at the start (T27-4): a renewal whose watch call returns after
+// the start, and a break, a watch that expires and lists again, whose list
+// returns after the start. Begin is told while the watch is down.
+func TestAGapAcrossTheStartThroughTheWatcher(t *testing.T) {
+	for _, r := range []struct {
+		name   string
+		expire bool // the stream ends with an expired error, not cleanly
+	}{
+		{"a renewal", false},
+		{"a break", true},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			calling, free := make(chan struct{}, 1), make(chan struct{})
+			var once sync.Once
+			release := func() { once.Do(func() { close(free) }) }
+			hold := func() {
+				calling <- struct{}{}
+				<-free
+			}
+			var lists atomic.Int32
+			w, client, clock, first, podWatches := startSteered(t, func(n int32) (bool, k8swatch.Interface, error) {
+				if n == 2 && !r.expire {
+					hold() // the renewal's watch call
+				}
+				return false, nil, nil
+			})
+			client.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+				if lists.Add(1) == 1 && r.expire {
+					hold() // the list after the expired watch
+				}
+				return false, nil, nil
+			})
+			t.Cleanup(release)
+			if r.expire {
+				close(first.expire)
+			} else {
+				passEvent(t, client, first)
+				close(first.end)
+			}
+			select { // the watch went down at +0 s
+			case <-calling:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the informer did not watch or list again")
+			}
+			clock.Advance(time.Second)
+			exited := make(chan struct{})
+			res := make(chan Transition, 1)
+			go func() { res <- w.Transition(t.Context(), verdict.Deploy, at(1), exited) }()
+			until(t, w, clock, func(s Transition) bool { return s.Name == verdict.Deploy })
+			clock.Advance(time.Second)
+			release() // the watch is up again at +2 s
+			waitFor(t, podWatches, 2, "watches of pods")
+			close(exited)
+			tr := drive(t, clock, res)
+			if !tr.Missed.Equal(at(1)) || !hasCondition(tr.Conditions(true), verdict.InternalError, missedText(0)) {
+				t.Errorf("Missed %v, conditions %v; want Missed at the start, +1 s, and its condition",
+					tr.Missed, tr.Conditions(true))
+			}
+		})
+	}
+}
+
+// Every watch call asks the API server for a timeout of a day, so that no
+// routine renewal falls inside a run (T27-4): a plain watch and one that sends
+// the initial events alike, whatever the informer asked for.
+func TestTheWatchAsksForADay(t *testing.T) {
+	w, _, _ := startWatcher(t, nil, base()...)
+	var asked []int64
+	c := &connection{w: w, kind: "apart", example: &corev1.Pod{}, firstUp: make(chan struct{}),
+		watch: func(_ context.Context, o metav1.ListOptions) (k8swatch.Interface, error) {
+			asked = append(asked, *o.TimeoutSeconds)
+			return k8swatch.NewRaceFreeFake(), nil
+		}}
+	five, yes := int64(300), true
+	for _, o := range []metav1.ListOptions{{TimeoutSeconds: &five}, {TimeoutSeconds: &five, SendInitialEvents: &yes}} {
+		s, err := c.Watch(t.Context(), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Stop()
+	}
+	if want := []int64{86400, 86400}; !slices.Equal(asked, want) {
+		t.Errorf("the watch calls asked for %v seconds, want %v", asked, want)
+	}
+}
+
+// Start returns only when every watch is up, so that a window begins with each
+// up: here the watch of pods comes 300 ms after its list.
+func TestStartWaitsForEveryWatch(t *testing.T) {
+	client := fake.NewClientset(base()...)
+	client.PrependWatchReactor("pods", func(k8stesting.Action) (bool, k8swatch.Interface, error) {
+		time.Sleep(300 * time.Millisecond)
+		return false, nil, nil
+	})
+	w, err := Start(t.Context(), client, Options{Namespace: "orders", Settle: 15 * time.Second,
+		Timeout: 300 * time.Second, Workers: 3, Now: func() time.Time { return t0 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(w.Stop)
+	for kind, c := range w.conns {
+		select {
+		case <-c.firstUp:
+		default:
+			t.Errorf("the watch of %s is not up when Start returns", kind)
+		}
 	}
 }

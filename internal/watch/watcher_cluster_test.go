@@ -104,4 +104,24 @@ func TestWatcherOnACluster(t *testing.T) {
 	if len(got.Digests) != 1 || !strings.HasPrefix(got.Digests[0], "sha256:") {
 		t.Errorf("Digests = %v, want one digest that starts sha256:", got.Digests)
 	}
+
+	// The API server takes a watch's timeout as given (T27-4): with 3 s, a
+	// second Watcher's watches end and are renewed about 3 s after they began,
+	// inside a window that settles for 5 s, which is then not verified.
+	w.Stop() // no watch of the first Watcher reads watchTimeout while it changes
+	defer func(was time.Duration) { watchTimeout = was }(watchTimeout)
+	watchTimeout = 3 * time.Second
+	started := time.Now()
+	short, err := Start(ctx, client, Options{Namespace: "w", Settle: 5 * time.Second, Timeout: 5 * time.Minute,
+		Workers: 2, Now: time.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer short.Stop()
+	renewed := short.Transition(ctx, verdict.Rollback, time.Now(), exited)
+	t.Logf("with a watch timeout of 3 s: began %v, Missed %v and ended %v after Start",
+		renewed.Began.Sub(started), renewed.Missed.Sub(started), renewed.Ended.Sub(started))
+	if since := renewed.Missed.Sub(started); renewed.Missed.IsZero() || since < 2*time.Second || since > 6*time.Second {
+		t.Errorf("Missed %v after Start; want a renewal between 2 s and 6 s after Start", since)
+	}
 }

@@ -1472,13 +1472,13 @@ func TestMissedAfterAWindowEnded(t *testing.T) {
 	}
 }
 
-// What the Tracker makes of the Watcher's watches going down, breaking and
-// coming up again (T27-2). A window whose end comes due while a watch is down
-// missed changes from the moment it went down, or from the window's start. A
-// break missed changes from the moment its watch went down until it was told:
-// in the open window, or, told before Begin, in the next window when the
-// stretch reaches its start. A watch down and up again with no break is a
-// renewal.
+// What the Tracker makes of the Watcher's watches going down and coming up
+// again (T27-4): a window in which a watch was down at any moment, from its
+// start to its end, missed changes from the first such moment, or from its
+// start. A stretch down that ended before the start counts for nothing.
+// Before T27-4, "down and up again inside the window" was "down and up again
+// before the window's end" and gave no Missed; the rows that told watchBroke
+// now tell the same moments without it, with the same values.
 func TestWatchDown(t *testing.T) {
 	before := func() *Tracker {
 		tr := NewTracker(options())
@@ -1497,12 +1497,12 @@ func TestWatchDown(t *testing.T) {
 			tr.watchDown("Pod", at(20))
 			return tr
 		}, at(20)},
-		{"down and up again before the window's end", func() *Tracker {
+		{"down and up again inside the window", func() *Tracker {
 			tr := feed(options(), base(), rollingUpdate())
 			tr.watchDown("Pod", at(20))
 			tr.watchUp("Pod", at(21))
 			return tr
-		}, time.Time{}},
+		}, at(20)},
 		{"down at the window's end, which belongs to no window", func() *Tracker {
 			tr := feed(options(), base(), rollingUpdate())
 			tr.watchDown("Pod", at(27.1))
@@ -1515,43 +1515,40 @@ func TestWatchDown(t *testing.T) {
 			play(tr, rollingUpdate())
 			return tr
 		}, t0},
-		{"a break from before the start, told in the window", func() *Tracker {
+		{"down from before the start, up in the window", func() *Tracker {
 			tr := before()
 			tr.watchDown("Pod", at(-1))
 			tr.Begin(verdict.Deploy, t0)
-			tr.watchBroke("Pod", at(0.1))
 			tr.watchUp("Pod", at(0.15))
 			play(tr, rollingUpdate())
 			return tr
 		}, t0},
-		{"a break that reaches the start, told before Begin", func() *Tracker {
+		{"down from before the start, up after it, told before Begin", func() *Tracker {
 			tr := before()
 			tr.watchDown("Pod", at(-1))
-			tr.watchBroke("Pod", at(0.1))
 			tr.watchUp("Pod", at(0.15))
 			tr.Begin(verdict.Deploy, t0)
 			play(tr, rollingUpdate())
 			return tr
 		}, t0},
-		{"a break over before the start", func() *Tracker {
+		{"a stretch down that ended before the start", func() *Tracker {
 			tr := before()
 			tr.watchDown("Pod", at(-2))
-			tr.watchBroke("Pod", at(-1.5))
 			tr.watchUp("Pod", at(-1))
 			tr.Begin(verdict.Deploy, t0)
 			play(tr, rollingUpdate())
 			return tr
 		}, time.Time{}},
-		{"a break in the window, timed when its watch went down", func() *Tracker {
+		{"down twice in the window, timed when it first went down", func() *Tracker {
 			tr := feed(options(), base(), rollingUpdate())
 			tr.watchDown("Pod", at(13))
-			tr.watchBroke("Pod", at(14))
+			tr.watchDown("Pod", at(14))
 			tr.watchUp("Pod", at(15))
 			return tr
 		}, at(13)},
-		{"a break of a watch that was up, timed when it was told", func() *Tracker {
+		{"down in the window, timed when it went down", func() *Tracker {
 			tr := feed(options(), base(), rollingUpdate())
-			tr.watchBroke("Pod", at(14))
+			tr.watchDown("Pod", at(14))
 			tr.watchUp("Pod", at(15))
 			return tr
 		}, at(14)},
@@ -1562,5 +1559,70 @@ func TestWatchDown(t *testing.T) {
 				t.Errorf("ended %v, Missed %v; want ended, Missed %v", ended, s.Missed, r.missed)
 			}
 		})
+	}
+}
+
+// The review's gap across the start (T27-4): the pods' watch is down across
+// the transition's start, and the changes it held back, a1 deleted and a3
+// made before the start, are told when it is up again, after the start. The
+// deploy changed no pod template. The window is not verified and never
+// passes, whether Begin is told before the watch is up or after.
+func TestAGapAcrossTheStart(t *testing.T) {
+	replay := func(tr *Tracker, s float64) {
+		tr.Gone(pod("orders-a-1", "a1", "ReplicaSet", "orders-a", true, true), at(s))
+		tr.Set(pod("orders-a-3", "a3", "ReplicaSet", "orders-a", true, false), at(s))
+	}
+	for _, r := range []struct {
+		name string
+		tell func(tr *Tracker)
+	}{
+		{"Begin told after the watch is up", func(tr *Tracker) {
+			tr.watchDown("Pod", at(-1))
+			tr.watchUp("Pod", at(0.5))
+			replay(tr, 0.5)
+			tr.Begin(verdict.Deploy, t0)
+		}},
+		{"Begin told while the watch is down", func(tr *Tracker) {
+			tr.watchDown("Pod", at(-1))
+			tr.Begin(verdict.Deploy, t0)
+			tr.watchUp("Pod", at(0.5))
+			replay(tr, 0.5)
+		}},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			tr := NewTracker(options())
+			for _, obj := range base() {
+				tr.Set(obj, at(-3))
+			}
+			r.tell(tr)
+			tr.CommandExited(at(1))
+			s, ended := tr.State(at(60))
+			if v, code := decided(s); !ended || !s.Missed.Equal(t0) || v != verdict.NotVerified || code != verdict.InternalError {
+				t.Errorf("ended %v, Missed %v, verdict %s decided by %q; want Missed at the start, not verified by internal-error",
+					ended, s.Missed, v, code)
+			}
+		})
+	}
+}
+
+// The review's renewal across the limit (T27-4): the settle time runs past
+// the limit, and the pods' watch is down from +297 s to +301 s. The changes it
+// held back, told at +301 s, make a stall there. The window is not verified,
+// and never fails.
+func TestARenewalAcrossTheLimit(t *testing.T) {
+	var events []ev
+	for _, e := range rollingUpdate() {
+		e.s += 278
+		events = append(events, e)
+	}
+	tr := feed(options(), base(), events)
+	tr.watchDown("Pod", at(297))
+	tr.watchUp("Pod", at(301))
+	tr.Gone(pod("orders-b-1", "b1", "ReplicaSet", "orders-b", true, false), at(301))
+	tr.Set(pod("orders-b-3", "b3", "ReplicaSet", "orders-b", true, false), at(301))
+	s, _ := tr.State(at(400))
+	if v, code := decided(s); !s.Missed.Equal(at(297)) || v != verdict.NotVerified || code != verdict.InternalError {
+		t.Errorf("stalled %v, Missed %v, verdict %s decided by %q; want Missed at +297 s, not verified by internal-error",
+			s.Stalled, s.Missed, v, code)
 	}
 }

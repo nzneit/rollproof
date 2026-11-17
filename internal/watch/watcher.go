@@ -49,7 +49,7 @@ type Watcher struct {
 	// gone, so that a deletion whose final state the informer does not know is still told.
 	last map[objectKey]runtime.Object
 
-	// conns holds each informer's connection, by kind.
+	// conns holds each informer's connection, by kind; Start waits until each is up once.
 	conns map[string]*connection
 	// streams counts the watch streams whose events are still passed on.
 	streams atomic.Int32
@@ -94,7 +94,7 @@ func Start(ctx context.Context, client kubernetes.Interface, o Options) (*Watche
 		w.conns[c.kind] = c
 		informer := w.factory.InformerFor(c.example, func(client kubernetes.Interface, resync time.Duration) cache.SharedIndexInformer {
 			lw := cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
-				ListWithContextFunc: c.List, WatchFuncWithContext: c.Watch}, client)
+				ListWithContextFunc: c.list, WatchFuncWithContext: c.Watch}, client)
 			return cache.NewSharedIndexInformerWithOptions(lw, c.example,
 				cache.SharedIndexInformerOptions{ResyncPeriod: resync})
 		})
@@ -108,13 +108,21 @@ func Start(ctx context.Context, client kubernetes.Interface, o Options) (*Watche
 	w.factory.Start(w.stop)
 
 	// A registration has synced when its handler has been told every object of the first list.
+	// Each watch must then be up once, so that a window begins with every watch up.
 	ended := make(chan struct{})
 	stopWaiting := context.AfterFunc(ctx, func() { close(ended) })
-	ok := cache.WaitForCacheSync(ended, synced...)
-	stopWaiting()
-	if !ok {
+	defer stopWaiting()
+	if !cache.WaitForCacheSync(ended, synced...) {
 		w.Stop()
 		return nil, ctx.Err()
+	}
+	for _, c := range w.conns {
+		select {
+		case <-c.firstUp:
+		case <-ended:
+			w.Stop()
+			return nil, ctx.Err()
+		}
 	}
 	return w, nil
 }
