@@ -60,11 +60,14 @@ func expand(s, path string, keep bool, images map[string]fileImage, env func(str
 			case v == "":
 				return "", "the variable " + name + " is empty"
 			}
+			if strings.HasSuffix(v, "$") && strings.HasPrefix(rest[end+1:], "{") {
+				return "", "the variable " + name + " ends in $ before {"
+			}
 			if keep {
 				v = strings.ReplaceAll(v, "${", "$${")
 			}
 			b.WriteString(v)
-		case imageFormRe.MatchString(rest):
+		case imageFormRe.MatchString(rest) && imageNameRe.MatchString(imageFormRe.FindStringSubmatch(rest)[1]):
 			if !imagesAllowed(path) {
 				return "", "${images.…} forms are allowed under setup, deploy and probe only"
 			}
@@ -161,7 +164,8 @@ func fill(s string, images map[string]ImageRef) (string, error) {
 
 // Resolve fills every ${images.NAME.digest}, .repository and .ref form under setup, deploy and
 // probe. images must have every name the forms use; a missing one is an error, and then nothing
-// is filled. After Resolve no form is left.
+// is filled. After Resolve no form is left. Call it once per run: it reads a $${ that Load kept
+// as a literal ${, so a second call would read that literal again.
 func (c *Config) Resolve(images map[string]ImageRef) error {
 	var first error
 	c.transform(func(s string) string {

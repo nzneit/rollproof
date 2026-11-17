@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -274,6 +275,141 @@ func TestSubstituteRejectsAProgramMadeEmpty(t *testing.T) {
 	text := variant(t, base, "deploy:\n", "setup:\n  - [\"${env.CMD}\"]\ndeploy:\n")
 	_, err := loadWith(t, t.TempDir(), text, envOf(map[string]string{"CMD": ""}))
 	rejected(t, err, "CMD")
+}
+
+func TestSubstituteRejectsAliasesAndTheRest(t *testing.T) {
+	anchored := variant(t, base, "  namespace: orders\n", "  namespace: &ref \"${images.orders.ref}\"\n")
+	toNodeImage := variant(t, anchored, "cluster:\n  workers: 3\n", "")
+	toNodeImage = withImage(t, toNodeImage+"cluster:\n  node-image: *ref\n  workers: 3\n")
+	registries := "registries:\n  - &r { host: registry.example, username: ci, password: S3CRET-VALUE }\n  - <<: *r\n"
+	for _, tc := range []struct {
+		name, text string
+		env        map[string]string
+		want       string
+	}{
+		{"an aliased password", variant(t, variant(t, base, "  workers: 3\n", "  workers: 3\n  node-image: &pw S3CRET-VALUE\n"), "deploy:\n",
+			"registries:\n  - host: registry.example\n    username: ci\n    password: *pw\ndeploy:\n"), nil, "registries[0].password"},
+		{"a merge key", variant(t, base, "deploy:\n", registries+"deploy:\n"), nil, "registries[1]"},
+		{"an alias into cluster.node-image", toNodeImage, nil, "cluster.node-image"},
+		{"an alias into deploy", variant(t, variant(t, base, "  workers: 3\n", "  workers: 3\n  node-image: &lit S3CRET-VALUE\n"),
+			"  namespace: orders\n", "  namespace: *lit\n"), nil, "deploy.namespace"},
+		{"an alias used as a key", variant(t, variant(t, base, "  workers: 3\n", "  workers: 3\n  node-image: &lit S3CRET-VALUE\n"),
+			"  namespace: orders\n", "  namespace: orders\n  *lit : x\n"), nil, "deploy."},
+		{"a variable that ends in $ before {", variant(t, base, "deploy:\n", "setup:\n  - [\"a${env.A}{b\"]\ndeploy:\n"),
+			map[string]string{"A": planted + "$"}, "the variable A ends in $ before {"},
+		{"an image name that is not a name", withImage(t, withInline(t, base, `{ note: "${images.S3CRET-VALUE.digest}" }`)), nil, "values[0].note"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadWith(t, t.TempDir(), tc.text, envOf(tc.env))
+			rejected(t, err, tc.want)
+			if strings.HasPrefix(tc.name, "an alias") || tc.name == "a merge key" {
+				rejected(t, err, "YAML aliases and merge keys are not accepted")
+			}
+		})
+	}
+}
+
+func TestAnUnusedAnchorIsAccepted(t *testing.T) {
+	if _, err := loadText(t, variant(t, base, "  workers: 3\n", "  workers: &w 3\n")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResolveFillsEveryPath(t *testing.T) {
+	const form, filled = "${images.orders.ref}", "rollproof.test/orders@sha256:abc"
+	stored := map[string]ImageRef{"orders": {Repository: "rollproof.test/orders", Digest: "sha256:abc"}}
+	deepMap := func() map[string]any {
+		return map[string]any{"a": []any{map[string]any{"b": form}}}
+	}
+	deepWant := map[string]any{"a": []any{map[string]any{"b": filled}}}
+	for _, tc := range []struct {
+		name string
+		set  func(c *Config)
+		get  func(c *Config) any
+		want any
+	}{
+		{"setup", func(c *Config) { c.Setup = [][]string{{"kubectl", form}} }, func(c *Config) any { return c.Setup[0][1] }, filled},
+		{"namespace", func(c *Config) { c.Deploy.Namespace = form }, func(c *Config) any { return c.Deploy.Namespace }, filled},
+		{"selector", func(c *Config) { c.Deploy.Selector = "app=" + form }, func(c *Config) any { return c.Deploy.Selector }, "app=" + filled},
+		{"release", func(c *Config) { c.Deploy.Helm.Release = form }, func(c *Config) any { return c.Deploy.Helm.Release }, filled},
+		{"chart", func(c *Config) { c.Deploy.Helm.Candidate.Chart = form }, func(c *Config) any { return c.Deploy.Helm.Candidate.Chart }, filled},
+		{"version", func(c *Config) { c.Deploy.Helm.Previous.Version = form }, func(c *Config) any { return c.Deploy.Helm.Previous.Version }, filled},
+		{"values file", func(c *Config) { c.Deploy.Helm.Candidate.Values = []Value{{File: "/x/" + form}} },
+			func(c *Config) any { return c.Deploy.Helm.Candidate.Values[0].File }, "/x/" + filled},
+		{"inline at depth", func(c *Config) { c.Deploy.Helm.Candidate.Values = []Value{{Inline: deepMap()}} },
+			func(c *Config) any { return c.Deploy.Helm.Candidate.Values[0].Inline }, deepWant},
+		{"commands install", func(c *Config) { c.Deploy.Commands = &Commands{Install: []string{"a", form}} },
+			func(c *Config) any { return c.Deploy.Commands.Install[1] }, filled},
+		{"commands deploy", func(c *Config) { c.Deploy.Commands = &Commands{Deploy: []string{"a", form}} },
+			func(c *Config) any { return c.Deploy.Commands.Deploy[1] }, filled},
+		{"commands rollback", func(c *Config) { c.Deploy.Commands = &Commands{Rollback: []string{"a", form}} },
+			func(c *Config) any { return c.Deploy.Commands.Rollback[1] }, filled},
+		{"probe url", func(c *Config) { c.Probe.HTTP.URL = "http://h/" + form }, func(c *Config) any { return c.Probe.HTTP.URL }, "http://h/" + filled},
+		{"header value", func(c *Config) { c.Probe.HTTP.Headers["X-Planted"] = form },
+			func(c *Config) any { return c.Probe.HTTP.Headers["X-Planted"] }, filled},
+		{"custom image", func(c *Config) { c.Probe.Custom = &Custom{Image: form} }, func(c *Config) any { return c.Probe.Custom.Image }, filled},
+		{"custom command", func(c *Config) { c.Probe.Custom = &Custom{Command: []string{"a", form}} },
+			func(c *Config) any { return c.Probe.Custom.Command[1] }, filled},
+		{"custom args", func(c *Config) { c.Probe.Custom = &Custom{Args: []string{form}} }, func(c *Config) any { return c.Probe.Custom.Args[0] }, filled},
+		{"env name", func(c *Config) { c.Probe.Custom = &Custom{Env: []EnvVar{{Name: form}}} }, func(c *Config) any { return c.Probe.Custom.Env[0].Name }, filled},
+		{"env value", func(c *Config) { c.Probe.Custom = &Custom{Env: []EnvVar{{Name: "N", Value: form}}} },
+			func(c *Config) any { return c.Probe.Custom.Env[0].Value }, filled},
+		{"env valueFrom", func(c *Config) { c.Probe.Custom = &Custom{Env: []EnvVar{{Name: "N", ValueFrom: deepMap()}}} },
+			func(c *Config) any { return c.Probe.Custom.Env[0].ValueFrom }, deepWant},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := loadText(t, withImage(t, base))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.set(c)
+			if err := c.Resolve(stored); err != nil {
+				t.Fatal(err)
+			}
+			if d := cmp.Diff(tc.want, tc.get(c)); d != "" {
+				t.Errorf("(-want +got):\n%s", d)
+			}
+			raw, err := json.Marshal(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(raw), "${images.") {
+				t.Errorf("a form is left in the configuration: %s", raw)
+			}
+		})
+	}
+
+	t.Run("a missing name fills nothing", func(t *testing.T) {
+		c, err := loadText(t, withImage(t, base))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Deploy.Namespace = form
+		c.Setup = [][]string{{"a", "${images.nope.ref}"}}
+		err = c.Resolve(stored)
+		if err == nil || !strings.Contains(err.Error(), "nope") {
+			t.Fatalf("error %v, want one that names nope", err)
+		}
+		if c.Deploy.Namespace != form || c.Setup[0][1] != "${images.nope.ref}" {
+			t.Errorf("Resolve filled part of the configuration: %q, %q", c.Deploy.Namespace, c.Setup[0][1])
+		}
+	})
+
+	t.Run("an environment value that holds $${ in keep mode", func(t *testing.T) {
+		const value = "$${images.orders.ref}"
+		text := withImage(t, withInline(t, base, `{ note: "${env.A} ${images.orders.ref}" }`))
+		c, err := loadWith(t, t.TempDir(), text, envOf(map[string]string{"A": value}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Resolve(stored); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{"note": value + " " + filled}
+		if d := cmp.Diff(want, c.Deploy.Helm.Candidate.Values[0].Inline); d != "" {
+			t.Errorf("(-want +got):\n%s", d)
+		}
+	})
 }
 
 func TestFormatDuration(t *testing.T) {

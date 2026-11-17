@@ -423,6 +423,9 @@ func Load(path string, env func(name string) (string, bool)) (*Config, error) {
 	}
 
 	x := newIndex(&root)
+	if err := checkAliases(&root, x); err != nil {
+		return nil, err
+	}
 	var f fileConfig
 	strict := yaml.NewDecoder(bytes.NewReader(data))
 	strict.KnownFields(true)
@@ -574,6 +577,22 @@ func matchesQuoted(value, quoted string) bool {
 		return quoted == value[:7]+"..."
 	}
 	return quoted == value
+}
+
+// checkAliases rejects every YAML alias and every merge key. The node walk does not follow an
+// alias, so a password, a form or an escape behind one would get past the checks that run on
+// the nodes. An anchor that nothing uses is accepted.
+func checkAliases(root *yaml.Node, x *index) error {
+	var first error
+	walk(root, "", func(path string, key, value *yaml.Node) {
+		if first != nil {
+			return
+		}
+		if value.Kind == yaml.AliasNode || key != nil && (key.Kind == yaml.AliasNode || key.ShortTag() == "!!merge") {
+			first = x.reject(path, "YAML aliases and merge keys are not accepted")
+		}
+	})
+	return first
 }
 
 var nullItemRe = regexp.MustCompile(`^(?:registries|deploy\.helm\.(?:previous|candidate)\.values|probe\.custom\.env|setup(?:\[[0-9]+\])?|deploy\.commands\.(?:install|deploy|rollback)|probe\.custom\.(?:command|args))\[[0-9]+\]$`)
