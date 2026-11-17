@@ -48,6 +48,10 @@ const (
 // experiments are the slots of the summary line, in its order.
 var experiments = []string{"A", "B", "C", "D", "E"}
 
+// infoOnly are the experiments whose results are info lines only. Each must
+// run to its end, as the slots must, or the summary counts it as failed.
+var infoOnly = []string{"C2"}
+
 func main() { os.Exit(run()) }
 
 // checks counts the failed checks, prints one line for each, and holds what
@@ -222,6 +226,10 @@ func prove(ctx context.Context, c *checks, dir string) {
 	} else {
 		c.fail("C: A gave no arguments with which the log rotated, so C did not run")
 	}
+	if ctx.Err() != nil {
+		return
+	}
+	p.experimentC2()
 	if ctx.Err() != nil {
 		return
 	}
@@ -761,6 +769,20 @@ func (t *tally) missing() (int, string) {
 	return count, s
 }
 
+// missingBounds returns the first and the last N from 1 to n that were never
+// taken, or 0 and 0 when none is missing.
+func (t *tally) missingBounds() (first, last int) {
+	for i := 1; i <= t.n; i++ {
+		if t.seen[i] == 0 {
+			if first == 0 {
+				first = i
+			}
+			last = i
+		}
+	}
+	return first, last
+}
+
 // everyOnce reports whether every N from 1 to n was taken exactly once, in
 // order, and nothing else was taken.
 func (t *tally) everyOnce() bool {
@@ -899,10 +921,83 @@ func (p *proof) experimentB() {
 // a rotated file appears, waits 12 seconds and opens it again by the rule.
 // It records what came back; it judges nothing.
 func (p *proof) experimentC(args []string, n int) {
+	cut, ok := p.cutAtRotation("C", args, n)
+	if !ok {
+		return
+	}
+	note := cut.notes[0]
+	info("C: the lines lost: %d; the missing N: %s", cut.missing, cut.ranges)
+	info("C: the last line read before the cut: N %d at %s; AT %d", note.lastN, note.last.Format(time.RFC3339Nano), note.at)
+	info("C: the first line returned after the reopen: %s", firstLine(note.first))
+	info("C: the lines at LAST that came back: %d, against AT %d", note.atLast, note.at)
+	info("C: the rule saw a gap: %t", cut.gap)
+	p.c.slot["C"] = cut.text()
+}
+
+// experimentC2 runs C's procedure with A's arguments and -n 300000, so that
+// the liner still writes when the kubelet looks again after the cut and the
+// lines after the break land in a rotated file. When no line is lost, it
+// runs once more with -n 600000. It records what came back; it judges
+// nothing, and its results are info lines only.
+func (p *proof) experimentC2() {
+	for _, n := range []int{300000, 600000} {
+		label := fmt.Sprintf("C2, -n %d", n)
+		cut, ok := p.cutAtRotation(label, []string{"-n", strconv.Itoa(n), "-rate", "15000", "-pad", "180"}, n)
+		if !ok {
+			return
+		}
+		note := cut.notes[0]
+		lost := "none"
+		if cut.missing > 0 {
+			first, last := cut.t.missingBounds()
+			lost = fmt.Sprintf("the first missing N %d, the last missing N %d", first, last)
+		}
+		info("%s: the lines lost: %d; %s", label, cut.missing, lost)
+		info("%s: the last line read before the cut: N %d at %s; AT %d", label, note.lastN, note.last.Format(time.RFC3339Nano), note.at)
+		info("%s: the first line returned after the reopen: %s", label, firstLine(note.first))
+		info("%s: the lines at LAST that came back: %d, against AT %d", label, note.atLast, note.at)
+		info("%s: the rule saw a gap: %t", label, cut.gap)
+		info("%s: %s", label, cut.text())
+		p.c.slot["C2"] = cut.text()
+		if cut.missing > 0 {
+			return
+		}
+	}
+}
+
+// rotationCut is what one run of C's procedure gave.
+type rotationCut struct {
+	t       *tally
+	notes   []reopen // at least one: the reopen after the cut comes first
+	missing int      // how many N from 1 to n were never taken
+	ranges  string   // the first ten ranges of them
+	gap     bool     // the rule saw a gap at some reopen
+}
+
+// text is C's TEXT for the result: no line lost, N lines lost, gap seen, or
+// N lines lost, gap not seen.
+func (c rotationCut) text() string {
+	switch {
+	case c.missing == 0:
+		return "no line lost"
+	case c.gap:
+		return fmt.Sprintf("%d lines lost, gap seen", c.missing)
+	default:
+		return fmt.Sprintf("%d lines lost, gap not seen", c.missing)
+	}
+}
+
+// cutAtRotation runs C's procedure with args: it follows the log from the
+// start and runs ls every 500 ms while the first stream is open; when a
+// rotated file appears it cuts the stream, waits 12 seconds, opens it again
+// by the rule and follows it to the end. It prints the listings at the cut
+// and at the end, the rule's notes and the tally. When the procedure cannot
+// run to its end, it prints a FAILED line and returns false.
+func (p *proof) cutAtRotation(label string, args []string, n int) (rotationCut, bool) {
 	pod, err := p.startPod(args...)
 	if err != nil {
-		p.c.fail("C: %v", err)
-		return
+		p.c.fail("%s: %v", label, err)
+		return rotationCut{}, false
 	}
 	dir := logDir(pod.UID)
 	r := &rule{}
@@ -947,39 +1042,28 @@ func (p *proof) experimentC(args []string, n int) {
 		pause: 12 * time.Second,
 	})
 	if err != nil {
-		p.c.fail("C: %v", err)
-		return
+		p.c.fail("%s: %v", label, err)
+		return rotationCut{}, false
 	}
 	if f.cuts == 0 {
-		p.c.fail("C: no rotated file appeared in %d polls while the first stream was open, so the stream was not cut (last poll error: %v)", polls, pollErr)
-		return
+		p.c.fail("%s: no rotated file appeared in %d polls while the first stream was open, so the stream was not cut (last poll error: %v)", label, polls, pollErr)
+		return rotationCut{}, false
 	}
-	info("C: a rotated file appeared at poll %d, %s", polls, seenAt.UTC().Format(time.RFC3339Nano))
-	printListing("C, at the cut", dir, seen)
+	info("%s: a rotated file appeared at poll %d, %s", label, polls, seenAt.UTC().Format(time.RFC3339Nano))
+	printListing(label+", at the cut", dir, seen)
 	if final, err := p.listing(dir); err == nil {
-		printListing("C, at the end", dir, final)
+		printListing(label+", at the end", dir, final)
+	} else {
+		info("%s, at the end: ls -la %s in the worker failed: %v", label, dir, err)
 	}
-	printNotes("C", f.notes)
-	t.summarize("C")
-	missing, ranges := t.missing()
-	gap := false
+	printNotes(label, f.notes)
+	t.summarize(label)
+	cut := rotationCut{t: t, notes: f.notes}
+	cut.missing, cut.ranges = t.missing()
 	for _, note := range f.notes {
-		gap = gap || note.gap()
+		cut.gap = cut.gap || note.gap()
 	}
-	note := f.notes[0]
-	info("C: the lines lost: %d; the missing N: %s", missing, ranges)
-	info("C: the last line read before the cut: N %d at %s; AT %d", note.lastN, note.last.Format(time.RFC3339Nano), note.at)
-	info("C: the first line returned after the reopen: %s", firstLine(note.first))
-	info("C: the lines at LAST that came back: %d, against AT %d", note.atLast, note.at)
-	info("C: the rule saw a gap: %t", gap)
-	switch {
-	case missing == 0:
-		p.c.slot["C"] = "no line lost"
-	case gap:
-		p.c.slot["C"] = fmt.Sprintf("%d lines lost, gap seen", missing)
-	default:
-		p.c.slot["C"] = fmt.Sprintf("%d lines lost, gap not seen", missing)
-	}
+	return cut, true
 }
 
 // experimentD writes 50,000 identical lines as fast as it can, cuts the
@@ -1093,6 +1177,11 @@ func summary(ctx context.Context, c *checks) int {
 		}
 		slotFailed = slotFailed || word == "FAILED"
 		parts = append(parts, x+" "+word)
+	}
+	for _, x := range infoOnly {
+		if _, done := c.slot[x]; !done {
+			c.fail("experiment %s did not run to its end", x)
+		}
 	}
 	last := "p11: " + strings.Join(parts, ", ")
 	if c.failed > 0 && !slotFailed {
