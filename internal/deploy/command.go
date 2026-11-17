@@ -1,6 +1,6 @@
 //go:build linux
 
-// Package deploy is the deploy contract as the tool keeps it: the commands the
+// Package deploy is the deploy contract of section 7 as the tool keeps it: the commands the
 // tool starts, and the drivers that install, deploy and roll back. It hides
 // Helm's command lines and how a command is started, bounded and stopped.
 package deploy
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,7 +63,11 @@ type Runner interface {
 
 // RunnerOptions is how every command of a run is started: its folder, the
 // test cluster's kubeconfig, the environment to start from, and where each
-// command's output is kept.
+// command's output is kept. Kubeconfig must be an absolute path: a command is
+// not started without one. When Dir is set, the command's PWD is Dir. Run
+// ignores the errors of the evidence: a failed Evidence call, nil writer or
+// failed write or close do not stop the command. A caller who needs them wraps
+// the writer that Evidence returns.
 type RunnerOptions struct {
 	Dir, Kubeconfig string
 	Environ         []string
@@ -94,27 +99,29 @@ var helmActingVariables = map[string]bool{
 	"HELM_DRIVER_SQL_CONNECTION_STRING": true,
 }
 
-// OSRunner is a Runner that starts real processes. Each gets KUBECONFIG set
-// to o.Kubeconfig and none of the variables by which Helm would act on
-// another cluster.
+// OSRunner is the Runner that NewRunner returns.
 type OSRunner struct {
-	dir      string
-	env      []string
-	removed  []string
-	evidence func(name string) (io.WriteCloser, error)
+	dir        string
+	kubeconfig string
+	env        []string
+	removed    []string
+	evidence   func(name string) (io.WriteCloser, error)
 
-	mu   sync.Mutex
-	uses map[string]int
+	mu      sync.Mutex
+	uses    map[string]int
+	pending map[*pendingStop]struct{}
 }
 
-// NewRunner returns an OSRunner that starts every command as o says.
+// NewRunner returns an OSRunner, a Runner that starts real processes. Each
+// gets KUBECONFIG set to o.Kubeconfig and none of the variables by which Helm
+// would act on another cluster.
 func NewRunner(o RunnerOptions) *OSRunner {
-	r := &OSRunner{dir: o.Dir, evidence: o.Evidence, uses: map[string]int{}}
+	r := &OSRunner{dir: o.Dir, kubeconfig: o.Kubeconfig, evidence: o.Evidence, uses: map[string]int{}, pending: map[*pendingStop]struct{}{}}
 	seen := map[string]bool{}
 	for _, entry := range o.Environ {
 		name, _, _ := strings.Cut(entry, "=")
 		switch {
-		case name == "KUBECONFIG":
+		case name == "KUBECONFIG", name == "PWD" && filepath.IsAbs(o.Dir):
 		case helmActingVariables[name]:
 			if !seen[name] {
 				seen[name] = true
@@ -126,6 +133,9 @@ func NewRunner(o RunnerOptions) *OSRunner {
 	}
 	sort.Strings(r.removed)
 	r.env = append(r.env, "KUBECONFIG="+o.Kubeconfig)
+	if filepath.IsAbs(o.Dir) {
+		r.env = append(r.env, "PWD="+o.Dir)
+	}
 	return r
 }
 
@@ -205,8 +215,9 @@ type stdoutWriter struct {
 }
 
 func (w stdoutWriter) Write(p []byte) (int, error) {
+	n, err := w.c.Write(p)
 	_, _ = w.s.Write(p)
-	return w.c.Write(p)
+	return n, err
 }
 
 // commandLine writes the arguments joined by one space, each quoted unless it
@@ -242,9 +253,96 @@ func (r *OSRunner) evidenceFor(name string) io.WriteCloser {
 	return w
 }
 
+// pendingStop is a command that was sent SIGTERM and whose group is not yet
+// known to be gone.
+type pendingStop struct {
+	killNow chan struct{} // closed by Close
+	closed  bool          // killNow is closed; guarded by OSRunner.mu
+	gone    chan struct{} // closed when the group is gone and the evidence closed
+	delay   time.Duration
+}
+
+func groupEnded(pid int) bool { return syscall.Kill(-pid, 0) == syscall.ESRCH }
+
+// stop sends SIGTERM to the group of pid, and starts the work that goes on
+// after Run may have returned: SIGKILL to the group kill later unless the group
+// is gone, whether or not the direct child has exited, then the closing of the
+// evidence with ending e once the child has been waited for.
+func (r *OSRunner) stop(pid int, kill, delay time.Duration, done <-chan struct{}, s *sink, e Ending) *pendingStop {
+	p := &pendingStop{killNow: make(chan struct{}), gone: make(chan struct{}), delay: delay}
+	r.mu.Lock()
+	r.pending[p] = struct{}{}
+	r.mu.Unlock()
+	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	go func() {
+		defer func() {
+			r.mu.Lock()
+			delete(r.pending, p)
+			r.mu.Unlock()
+			close(p.gone)
+		}()
+		timer := time.NewTimer(kill)
+		defer timer.Stop()
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		var giveUp <-chan time.Time
+		killed := false
+		sendKill := func() {
+			if !killed {
+				killed = true
+				_ = syscall.Kill(-pid, syscall.SIGKILL)
+				giveUp = time.After(delay)
+			}
+		}
+	wait:
+		for !groupEnded(pid) {
+			select {
+			case <-tick.C:
+			case <-timer.C:
+				sendKill()
+			case <-p.killNow:
+				sendKill()
+			case <-giveUp:
+				break wait
+			}
+		}
+		<-done
+		s.finish(e, -1)
+	}()
+	return p
+}
+
+// Close stops at once every command whose stop is still pending: it sends
+// SIGKILL to the command's group, waits until the group is gone and the
+// command's evidence is closed, then returns. Each wait is bounded by the wait
+// delay. A group whose command exited by itself is not touched. Call it once,
+// after the last Run.
+func (r *OSRunner) Close() {
+	r.mu.Lock()
+	var ps []*pendingStop
+	for p := range r.pending {
+		ps = append(ps, p)
+		if !p.closed {
+			p.closed = true
+			close(p.killNow)
+		}
+	}
+	r.mu.Unlock()
+	for _, p := range ps {
+		select {
+		case <-p.gone:
+		case <-time.After(p.delay):
+		}
+	}
+}
+
 // Run starts c and waits for it. When ctx ends, it stops the command's
-// process group and returns at once with StoppedBySignal; the evidence is
-// closed when the command has gone.
+// process group and returns at once with StoppedBySignal, also when ctx ends
+// during the grace after the limit, where the Ending stays StoppedAtLimit
+// because the limit came first. The group is sent SIGTERM and, after the kill
+// delay, SIGKILL unless it is gone; that and the closing of the evidence go on
+// in the background, and Close waits for them. At the limit, Run returns when
+// the group is gone.
 func (r *OSRunner) Run(ctx context.Context, c Command) Result {
 	kill, delay := killAfter, waitDelay
 	res := Result{Name: c.Name, ExitCode: -1, Began: time.Now()}
@@ -257,8 +355,18 @@ func (r *OSRunner) Run(ctx context.Context, c Command) Result {
 		s.finish(res.Ending, res.ExitCode)
 		return res
 	}
-	if len(c.Args) == 0 {
+	switch {
+	case r.kubeconfig == "":
+		return notStarted(errors.New("no kubeconfig was given"))
+	case !filepath.IsAbs(r.kubeconfig):
+		return notStarted(errors.New("the kubeconfig path is not absolute"))
+	case len(c.Args) == 0:
 		return notStarted(errors.New("no program"))
+	}
+	if ctx.Err() != nil {
+		res.Ending, res.Ended = StoppedBySignal, time.Now()
+		s.finish(res.Ending, res.ExitCode)
+		return res
 	}
 
 	out := &capture{}
@@ -273,24 +381,12 @@ func (r *OSRunner) Run(ctx context.Context, c Command) Result {
 		return notStarted(err)
 	}
 
-	pid := cmd.Process.Pid
-	exited := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		_ = cmd.Wait() // an exec.ErrWaitDelay still means the child exited
-		close(exited)
 		close(done)
 	}()
-	stop := func() {
-		_ = syscall.Kill(-pid, syscall.SIGTERM)
-		go func() {
-			select {
-			case <-exited:
-			case <-time.After(kill):
-				_ = syscall.Kill(-pid, syscall.SIGKILL)
-			}
-		}()
-	}
+	pid := cmd.Process.Pid
 
 	var limit <-chan time.Time
 	if c.Timeout > 0 {
@@ -307,20 +403,19 @@ func (r *OSRunner) Run(ctx context.Context, c Command) Result {
 		} else {
 			res.Ending = ExitedNonZero
 		}
+		res.Ended, res.Stdout = time.Now(), out.String()
+		s.finish(res.Ending, res.ExitCode)
 	case <-limit:
-		stop()
-		<-done
+		p := r.stop(pid, kill, delay, done, s, StoppedAtLimit)
 		res.Ending = StoppedAtLimit
+		select {
+		case <-p.gone:
+		case <-ctx.Done():
+		}
+		res.Ended, res.Stdout = time.Now(), out.String()
 	case <-ctx.Done():
-		stop()
+		r.stop(pid, kill, delay, done, s, StoppedBySignal)
 		res.Ending, res.Ended, res.Stdout = StoppedBySignal, time.Now(), out.String()
-		go func() {
-			<-done
-			s.finish(StoppedBySignal, -1)
-		}()
-		return res
 	}
-	res.Ended, res.Stdout = time.Now(), out.String()
-	s.finish(res.Ending, res.ExitCode)
 	return res
 }
