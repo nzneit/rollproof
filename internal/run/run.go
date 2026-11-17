@@ -316,11 +316,11 @@ func (s *runState) windows(ctx context.Context) bool {
 	for _, name := range s.names {
 		s.tl.Windows = append(s.tl.Windows, verdict.Window{Name: name})
 	}
-	// The goroutine that reads the probe's events starts here and is the only
-	// reader of them until the probe is stopped.
+	// Step 10: the windows are fixed, and the goroutine that reads the probe's events starts here.
+	// It is the only reader of them until the probe is stopped.
 	s.readEvents(s.probeStart.Events)
 
-	// Step 10: the steady window runs to its end, whatever happened in it, unless a signal
+	// Step 11: the steady window runs to its end, whatever happened in it, unless a signal
 	// comes first: a signal stops the run at once (section 10), and limits.steady has no upper
 	// bound.
 	end := s.probeStart.First.Add(s.cfg.Limits.Steady)

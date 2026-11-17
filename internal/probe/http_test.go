@@ -475,6 +475,73 @@ func TestRunHTTPWarmupRestartsItsCountAfterAFailure(t *testing.T) {
 	}
 }
 
+func TestRunHTTPWarmupPacesItsChecks(t *testing.T) {
+	starts := make(chan time.Time, 64)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		starts <- time.Now()
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	o := testOptions(srv.URL)
+	o.Rate = 20
+	o.Warmup = 100 * time.Millisecond
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- RunHTTP(ctx, o, &capture{}) }()
+	var got []time.Time
+	for len(got) < 5 {
+		select {
+		case at := <-starts:
+			got = append(got, at)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the warm-up sent %d checks in 5 s, want 5", len(got))
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunHTTP: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunHTTP did not return within 5 s of the cancel")
+	}
+	interval := time.Second / time.Duration(o.Rate)
+	for i := 1; i < len(got); i++ {
+		if gap := got[i].Sub(got[i-1]); gap < interval/2 {
+			t.Errorf("checks %d and %d started %v apart, want at least %v", i-1, i, gap, interval/2)
+		}
+	}
+}
+
+func TestRunHTTPWarmupTimesFromAReturnedSuccess(t *testing.T) {
+	var requests, sentAt atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		if requests.Add(1) == 1 {
+			// The server's own delay, not the test's wait: the first answer is a success that
+			// takes longer than the warm-up.
+			time.Sleep(300 * time.Millisecond)
+			sentAt.Store(time.Now().UnixNano())
+		}
+	}))
+	defer srv.Close()
+	o := testOptions(srv.URL)
+	o.Warmup = 100 * time.Millisecond
+	obs := runFor(t, o, 800*time.Millisecond).observations(t)
+	if len(obs) == 0 {
+		t.Fatal("no observation after the warm-up")
+	}
+	if sentAt.Load() == 0 {
+		t.Fatal("the slow first answer was not sent")
+	}
+	sent := time.Unix(0, sentAt.Load())
+	if delay := obs[0].T.Sub(sent); delay < o.Warmup {
+		t.Errorf("the first observation started %v after the slow answer was sent, want at least the warm-up %v",
+			delay, o.Warmup)
+	}
+}
+
 func TestRunHTTPNeverSilentWhileItWorks(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		time.Sleep(600 * time.Millisecond)

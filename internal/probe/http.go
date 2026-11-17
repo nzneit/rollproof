@@ -63,10 +63,10 @@ type httpRun struct {
 //
 // When o.Warmup is above zero, RunHTTP first sends one check at a time, leaving no more than the
 // rate's interval between two of them, and writes nothing for them. The observations begin once
-// the checks have passed without a failure for o.Warmup; a failed check starts that time again. A
-// target that never answers leaves the probe with no observation at all, so the tool ends the run
-// not verified when its wait for the first observation (limits.timeout) runs out. A ctx that ends
-// during the warm-up returns nil with nothing written.
+// its checks have kept passing for o.Warmup, timed from when the first of them returned; a failed
+// check starts that time again. A target that never answers leaves the probe with no observation
+// at all, so the tool ends the run not verified when its wait for the first observation
+// (limits.timeout) runs out. A ctx that ends during the warm-up returns nil with nothing written.
 //
 // A write to out that fails is not reported: RunHTTP's caller has nothing to act on. A reader of
 // the log sees the silence; on a pipe, a failed write ends the process with SIGPIPE.
@@ -167,11 +167,13 @@ func RunHTTP(ctx context.Context, o HTTPOptions, out io.Writer) error {
 }
 
 // warmUp sends one request at a time until the checks have passed without a failure for
-// o.Warmup, and reports whether that happened. It writes nothing: a failed check only starts the
-// time again. No more than the rate's interval is left between two checks.
+// o.Warmup, and reports whether that happened. The time is measured from when the first check of a
+// run of passes returned, so that one slow success does not stand for the whole warm-up. It writes
+// nothing: a failed check only starts the time again. No more than the rate's interval is left
+// between two checks.
 func (r *httpRun) warmUp(ctx context.Context) bool {
 	interval := time.Second / time.Duration(r.o.Rate)
-	var since time.Time // when the unbroken run of passes began; zero before the first of them
+	var since time.Time // when the first successful check of the run returned; zero before that
 	for {
 		if ctx.Err() != nil {
 			return false
@@ -179,18 +181,19 @@ func (r *httpRun) warmUp(ctx context.Context) bool {
 		began := time.Now()
 		rctx, cancel := context.WithTimeout(ctx, r.o.Timeout)
 		class, err := r.get(rctx)
+		returned := time.Now()
 		cancel()
 		if err != nil || class != "" {
 			since = time.Time{}
 		} else {
 			if since.IsZero() {
-				since = began
+				since = returned
 			}
-			if time.Since(since) >= r.o.Warmup {
+			if returned.Sub(since) >= r.o.Warmup {
 				return true
 			}
 		}
-		wait := interval - time.Since(began)
+		wait := interval - returned.Sub(began)
 		if wait <= 0 {
 			continue
 		}

@@ -45,6 +45,8 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 	}
+	checkHelmMajor("helm-3", "v3.")
+	checkHelmMajor("helm-4", "v4.")
 	goBuild("build", "-trimpath", "-ldflags", "-s -w -X main.version=dev", "-o", filepath.Join("bin", "rollproof"), "./cmd/rollproof")
 	for _, version := range []string{"previous", "candidate"} {
 		buildFixture(version)
@@ -66,6 +68,31 @@ func pickEngine() string {
 		}
 	}
 	return ""
+}
+
+// helmEnv is the environment of a command that runs Helm from dir, with dir first on the PATH.
+func helmEnv(dir string) []string {
+	return append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// checkHelmMajor fails unless the Helm binary of major prints a version that begins prefix. A
+// failure names the binary and what it printed, and exits 1.
+func checkHelmMajor(major, prefix string) {
+	dir := filepath.Join(root, ".tools", major)
+	binary := filepath.Join(dir, "helm")
+	cmd := exec.Command("helm", "version", "--short")
+	cmd.Dir = dir
+	cmd.Env = helmEnv(dir)
+	out, err := cmd.CombinedOutput()
+	got := strings.TrimSpace(string(out))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "e2e: %s: %v\n%s", binary, err, out)
+		os.Exit(1)
+	}
+	if !strings.HasPrefix(got, prefix) {
+		fmt.Fprintf(os.Stderr, "e2e: %s printed %q, which does not begin %q\n", binary, got, prefix)
+		os.Exit(1)
+	}
 }
 
 // goBuild runs go with args in root, with CGO_ENABLED=0 in its environment.
@@ -237,7 +264,7 @@ func runFixture(t *testing.T, f fixture) result {
 	if err := os.Symlink(filepath.Join(root, ".tools", f.helm, "helm"), filepath.Join(helmDir, "helm")); err != nil {
 		t.Fatalf("%s: the Helm link: %v", f.name, err)
 	}
-	env := append(os.Environ(), "PATH="+helmDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	env := helmEnv(helmDir)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
@@ -301,7 +328,27 @@ func runFixture(t *testing.T, f fixture) result {
 	for _, w := range got.Windows {
 		r.windows[w.Name] = w.Result
 	}
+	checkClusterGone(t, f)
 	return r
+}
+
+// checkClusterGone fails the test when the engine still holds a container of the cluster the run
+// made. It only reads: the harness removes nothing.
+func checkClusterGone(t *testing.T, f fixture) {
+	t.Helper()
+	out, err := exec.Command(engine, "ps", "-a", "--format", "{{.Names}}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s: %s ps -a: %v\n%s", f.name, engine, err, out)
+	}
+	var left []string
+	for _, name := range strings.Fields(string(out)) {
+		if strings.HasPrefix(name, "rollproof-e2e-") {
+			left = append(left, name)
+		}
+	}
+	if len(left) > 0 {
+		t.Errorf("%s: the run left these containers behind: %s", f.name, strings.Join(left, ", "))
+	}
 }
 
 // outDir returns where one test's results stay: under the system's temporary

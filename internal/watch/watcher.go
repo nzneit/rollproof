@@ -23,8 +23,9 @@ import (
 const pollEvery = 200 * time.Millisecond
 
 // Options is what a Watcher needs. Selector is a label selector as text, empty for every
-// workload. Service is the Service that the built-in probe's URL names, nil when it names none or
-// the probe is a custom one.
+// workload. Service is the initial value of the Service whose endpoints Transition reads, which
+// UseService may replace; it is nil when the probe names no Service or is a custom one. The tool
+// itself passes nil and calls UseService after the target check.
 type Options struct {
 	Namespace, Selector string
 	Settle, Timeout     time.Duration
