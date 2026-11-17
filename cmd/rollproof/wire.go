@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -76,15 +77,32 @@ func (w *wiring) create(ctx context.Context, cfg *config.Config, name string, ev
 	}
 	client, err := c.Client()
 	if err != nil {
-		// run deletes no cluster whose Create failed, so this one is deleted here:
-		// a kept cluster stays for debugging (section 9, "Name and lifetime").
-		if !keep {
-			_ = c.Delete(ctx)
-		}
-		return nil, verdict.Condition{Code: verdict.ClusterFailed,
-			Text: "the cluster's API server cannot be reached: " + err.Error()}
+		// run deletes no cluster whose Create failed, so this one is deleted here,
+		// unless it is kept or the run's context has ended (section 9, "Name and
+		// lifetime").
+		return nil, failedClientError(ctx, keep, c.Delete, err)
 	}
 	return &session{c: c, client: client, cfg: cfg, evidence: evidence}, nil
+}
+
+// clusterLeftBehind ends the failure text when the clean-up after it failed too. It must match the
+// sentence that internal/cluster's own failure uses (its unexported leftBehind).
+const clusterLeftBehind = ". Parts of the run may be left behind; the next run with this name removes them."
+
+// failedClientError is the error of a cluster that was made but whose client could not be: the
+// cluster is deleted unless it is kept or ctx has ended, and the text says so when the delete
+// fails too. It follows internal/cluster's own clean-up after a failed step.
+func failedClientError(ctx context.Context, keep bool, del func(context.Context) error, clientErr error) error {
+	c := verdict.Condition{Code: verdict.ClusterFailed,
+		Text: "the cluster's API server cannot be reached: " + clientErr.Error()}
+	if keep || ctx.Err() != nil {
+		return c
+	}
+	if err := del(ctx); err != nil {
+		c.Text += clusterLeftBehind
+		return errors.Join(c, fmt.Errorf("the clean-up after it failed: %w", err))
+	}
+	return c
 }
 
 // session is a created cluster as run.Cluster: each method calls one unit.

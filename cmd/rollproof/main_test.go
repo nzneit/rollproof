@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -18,19 +21,26 @@ import (
 	"rollproof/internal/config"
 	"rollproof/internal/deploy"
 	"rollproof/internal/probe"
+	"rollproof/internal/verdict"
 )
 
 func noEnv(string) string { return "" }
 
-// lockedBuffer is a bytes.Buffer that several goroutines may write to.
+// lockedBuffer is a bytes.Buffer that several goroutines may write to. first
+// is closed by the first write.
 type lockedBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
+	mu    sync.Mutex
+	b     bytes.Buffer
+	first chan struct{}
+	once  sync.Once
 }
 
 func (l *lockedBuffer) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.first != nil {
+		l.once.Do(func() { close(l.first) })
+	}
 	return l.b.Write(p)
 }
 
@@ -72,6 +82,7 @@ func TestUsage(t *testing.T) {
 		{"run", "-f", "rollproof.yaml", "extra"},
 		{"probe"},
 		{"probe", "tcp"},
+		{"version", "extra"},
 	} {
 		var stdout, stderr bytes.Buffer
 		if code := realMain(args, &stdout, &stderr, noEnv); code != 2 {
@@ -83,6 +94,25 @@ func TestUsage(t *testing.T) {
 		if n := strings.Count(stderr.String(), "\n"); n > 10 {
 			t.Errorf("%q: %d lines on stderr, want at most 10", args, n)
 		}
+	}
+}
+
+// TestUsageTextIsExact pins the whole usage text, line by line and indent,
+// against a literal written here rather than the command's own constant.
+func TestUsageTextIsExact(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := realMain(nil, &stdout, &stderr, noEnv); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	want := `usage: rollproof run [-f FILE] [--out DIR] [--name NAME] [--keep-cluster]
+       rollproof version
+       rollproof probe http --url URL --rate N --timeout D --expect-status RANGE [--header NAME=VALUE]...
+`
+	if got := stderr.String(); got != want {
+		t.Errorf("stderr is\n%s\nwant\n%s", got, want)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout holds %q, want nothing", stdout.String())
 	}
 }
 
@@ -120,6 +150,24 @@ func TestRunWithoutAFile(t *testing.T) {
 	}
 }
 
+// TestRunWithoutAFileFlag leaves -f out, in an empty folder, and pins that the
+// reason names rollproof.yaml: the default, and nothing else.
+func TestRunWithoutAFileFlag(t *testing.T) {
+	t.Chdir(t.TempDir())
+	out := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := realMain([]string{"run", "--out", out}, &stdout, &stderr, noEnv); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, stderr.String())
+	}
+	final, codes, texts := readResult(t, out)
+	if !final || len(codes) != 1 || codes[0] != "config-rejected" {
+		t.Fatalf("final %v, reasons %q, want a final file with one config-rejected", final, codes)
+	}
+	if !strings.Contains(texts[0], "rollproof.yaml") {
+		t.Errorf("the reason is %q, want it to name rollproof.yaml", texts[0])
+	}
+}
+
 func TestRunNotBuilt(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, "chart"), 0o755); err != nil {
@@ -154,6 +202,56 @@ probe:
 	}
 }
 
+func TestFailedClientError(t *testing.T) {
+	clientErr := errors.New("no route to the API server")
+	reached := "the cluster's API server cannot be reached: no route to the API server"
+	left := reached + ". Parts of the run may be left behind; the next run with this name removes them."
+	cleanUp := errors.New("the engine is gone")
+	for _, tc := range []struct {
+		name       string
+		keep       bool
+		cancelled  bool
+		deleteErr  error
+		wantCalls  int
+		wantText   string
+		wantJoined string
+	}{
+		{"kept", true, false, cleanUp, 0, reached, ""},
+		{"the run's context has ended", false, true, cleanUp, 0, reached, ""},
+		{"the delete succeeds", false, false, nil, 1, reached, ""},
+		{"the delete fails", false, false, cleanUp, 1, left,
+			"the clean-up after it failed: the engine is gone"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.cancelled {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			calls := 0
+			del := func(context.Context) error {
+				calls++
+				return tc.deleteErr
+			}
+			err := failedClientError(ctx, tc.keep, del, clientErr)
+			if calls != tc.wantCalls {
+				t.Errorf("the delete was called %d times, want %d", calls, tc.wantCalls)
+			}
+			if err == nil {
+				t.Fatal("no error")
+			}
+			got := verdict.AsCondition(err)
+			if got.Code != verdict.ClusterFailed || got.Text != tc.wantText {
+				t.Errorf("condition %s %q, want cluster-failed %q", got.Code, got.Text, tc.wantText)
+			}
+			if tc.wantJoined != "" && !strings.Contains(err.Error(), tc.wantJoined) {
+				t.Errorf("the error is %q, want it to hold %q", err.Error(), tc.wantJoined)
+			}
+		})
+	}
+}
+
 func TestEndCommands(t *testing.T) {
 	t.Run("without Deployer", func(t *testing.T) {
 		var s session
@@ -176,6 +274,19 @@ func TestEndCommands(t *testing.T) {
 		}
 
 		pidFile := filepath.Join(dir, "pid")
+		// A failing EndCommands leaves the TERM-ignoring command running: kill its
+		// group so that the failure does not outlive the test. ESRCH when it is gone.
+		t.Cleanup(func() {
+			data, err := os.ReadFile(pidFile)
+			if err != nil {
+				return // the command never started
+			}
+			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil {
+				return
+			}
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		})
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		ran := make(chan deploy.Result, 1)
@@ -221,7 +332,6 @@ type recordingEvidence struct {
 func (e *recordingEvidence) Write(p []byte) (int, error) { return len(p), nil }
 
 func (e *recordingEvidence) Close() error {
-	time.Sleep(50 * time.Millisecond) // a Close that is slow shows an order that is wrong
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.closed = true
@@ -248,14 +358,18 @@ func TestProbeHTTP(t *testing.T) {
 	probeContext = func() (context.Context, context.CancelFunc) { return ctx, cancel }
 	t.Cleanup(func() { probeContext = old })
 
-	out := &lockedBuffer{}
+	out := &lockedBuffer{first: make(chan struct{})}
 	var errOut bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
 		done <- realMain([]string{"probe", "http", "--url", srv.URL + "/", "--rate", "20", "--timeout", "2s",
 			"--expect-status", "200-299"}, out, &errOut, noEnv)
 	}()
-	time.Sleep(time.Second)
+	select {
+	case <-out.first:
+	case <-time.After(5 * time.Second):
+		t.Fatal("probe http wrote no line before the deadline")
+	}
 	cancel()
 	select {
 	case code := <-done:
@@ -274,5 +388,26 @@ func TestProbeHTTP(t *testing.T) {
 		if got := probe.ParseLine(line, written); got.Kind != probe.Observed {
 			t.Errorf("line %q is not an observation", line)
 		}
+	}
+}
+
+// TestProbeHTTPErrorExitsOne pins the probe's exit code and stderr line when
+// RunHTTP fails. %zz is not a URL, so RunHTTP rejects it before it resolves
+// anything: the test reaches no network.
+func TestProbeHTTPErrorExitsOne(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := realMain([]string{"probe", "http", "--url", "%zz", "--rate", "1", "--timeout", "1s",
+		"--expect-status", "200-299"}, &stdout, &stderr, noEnv)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1\n%s", code, stderr.String())
+	}
+	if !strings.HasPrefix(stderr.String(), "rollproof: ") {
+		t.Errorf("stderr is %q, want it to start with %q", stderr.String(), "rollproof: ")
+	}
+	if !strings.Contains(stderr.String(), "the probe's URL does not parse") {
+		t.Errorf("stderr is %q, want the run's error text", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout holds %q, want nothing", stdout.String())
 	}
 }
