@@ -383,10 +383,10 @@ func (x *index) decodeError(err error) error {
 
 var syntaxLineRe = regexp.MustCompile(`line (\d+)`)
 
-// Load reads and validates the file at path. env looks up an environment variable. It also
-// rejects every combination that sections 7 and 8 reject, and makes every relative path
-// absolute from the file's folder. An error is
-// a verdict.Condition with ConfigRejected whose text names the key and never quotes a value.
+// Load reads and validates the file at path. env looks up an environment variable. It fills
+// every ${env.NAME} form, checks every ${images.…} form and leaves it for Resolve, rejects every
+// combination that sections 7 and 8 reject, and makes every relative path absolute from the
+// file's folder. An error is a verdict.Condition with ConfigRejected whose text names the key and never quotes a value.
 func Load(path string, env func(name string) (string, bool)) (*Config, error) {
 	real, err := filepath.Abs(path)
 	if err == nil {
@@ -432,10 +432,14 @@ func Load(path string, env func(name string) (string, bool)) (*Config, error) {
 	if err := checkNullItems(x); err != nil {
 		return nil, err
 	}
-	if err := checkPasswordForms(&f, x); err != nil {
+	if err := substitute(&root, f.Images, env, x); err != nil {
 		return nil, err
 	}
-	c, err := convert(&f, x)
+	var filled fileConfig
+	if err := root.Decode(&filled); err != nil {
+		return nil, x.decodeError(err)
+	}
+	c, err := convert(&filled, x)
 	if err != nil {
 		return nil, err
 	}
@@ -449,17 +453,6 @@ func Load(path string, env func(name string) (string, bool)) (*Config, error) {
 
 // passwordForm is the one form that a registry's password may take in the file.
 var passwordForm = regexp.MustCompile(`^\$\{env\.[A-Za-z_][A-Za-z0-9_]*\}$`)
-
-// checkPasswordForms rejects a registry password that is not one ${env.NAME} form. It reads the
-// file's own struct, before substitution exists.
-func checkPasswordForms(f *fileConfig, x *index) error {
-	for i, r := range f.Registries {
-		if r.Password != "" && !passwordForm.MatchString(r.Password) {
-			return x.reject(fmt.Sprintf("registries[%d].password", i), "must be one ${env.NAME} form")
-		}
-	}
-	return nil
-}
 
 func convert(f *fileConfig, x *index) (*Config, error) {
 	switch v := &f.Version; {
