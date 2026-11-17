@@ -1,0 +1,10 @@
+version: 1
+deploy:
+  namespace: orders
+  helm:
+    release: orders
+    candidate:
+      chart: ./chart
+probe:
+  http:
+    url: http://orders.orders.svc/api/orders/latest

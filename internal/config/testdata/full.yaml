@@ -1,0 +1,49 @@
+version: 1
+
+cluster:
+  node-image: docker.io/kindest/node:v1.37.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  registry-image: docker.io/library/registry:3@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  workers: 4
+
+registries:
+  - host: registry.example
+    ca: /etc/rollproof/corp-ca.pem
+    mirror: mirror.corp.example/registry-example
+
+images:
+  orders:
+    local: orders:candidate
+    as: registry.example/team/orders
+
+setup:
+  - [kubectl, apply, -f, test/prerequisites.yaml]
+
+deploy:
+  namespace: orders
+  selector: app=orders
+  helm:
+    release: orders
+    previous:
+      chart: oci://registry.example/charts/orders
+      version: "1.4.2"
+    candidate:
+      chart: oci://registry.example/charts/orders
+      version: "1.5.0"
+      values:
+        - /etc/rollproof/values-kind.yaml
+        - image: { digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }
+          replicas: 3
+
+probe:
+  http:
+    url: http://orders.orders.svc/api/orders/latest
+    headers: { Host: orders.example }
+    rate: 100
+    timeout: 1s
+    expect-status: 200-204
+
+limits:
+  steady: 20s
+  settle: 30s
+  timeout: 10m
+  silence: 6s
