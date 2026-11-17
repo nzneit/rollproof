@@ -1,6 +1,7 @@
 package run
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -774,6 +775,38 @@ func (c *holdClock) After(d time.Duration) <-chan time.Time {
 	return c.release
 }
 
+// cancelOnWrite cancels the run's context the first time anything is written to it: the console
+// text is written between the verdict and the clean-up.
+type cancelOnWrite struct {
+	buf    bytes.Buffer
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+// Write cancels the run and keeps what is written.
+func (w *cancelOnWrite) Write(p []byte) (int, error) {
+	w.once.Do(w.cancel)
+	return w.buf.Write(p)
+}
+
+func TestANoClusterRunWarnsOfASignalAfterTheVerdict(t *testing.T) {
+	w := newWorld(t)
+	w.loadErr = verdict.Condition{Code: verdict.ConfigRejected, Text: "unknown key nope at line 3"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := &cancelOnWrite{cancel: cancel}
+	u := w.units()
+	code := Run(ctx, Options{ConfigPath: filepath.Join(w.cfg.Dir, "rollproof.yaml"), Out: w.out,
+		Stdout: out, Stderr: &w.stderr, Version: "test", Getenv: func(string) string { return "" }}, u)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"interrupted after the verdict was decided"}, r.Warnings); diff != "" {
+		t.Errorf("warnings (-want +got):\n%s", diff)
+	}
+}
+
 func TestSignalEndsTheSteadyWait(t *testing.T) {
 	w := newWorld(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -804,7 +837,10 @@ func TestSignalEndsTheSteadyWait(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		clk.release <- t0 // let the run finish, so that no goroutine outlives the test
-		<-done
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
 		t.Fatal("a signal did not end the steady window's wait: Run was still waiting for limits.steady")
 	}
 	r := w.result()
@@ -864,7 +900,11 @@ func TestTheEventReaderHandsAPanicToTheMainFlow(t *testing.T) {
 	s.reader = r
 	go s.read(r)
 	events <- probe.Event{}
-	<-r.done // the reader handed its panic over and closed its channels
+	select {
+	case <-r.done: // the reader handed its panic over and closed its channels
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reader never handed over its panic: it neither panicked nor returned")
+	}
 	caught := make(chan any, 1)
 	go func() {
 		defer func() { caught <- recover() }()
