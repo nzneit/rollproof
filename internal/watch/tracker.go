@@ -81,6 +81,7 @@ type Tracker struct {
 // workloadRecord is what the Tracker keeps of one Deployment, StatefulSet or DaemonSet.
 type workloadRecord struct {
 	obj        runtime.Object
+	uid        types.UID
 	generation int64
 	matched    bool // its labels matched the selector at its last Set
 	firstSeen  time.Time
@@ -354,17 +355,19 @@ func (t *Tracker) selects(meta *metav1.ObjectMeta) bool {
 	return t.o.Selector == nil || t.o.Selector.Matches(labels.Set(meta.Labels))
 }
 
-// setWorkload records a Set of a workload. Its spec changed when its generation is higher than the
-// one its last Set recorded; a workload seen for the first time has none recorded and counts from
-// 0, so that one created in the settle time starts it again.
+// setWorkload records a Set of a workload. Its spec changed when it is seen for the first time,
+// when its record is gone, when its UID differs from the recorded one, or when its generation is
+// higher than the recorded one. The first three hold whatever the generations are: a workload
+// created, or made again under its old name, in the settle time starts it again.
 func (t *Tracker) setWorkload(w Workload, obj runtime.Object, meta *metav1.ObjectMeta, at time.Time) change {
 	rec, known := t.workloads[w]
 	if !known {
 		rec = &workloadRecord{firstSeen: at}
 		t.workloads[w] = rec
 	}
-	specChange := meta.Generation > rec.generation
+	specChange := !known || !rec.gone.IsZero() || meta.UID != rec.uid || meta.Generation > rec.generation
 	rec.obj = obj
+	rec.uid = meta.UID
 	rec.generation = meta.Generation
 	rec.matched = t.selects(meta)
 	rec.gone = time.Time{}
@@ -378,7 +381,7 @@ func (t *Tracker) setWorkload(w Workload, obj runtime.Object, meta *metav1.Objec
 func (t *Tracker) goneWorkload(w Workload, obj runtime.Object, meta *metav1.ObjectMeta, at time.Time) {
 	rec, known := t.workloads[w]
 	if !known {
-		rec = &workloadRecord{obj: obj, generation: meta.Generation, matched: t.selects(meta), firstSeen: at}
+		rec = &workloadRecord{obj: obj, uid: meta.UID, generation: meta.Generation, matched: t.selects(meta), firstSeen: at}
 		t.workloads[w] = rec
 	}
 	if rec.gone.IsZero() {

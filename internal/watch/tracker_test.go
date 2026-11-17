@@ -128,6 +128,14 @@ func TestTransitionFinish(t *testing.T) {
 	unseenA3 := pod("orders-a-3", "a3", "ReplicaSet", "orders-a", true, false)
 	orphaned := replicaSet("orders-a", "orders")
 	orphaned.OwnerReferences = nil
+	// agent is a complete DaemonSet at generation 3; agentNew and agentNewDone are a new object
+	// under its name, with a new UID and generation 1.
+	const dsRolling = appsv1.RollingUpdateDaemonSetStrategyType
+	agent := daemonSet("agent", 3, 3, 3, 3, 3, dsRolling)
+	agentNew := daemonSet("agent", 1, 0, 0, 0, 0, dsRolling)
+	agentNew.UID = "uid-agent-2"
+	agentNewDone := daemonSet("agent", 1, 1, 3, 3, 3, dsRolling)
+	agentNewDone.UID = "uid-agent-2"
 	for _, r := range []struct {
 		name     string
 		selector labels.Selector // nil: every workload
@@ -229,6 +237,21 @@ func TestTransitionFinish(t *testing.T) {
 				set(9, deployment("orders-v2", 1, 1, 2, 2, 2, 2))},
 			finished: 9, open: 23, end: 24,
 			restarts: []string{"the spec of deployment/orders-v2 changed 5.0 s after the transition began"}},
+		{name: "a workload made again under its old name in the settle time starts it again",
+			before:   append(base(), agent),
+			events:   []ev{exited(2), gone(3, agent), set(5, agentNew), set(9, agentNewDone)},
+			finished: 9, open: 23, end: 24,
+			restarts: []string{"the spec of daemonset/agent changed 5.0 s after the transition began"}},
+		{name: "a workload whose UID changes with no Gone told starts it again",
+			before:   append(base(), agent),
+			events:   []ev{exited(2), set(5, agentNew), set(9, agentNewDone)},
+			finished: 9, open: 23, end: 24,
+			restarts: []string{"the spec of daemonset/agent changed 5.0 s after the transition began"}},
+		{name: "a workload told again after its Gone starts it again, with its old UID and generation",
+			before:   append(base(), agent),
+			events:   []ev{exited(2), gone(3, agent), set(5, agent)},
+			finished: 5, open: 19, end: 20,
+			restarts: []string{"the spec of daemonset/agent changed 5.0 s after the transition began"}},
 		{name: "a workload first told gone waits for its pods",
 			before: []runtime.Object{replicaSet("orders-a", "orders"), liveA1,
 				pod("orders-a-2", "a2", "ReplicaSet", "orders-a", true, false)},
