@@ -68,6 +68,7 @@ Two things stay that the proofs did not remove: kind's network `kind`, and the n
 - A server-side apply conflict with another writer of a field, which section 14 point 5 gives to the fixtures.
 - From `p01b-mirror`, the mirror form with no `server` line, which step 5 writes; the proof ran the form with a `server` line.
 - From `p01-registry-order`, the limits of its measurements: images of one manifest each (no image index), one container per pod, no image held under two names, and no pull that fell through to a real HTTPS host.
+- Point 5, the fixture runs: the first four fixtures ran under Helm 3.22.1 and under Helm 4.3.2 on nerdctl 2.4.2 on 2026-11-17. Helm 4 applied every object, the rollback included, with no conflict over a field.
 
 ## Clock check
 
