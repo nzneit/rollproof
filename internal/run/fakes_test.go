@@ -61,6 +61,9 @@ type fakeClock struct {
 	mu     sync.Mutex
 	now    time.Time
 	timers []fakeTimer
+	// jump is how far now moves past each wait that After settles, so that a test can see
+	// whether a window begins where the last one ended. Zero by default.
+	jump time.Duration
 }
 
 type fakeTimer struct {
@@ -103,6 +106,9 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	c.timers = append(c.timers, fakeTimer{at: c.now.Add(d), ch: ch})
 	c.mu.Unlock()
 	c.Advance(d)
+	if c.jump != 0 {
+		c.Advance(c.jump)
+	}
 	return ch
 }
 
@@ -188,6 +194,9 @@ func (c *fakeCluster) Facts() report.Cluster {
 // Kept gives the sentence for a kept cluster, and records nothing.
 func (c *fakeCluster) Kept() string { return c.kept }
 
+// EndCommands records "end-commands".
+func (c *fakeCluster) EndCommands() { c.w.calls.add("end-commands") }
+
 // Delete records "delete", runs its hook and returns the scripted error.
 func (c *fakeCluster) Delete(ctx context.Context) error {
 	c.w.calls.add("delete")
@@ -248,6 +257,7 @@ type fakeWatcher struct {
 	installErr         error
 	transitions        map[verdict.WindowName]watch.Transition
 	stopping, starting []watch.PodNote
+	podsAt             []time.Time // every moment PodsAt was asked about
 }
 
 // InstallReady waits until the install's command has exited or ctx ends, then
@@ -298,13 +308,17 @@ func (f *fakeWatcher) wait(ctx context.Context, exited <-chan struct{}) {
 	}
 }
 
-// PodsAt gives the scripted stopping and starting pods.
+// PodsAt records the moment it was asked about and gives the scripted pods.
 func (f *fakeWatcher) PodsAt(at time.Time) (stopping, starting []watch.PodNote) {
+	f.podsAt = append(f.podsAt, at)
 	return f.stopping, f.starting
 }
 
-// Stop records "watch-stop".
-func (f *fakeWatcher) Stop() { f.w.calls.add("watch-stop") }
+// Stop records "watch-stop" and runs its hook.
+func (f *fakeWatcher) Stop() {
+	f.w.calls.add("watch-stop")
+	f.w.hook("watch-stop")
+}
 
 // fakeProbe is the probe.Probe that fakeCluster.Probe returns.
 type fakeProbe struct {

@@ -56,6 +56,10 @@ type Cluster interface {
 	Probe(cfg *config.Config, probeImage string, raw io.Writer) probe.Probe
 	Facts() report.Cluster
 	Kept() string
+	// EndCommands ends every command of the run that is still being stopped and closes its
+	// evidence, and returns when they are gone. run calls it once, after its last command and
+	// before the final result.
+	EndCommands()
 	Delete(ctx context.Context) error
 }
 
@@ -91,15 +95,25 @@ func Run(ctx context.Context, o Options, u Units) int {
 		return 2
 	}
 	s.w = w
-	s.ev = &evidence{open: w.Evidence, warn: s.warnings.add}
+	s.ev = &evidence{files: w.Evidence, warn: s.warnings.add}
 
 	caught := s.sequence(s.ctx)
+	if caught == nil {
+		// A panic in the event reader that no request had handed over is the tool's
+		// failure too: the events it did not read are missing from the verdict.
+		caught = s.readerPanic()
+	}
 	if caught != nil {
 		s.toolFailed(caught)
 	}
 	s.cancel()
 	s.endReading()
 	s.waitCommands()
+	s.endCommands()
+	// A reader that failed while it was being ended is the tool's failure too.
+	if p := s.readerPanic(); p != nil {
+		s.toolFailed(p)
+	}
 	return s.finish()
 }
 
@@ -195,8 +209,7 @@ func (s *runState) setUp(ctx context.Context) bool {
 	}
 	s.probeImage, s.images = probeImage, images
 	if err := cfg.Resolve(images); err != nil {
-		s.tl.Before = append(s.tl.Before, verdict.Condition{Code: verdict.InternalError, Text: err.Error()})
-		return false
+		return s.beforeFail(ctx, verdict.Condition{Code: verdict.InternalError, Text: err.Error()})
 	}
 	if s.interrupted(ctx) {
 		return false
@@ -297,9 +310,14 @@ func (s *runState) windows(ctx context.Context) bool {
 	// reader of them until the probe is stopped.
 	s.readEvents(s.probeStart.Events)
 
-	// Step 10: the steady window runs to its end, whatever happened in it.
+	// Step 10: the steady window runs to its end, whatever happened in it, unless a signal
+	// comes first: a signal stops the run at once (section 10), and limits.steady has no upper
+	// bound.
 	end := s.probeStart.First.Add(s.cfg.Limits.Steady)
-	<-s.u.Clock.After(end.Sub(s.u.Clock.Now()))
+	select {
+	case <-s.u.Clock.After(end.Sub(s.u.Clock.Now())):
+	case <-ctx.Done():
+	}
 	if s.interrupted(ctx) {
 		return false
 	}
@@ -379,6 +397,7 @@ func (s *runState) stopProbe(ctx context.Context) {
 	}
 	if s.reader != nil {
 		<-s.reader.done // the probe has closed its events
+		s.reader.panicIfAny()
 	}
 	s.interrupted(ctx) // a signal that came while the probe was stopped
 	s.decide(true)
@@ -548,10 +567,15 @@ func (s *runState) finish() (code int) {
 		}
 	}()
 	if err := s.w.Final(s.record()); err != nil {
-		// Without its result.json the run cannot vouch for the verdict it
-		// reached, so it is the tool's own failure.
+		// The decided verdict keeps its exit code (section 8): a window that had
+		// already failed is a fail, and everything else is not verified, because a
+		// pass whose result.json could not be written cannot be vouched for. The
+		// console is not printed: it would claim more than the folder holds.
 		refused = true
 		fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
+		if s.decision.Verdict == verdict.Fail {
+			return 1
+		}
 		return 2
 	}
 	if err := s.writeMarks(); err != nil {
@@ -646,14 +670,22 @@ func (s *runState) cleanUp() {
 		if s.cluster != nil {
 			fmt.Fprintln(s.o.Stdout, s.cluster.Kept())
 		}
+		// A kept cluster does not end the search for a signal.
+		if s.parent.Err() != nil {
+			s.signalAfterTheVerdict()
+		}
 	case s.cluster == nil:
 	case s.parent.Err() != nil:
 		s.signalAfterTheVerdict()
 	default:
 		// A context that no signal ends: the cluster goes even when the caller
-		// gives up while it is being deleted.
+		// gives up while it is being deleted. A signal that comes meanwhile is
+		// found when Delete returns, whether it failed or not.
 		if err := s.cluster.Delete(context.WithoutCancel(s.ctx)); err != nil {
 			s.warnAfterConsole("the cluster was not deleted: " + err.Error())
+			if s.parent.Err() != nil {
+				s.signalAfterTheVerdict()
+			}
 			return
 		}
 		if s.parent.Err() != nil {
@@ -684,6 +716,14 @@ func (s *runState) warnAfterConsole(text string) {
 			fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
 		}
 	}()
+}
+
+// readerPanic gives the value of a panic that stopped the event reader, once.
+func (s *runState) readerPanic() any {
+	if s.reader == nil {
+		return nil
+	}
+	return s.reader.take()
 }
 
 // panicText is the text of the value a panic carried.
@@ -748,30 +788,32 @@ func (discardCloser) Close() error { return nil }
 // opened or written is a warning and not the tool's failure: the run goes on
 // without it.
 type evidence struct {
-	open func(string) (io.WriteCloser, error)
-	warn func(string)
+	files func(string) (io.WriteCloser, error)
+	warn  func(string)
 }
 
-// file opens the evidence file name, or gives a writer that drops what is
-// written when the file cannot be opened.
-func (e *evidence) file(name string) io.WriteCloser {
-	w, err := e.open(name)
-	if err != nil {
-		e.warn("the evidence " + name + " was not opened: " + err.Error())
-		return discardCloser{}
-	}
-	return &evidenceFile{w: w, name: name, warn: e.warn}
-}
-
-// funcOf opens the evidence of a command, in the form that the cluster unit and
-// the deploy driver ask for.
-func (e *evidence) funcOf(name string) (io.WriteCloser, error) {
-	w, err := e.open(name)
+// open opens the evidence file name. A file that cannot be opened gives a
+// writer that drops what is written, a nil error, and a warning, so that the
+// run and its commands go on without it.
+func (e *evidence) open(name string) (io.WriteCloser, error) {
+	w, err := e.files(name)
 	if err != nil {
 		e.warn("the evidence " + name + " was not opened: " + err.Error())
 		return discardCloser{}, nil
 	}
 	return &evidenceFile{w: w, name: name, warn: e.warn}, nil
+}
+
+// file opens an evidence file that the run keeps for itself.
+func (e *evidence) file(name string) io.WriteCloser {
+	w, _ := e.open(name)
+	return w
+}
+
+// funcOf opens the evidence of a command, in the form that the cluster unit and
+// the deploy driver ask for.
+func (e *evidence) funcOf(name string) (io.WriteCloser, error) {
+	return e.open(name)
 }
 
 // evidenceFile is one evidence file, which warns once when it cannot be
@@ -856,13 +898,33 @@ func (s *runState) waitCommands() {
 	s.commands = nil
 }
 
+// endCommands ends the commands that were still being stopped when the run's last
+// command returned, so that none of them outlives the final result. A panic here
+// comes after the verdict was decided and is a warning, like any unit's panic at
+// that point.
+func (s *runState) endCommands() {
+	if s.cluster == nil {
+		return
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			s.warnings.add("the tool failed after the verdict was decided: " + panicText(p))
+		}
+	}()
+	s.cluster.EndCommands()
+}
+
 // reader is the goroutine that reads the probe's events into the timeline.
 type reader struct {
 	events <-chan probe.Event
+	add    func(probe.Event)  // the step that puts one event into the timeline
 	ask    chan chan struct{} // a reply channel: the reader drains, then closes it
 	stop   chan struct{}      // closed when the run ends
 	done   chan struct{}      // closed when the reader has returned
 	once   sync.Once
+
+	mu     sync.Mutex
+	caught any // the value of a panic that stopped the reader
 }
 
 // readEvents starts the goroutine that reads the probe's events.
@@ -870,30 +932,40 @@ func (s *runState) readEvents(events <-chan probe.Event) {
 	if events == nil {
 		return
 	}
-	r := &reader{events: events, ask: make(chan chan struct{}), stop: make(chan struct{}), done: make(chan struct{})}
+	r := &reader{events: events, add: s.addEvent, ask: make(chan chan struct{}),
+		stop: make(chan struct{}), done: make(chan struct{})}
 	s.reader = r
 	go s.read(r)
 }
 
 // read reads the probe's events until the channel is closed or the run ends. A
-// request takes everything that waits, so that Decide sees it.
+// request takes everything that waits, so that Decide sees it. A panic is caught
+// and handed to the main flow, and the channels are closed, as a command
+// goroutine does (brief step 8, point 5).
 func (s *runState) read(r *reader) {
 	defer close(r.done)
+	defer func() {
+		if p := recover(); p != nil {
+			r.mu.Lock()
+			r.caught = p
+			r.mu.Unlock()
+		}
+	}()
 	for {
 		select {
 		case ev, ok := <-r.events:
 			if !ok {
 				return
 			}
-			s.addEvent(ev)
+			r.add(ev)
 		case reply := <-r.ask:
-			open := s.takeReady(r.events)
+			open := s.takeReady(r)
 			close(reply)
 			if !open {
 				return
 			}
 		case <-r.stop:
-			s.takeReady(r.events)
+			s.takeReady(r)
 			return
 		}
 	}
@@ -901,17 +973,34 @@ func (s *runState) read(r *reader) {
 
 // takeReady takes every event that already waits on the channel, and reports
 // whether the channel is still open.
-func (s *runState) takeReady(events <-chan probe.Event) bool {
+func (s *runState) takeReady(r *reader) bool {
 	for {
 		select {
-		case ev, ok := <-events:
+		case ev, ok := <-r.events:
 			if !ok {
 				return false
 			}
-			s.addEvent(ev)
+			r.add(ev)
 		default:
 			return true
 		}
+	}
+}
+
+// take gives the value of a panic that stopped the reader, once.
+func (r *reader) take() any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.caught
+	r.caught = nil
+	return p
+}
+
+// panicIfAny panics with the value of a panic that stopped the reader, once, so
+// that the main flow fails in the step that was waiting for it.
+func (r *reader) panicIfAny() {
+	if p := r.take(); p != nil {
+		panic(p)
 	}
 }
 
@@ -936,9 +1025,11 @@ func (s *runState) ask() {
 	select {
 	case s.reader.ask <- reply:
 	case <-s.reader.done:
+		s.reader.panicIfAny()
 		return
 	}
 	<-reply
+	s.reader.panicIfAny()
 }
 
 // endReading ends the reader and waits until it has returned. On a run that a

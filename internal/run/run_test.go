@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,10 +27,11 @@ type resultFile struct {
 	Final   bool   `json:"final"`
 	Verdict string `json:"verdict"`
 	Reasons []struct {
-		Code    string `json:"code"`
-		Window  string `json:"window"`
-		Text    string `json:"text"`
-		Decided bool   `json:"decided"`
+		Code    string   `json:"code"`
+		Window  string   `json:"window"`
+		Text    string   `json:"text"`
+		Detail  []string `json:"detail"`
+		Decided bool     `json:"decided"`
 	} `json:"reasons"`
 	Windows []struct {
 		Name   string     `json:"name"`
@@ -36,6 +39,9 @@ type resultFile struct {
 		End    *time.Time `json:"end"`
 	} `json:"windows"`
 	Warnings []string `json:"warnings"`
+	Probes   []struct {
+		Target string `json:"target"`
+	} `json:"probes"`
 }
 
 // codes are the reasons' codes in order.
@@ -66,6 +72,16 @@ func (r resultFile) results() []string {
 	return results
 }
 
+// detailOf is the detail lines of the first reason with the code.
+func (r resultFile) detailOf(code string) []string {
+	for _, x := range r.Reasons {
+		if x.Code == code {
+			return x.Detail
+		}
+	}
+	return nil
+}
+
 // windowOf is the window of the first reason with the code, and its text.
 func (r resultFile) windowOf(code string) (window, text string) {
 	for _, x := range r.Reasons {
@@ -88,7 +104,7 @@ func TestPass(t *testing.T) {
 	}
 	want := []string{"load", "check", "create", "store", "deployer", "fetch", "target", "watcher",
 		"install", "install-ready", "probe", "start", "deploy", "transition-deploy",
-		"rollback", "transition-rollback", "probe-stop", "watch-stop", "delete"}
+		"rollback", "transition-rollback", "probe-stop", "end-commands", "watch-stop", "delete"}
 	if diff := cmp.Diff(want, w.calls.list()); diff != "" {
 		t.Errorf("calls (-want +got):\n%s", diff)
 	}
@@ -145,24 +161,24 @@ func TestEachBeforeFailure(t *testing.T) {
 		}, "cluster-failed", []string{"load", "check", "create"}},
 		{"store", func(w *world) {
 			w.cluster.storeErr = verdict.Condition{Code: verdict.ClusterFailed, Text: "node rollproof-x-worker could not pull rollproof.test/orders"}
-		}, "cluster-failed", []string{"load", "check", "create", "store", "delete"}},
+		}, "cluster-failed", []string{"load", "check", "create", "store", "end-commands", "delete"}},
 		{"fetch", func(w *world) {
 			w.deployer.fetchErr = verdict.Condition{Code: verdict.ChartFetchFailed, Text: "the previous release's chart could not be fetched"}
-		}, "chart-fetch-failed", then("delete")},
+		}, "chart-fetch-failed", then("end-commands", "delete")},
 		{"target", func(w *world) {
 			w.cluster.targetErr = verdict.Condition{Code: verdict.TargetUnsupported, Text: "the Service orders/orders is headless"}
-		}, "target-unsupported", then("target", "delete")},
+		}, "target-unsupported", then("target", "end-commands", "delete")},
 		{"install exits non-zero", func(w *world) {
 			w.deployer.results["install"] = deploy.Result{Ending: deploy.ExitedNonZero, ExitCode: 1}
 			w.watcher.installErr = verdict.Condition{Code: verdict.NothingWatched, Text: "must not be used"}
-		}, "install-failed", then("target", "watcher", "install", "install-ready", "watch-stop", "delete")},
+		}, "install-failed", then("target", "watcher", "install", "install-ready", "end-commands", "watch-stop", "delete")},
 		{"nothing watched", func(w *world) {
 			w.watcher.installErr = verdict.Condition{Code: verdict.NothingWatched,
 				Text: "15 s after the install command returned, namespace orders held no Deployment, StatefulSet or DaemonSet"}
-		}, "nothing-watched", then("target", "watcher", "install", "install-ready", "watch-stop", "delete")},
+		}, "nothing-watched", then("target", "watcher", "install", "install-ready", "end-commands", "watch-stop", "delete")},
 		{"probe not started", func(w *world) {
 			w.probe.startErr = verdict.Condition{Code: verdict.ProbeNotStarted, Text: "no observation within limits.timeout"}
-		}, "probe-not-started", then("target", "watcher", "install", "install-ready", "probe", "start", "watch-stop", "delete")},
+		}, "probe-not-started", then("target", "watcher", "install", "install-ready", "probe", "start", "end-commands", "watch-stop", "delete")},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -611,5 +627,372 @@ func TestWindowMarks(t *testing.T) {
 	}
 	if marks[2].End == nil || !marks[2].End.Equal(t0.Add(70*time.Second)) {
 		t.Errorf("the rollback window's end is %v, want %v", marks[2].End, t0.Add(70*time.Second))
+	}
+}
+
+func TestResolveIsCalledOnce(t *testing.T) {
+	w := newWorld(t)
+	// Load keeps a $${…} literal escaped and each Resolve reads it back one level: a literal in
+	// the probe's URL stays a literal after the one Resolve of the run, and a second call would
+	// fill it with the image's reference.
+	w.cfg.Probe.HTTP.URL = "http://orders.orders.svc/$${images.orders.digest}"
+	resolved := "http://orders.orders.svc/${images.orders.digest}"
+	w.hooks["fetch"] = func() {
+		// The deploy driver reads the configuration after Resolve, and never before it.
+		if w.cfg.Probe.HTTP.URL != resolved {
+			t.Errorf("the URL is %q when the deploy driver fetches, want %q", w.cfg.Probe.HTTP.URL, resolved)
+		}
+	}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if len(r.Probes) != 1 {
+		t.Fatalf("probes %d, want 1", len(r.Probes))
+	}
+	if want := "GET " + resolved; r.Probes[0].Target != want {
+		t.Errorf("target %q, want %q: Resolve was not called exactly once", r.Probes[0].Target, want)
+	}
+}
+
+func TestSignalAfterTheVerdictOnEveryCleanUpPath(t *testing.T) {
+	rows := []struct {
+		name        string
+		keep        bool
+		deleteErr   error
+		wantDelete  int
+		wantWarning []string
+	}{
+		{"the deletion failed", false, errors.New("the engine did not answer"), 1,
+			[]string{"the cluster was not deleted: the engine did not answer",
+				"interrupted after the verdict was decided"}},
+		{"the cluster is kept", true, nil, 0,
+			[]string{"interrupted after the verdict was decided"}},
+		{"the cluster is left because of the signal", false, nil, 0,
+			[]string{"interrupted after the verdict was decided"}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			w := newWorld(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			w.keep = row.keep
+			w.cluster.deleteErr = row.deleteErr
+			if row.wantDelete > 0 {
+				w.hooks["delete"] = cancel // the signal comes while the cluster is deleted
+			} else {
+				w.hooks["watch-stop"] = cancel // the signal comes once the verdict is decided
+			}
+			if code := w.run(ctx); code != 0 {
+				t.Fatalf("exit %d, want 0", code)
+			}
+			r := w.result()
+			if !r.Final || r.Verdict != "pass" {
+				t.Errorf("final %v, verdict %q; want a final pass", r.Final, r.Verdict)
+			}
+			if n := w.calls.count("delete"); n != row.wantDelete {
+				t.Errorf("Delete called %d times, want %d", n, row.wantDelete)
+			}
+			if diff := cmp.Diff(row.wantWarning, r.Warnings); diff != "" {
+				t.Errorf("warnings (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// holdClock is the fake clock except that the channel After gives never fires until the test
+// sends on release, so that a test can hold the run inside a wait and see what ends it.
+type holdClock struct {
+	*fakeClock
+	at      chan struct{}
+	release chan time.Time
+	once    sync.Once
+}
+
+// After records that the run has reached the wait and gives it a channel the test controls.
+func (c *holdClock) After(d time.Duration) <-chan time.Time {
+	c.once.Do(func() { close(c.at) })
+	return c.release
+}
+
+func TestSignalEndsTheSteadyWait(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clk := &holdClock{fakeClock: w.clock, at: make(chan struct{}), release: make(chan time.Time, 1)}
+	u := w.units()
+	u.Clock = clk
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(ctx, Options{ConfigPath: filepath.Join(w.cfg.Dir, "rollproof.yaml"), Out: w.out,
+			Stdout: &w.stdout, Stderr: &w.stderr, Version: "test", Getenv: func(string) string { return "" }}, u)
+	}()
+	<-clk.at // the run is in the steady window's wait
+	cancel()
+	select {
+	case code := <-done:
+		if code != 2 {
+			t.Errorf("exit %d, want 2", code)
+		}
+	case <-time.After(2 * time.Second):
+		clk.release <- t0 // let the run finish, so that no goroutine outlives the test
+		<-done
+		t.Fatal("a signal did not end the steady window's wait: Run was still waiting for limits.steady")
+	}
+	r := w.result()
+	if window, _ := r.windowOf("interrupted"); window != "steady" {
+		t.Errorf("interrupted in window %q, want steady", window)
+	}
+	if diff := cmp.Diff([]string{"not-verified", "not-run", "not-run"}, r.results()); diff != "" {
+		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+}
+
+func TestACutWindowHasAnEnd(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.hooks["transition-deploy"] = func() {
+		w.clock.Advance(5 * time.Second)
+		cancel()
+	}
+	w.run(ctx)
+	r := w.result()
+	if len(r.Windows) < 2 {
+		t.Fatalf("windows %d, want at least 2", len(r.Windows))
+	}
+	if end := r.Windows[1].End; end == nil || !end.Equal(t0.Add(15*time.Second)) {
+		t.Errorf("the deploy window a signal cut ends at %v, want %v", end, t0.Add(15*time.Second))
+	}
+}
+
+func TestAPanicInACommandGoroutine(t *testing.T) {
+	w := newWorld(t)
+	w.hooks["deploy"] = func() { panic("the deploy driver broke") }
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"internal-error"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	if window, text := r.windowOf("internal-error"); window != "deploy" || text != "the deploy driver broke" {
+		t.Errorf("internal-error in window %q with text %q", window, text)
+	}
+	if n := w.calls.count("delete"); n != 1 {
+		t.Errorf("Delete called %d times, want 1", n)
+	}
+	if n := w.calls.count("rollback"); n != 0 {
+		t.Errorf("rollback called %d times, want 0", n)
+	}
+}
+
+func TestTheEventReaderHandsAPanicToTheMainFlow(t *testing.T) {
+	s := &runState{}
+	events := make(chan probe.Event, 1)
+	r := &reader{events: events, ask: make(chan chan struct{}),
+		stop: make(chan struct{}), done: make(chan struct{}),
+		add: func(probe.Event) { panic("the timeline broke") }}
+	s.reader = r
+	go s.read(r)
+	events <- probe.Event{}
+	<-r.done // the reader handed its panic over and closed its channels
+	caught := make(chan any, 1)
+	go func() {
+		defer func() { caught <- recover() }()
+		s.ask()
+	}()
+	select {
+	case p := <-caught:
+		if p != "the timeline broke" {
+			t.Errorf("the main flow caught %v, want the reader's panic", p)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the main flow did not learn of the reader's panic")
+	}
+	s.ask() // the panic is handed over once, not on every request
+}
+
+func TestNoGapBetweenWindows(t *testing.T) {
+	w := newWorld(t)
+	// The clock moves on past each wait, so a transition that began at Clock.Now() instead of the
+	// previous window's End would show a gap.
+	w.clock.jump = 3 * time.Second
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	marks := w.windowMarks()
+	if len(marks) != 3 {
+		t.Fatalf("marks %d, want 3", len(marks))
+	}
+	if marks[0].End == nil || marks[1].Start == nil || !marks[1].Start.Equal(*marks[0].End) {
+		t.Errorf("the deploy window starts at %v, want the steady window's end %v", marks[1].Start, marks[0].End)
+	}
+	if marks[1].End == nil || marks[2].Start == nil || !marks[2].Start.Equal(*marks[1].End) {
+		t.Errorf("the rollback window starts at %v, want the deploy window's end %v", marks[2].Start, marks[1].End)
+	}
+}
+
+// windowMarks reads the windows' boundaries from the evidence folder.
+func (w *world) windowMarks() []mark {
+	w.t.Helper()
+	b, err := os.ReadFile(filepath.Join(w.out, "evidence", "windows.json"))
+	if err != nil {
+		w.t.Fatalf("read windows.json: %v", err)
+	}
+	var marks []mark
+	if err := json.Unmarshal(b, &marks); err != nil {
+		w.t.Fatalf("decode windows.json: %v", err)
+	}
+	return marks
+}
+
+func TestTheRecordKeepsThePodsAtTheFirstFailure(t *testing.T) {
+	w := newWorld(t)
+	w.watcher.stopping = []watch.PodNote{{Name: "orders-6d5f9c-x2k4q", Workload: orders, Old: true,
+		For: 300 * time.Millisecond}}
+	w.watcher.starting = []watch.PodNote{{Name: "orders-7f8e9d-k3m2p", Workload: orders,
+		For: 800 * time.Millisecond}}
+	w.probe.events = append(w.probe.events, failureAt(20*time.Second, 20*time.Second))
+	if code := w.run(context.Background()); code != 1 {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	detail := strings.Join(w.result().detailOf("probe-failures"), "\n")
+	if !strings.Contains(detail, "orders-6d5f9c-x2k4q") || !strings.Contains(detail, "told to stop 0.3 s before") {
+		t.Errorf("the stopping pod is missing from the detail:\n%s", detail)
+	}
+	if !strings.Contains(detail, "orders-7f8e9d-k3m2p") || !strings.Contains(detail, "created 0.8 s before") {
+		t.Errorf("the starting pod is missing from the detail:\n%s", detail)
+	}
+	if diff := cmp.Diff([]time.Time{t0.Add(20 * time.Second)}, w.watcher.podsAt); diff != "" {
+		t.Errorf("PodsAt was asked for (-want +got):\n%s", diff)
+	}
+}
+
+func TestAFailedSteadyWindowRunsNoTransition(t *testing.T) {
+	w := newWorld(t)
+	w.probe.events = append(w.probe.events, failureAt(5*time.Second, 5*time.Second))
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"steady-not-clean"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"not-verified", "not-run", "not-run"}, r.results()); diff != "" {
+		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+	for _, name := range []string{"deploy", "rollback"} {
+		if n := w.calls.count(name); n != 0 {
+			t.Errorf("%s called %d times, want 0", name, n)
+		}
+	}
+}
+
+// stubFile is an evidence file whose writes or close fail as the test scripts.
+type stubFile struct {
+	writeErr, closeErr error
+}
+
+// Write fails with writeErr, or keeps what is written.
+func (f stubFile) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return len(p), nil
+}
+
+// Close fails with closeErr.
+func (f stubFile) Close() error { return f.closeErr }
+
+func TestTheEvidenceWrapperWarns(t *testing.T) {
+	rows := []struct {
+		name  string
+		file  stubFile
+		want  string
+		write int
+	}{
+		{"a write fails", stubFile{writeErr: errors.New("no room")},
+			"the evidence deploy could not be written: no room", 2},
+		{"a close fails", stubFile{closeErr: errors.New("no room")},
+			"the evidence deploy could not be written: no room", 0},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			var got []string
+			e := &evidence{
+				files: func(string) (io.WriteCloser, error) { return row.file, nil },
+				warn:  func(s string) { got = append(got, s) },
+			}
+			f, err := e.funcOf("deploy")
+			if err != nil || f == nil {
+				t.Fatalf("funcOf gave %v, %v", f, err)
+			}
+			for range row.write {
+				_, _ = f.Write([]byte("x"))
+			}
+			_ = f.Close()
+			_ = f.Close()
+			if diff := cmp.Diff([]string{row.want}, got); diff != "" {
+				t.Errorf("warnings (-want +got):\n%s", diff)
+			}
+		})
+	}
+	t.Run("the file cannot be opened", func(t *testing.T) {
+		var got []string
+		e := &evidence{
+			files: func(string) (io.WriteCloser, error) { return nil, errors.New("the folder is gone") },
+			warn:  func(s string) { got = append(got, s) },
+		}
+		f, err := e.funcOf("deploy")
+		if err != nil || f == nil {
+			t.Fatalf("funcOf gave %v, %v; want a writer that drops what is written", f, err)
+		}
+		if _, err := f.Write([]byte("x")); err != nil {
+			t.Errorf("writing to the dropped evidence gave %v", err)
+		}
+		if diff := cmp.Diff([]string{"the evidence deploy was not opened: the folder is gone"}, got); diff != "" {
+			t.Errorf("warnings (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestARefusedFinalKeepsTheVerdictsClass(t *testing.T) {
+	rows := []struct {
+		name   string
+		failed bool
+		want   int
+	}{
+		{"a window had failed", true, 1},
+		{"every window passed", false, 2},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			w := newWorld(t)
+			if row.failed {
+				w.probe.events = append(w.probe.events, failureAt(20*time.Second, 20*time.Second))
+			}
+			w.hooks["probe-stop"] = func() {
+				if err := os.Chmod(w.out, 0o500); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(w.out, 0o700) })
+			}
+			if code := w.run(context.Background()); code != row.want {
+				t.Errorf("exit %d, want %d", code, row.want)
+			}
+			if !strings.HasPrefix(w.stderr.String(), "rollproof: cannot write results: ") {
+				t.Errorf("stderr is %q", w.stderr.String())
+			}
+			if w.stdout.Len() != 0 {
+				t.Errorf("stdout is %q, want no console: the final file was not written", w.stdout.String())
+			}
+			if n := w.calls.count("delete"); n != 1 {
+				t.Errorf("Delete called %d times, want 1", n)
+			}
+			if n := w.calls.count("end-commands"); n != 1 {
+				t.Errorf("EndCommands called %d times, want 1", n)
+			}
+		})
 	}
 }
