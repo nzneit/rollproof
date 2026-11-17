@@ -895,3 +895,36 @@ func TestOpenRefusesAFifoNamedResultJSON(t *testing.T) {
 		t.Errorf("the folder holds %v, want only the fifo", n)
 	}
 }
+
+func TestEvidenceRefusesASwappedEvidenceFolder(t *testing.T) {
+	for _, c := range []string{"a folder outside out", "a folder inside out"} {
+		t.Run(c, func(t *testing.T) {
+			w, err := Open(t.TempDir(), noEnv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := t.TempDir()
+			if c == "a folder inside out" {
+				target = filepath.Join(w.Dir(), "sub")
+				if err := os.Mkdir(target, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			evidence := filepath.Join(w.Dir(), "evidence")
+			if err := os.Remove(evidence); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, evidence); err != nil {
+				t.Fatal(err)
+			}
+			f, err := w.Evidence("x")
+			if err == nil {
+				f.Close()
+				t.Error("Evidence followed the swapped folder")
+			}
+			if n := names(t, target); len(n) != 0 {
+				t.Errorf("the link's target holds %v, want nothing", n)
+			}
+		})
+	}
+}

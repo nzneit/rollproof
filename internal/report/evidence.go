@@ -25,6 +25,13 @@ func (w *Writer) Evidence(name string) (io.WriteCloser, error) {
 		return nil, fmt.Errorf("evidence name %q: %w", name, err)
 	}
 	defer results.Close()
+	// A link or file where the folder was is refused, also when the link leads to
+	// another place in the results folder.
+	if fi, err := results.Lstat("evidence"); err != nil {
+		return nil, fmt.Errorf("evidence name %q: %w", name, err)
+	} else if !fi.IsDir() {
+		return nil, fmt.Errorf("evidence name %q: evidence is not a folder", name)
+	}
 	root, err := results.OpenRoot("evidence")
 	if err != nil {
 		return nil, fmt.Errorf("evidence name %q: %w", name, err)
