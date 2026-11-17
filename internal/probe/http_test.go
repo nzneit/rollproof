@@ -433,3 +433,105 @@ func TestRunHTTPSendsQueryAndPort(t *testing.T) {
 		}
 	}
 }
+
+// blockOnce is an io.Writer whose first Write waits for d, and that notes when the wait began.
+type blockOnce struct {
+	capture
+	d     time.Duration
+	once  sync.Once
+	began atomic.Int64
+}
+
+func (b *blockOnce) Write(p []byte) (int, error) {
+	b.once.Do(func() {
+		b.began.Store(time.Now().UnixNano())
+		time.Sleep(b.d)
+	})
+	return b.capture.Write(p)
+}
+
+func TestRunHTTPScheduleSurvivesABlockedWrite(t *testing.T) {
+	var mu sync.Mutex
+	var arrivals []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		arrivals = append(arrivals, time.Now())
+	}))
+	defer srv.Close()
+	out := &blockOnce{d: 1500 * time.Millisecond}
+	o := testOptions(srv.URL)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- RunHTTP(ctx, o, out) }()
+	time.Sleep(3500 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunHTTP: %v", err)
+	}
+	began := time.Unix(0, out.began.Load())
+	if began.IsZero() || out.began.Load() == 0 {
+		t.Fatal("no Write was made")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	during := 0
+	for _, a := range arrivals {
+		if a.After(began.Add(200*time.Millisecond)) && a.Before(began.Add(1300*time.Millisecond)) {
+			during++
+		}
+	}
+	if during < 20 {
+		t.Errorf("%d requests started while a Write was blocked, want about 55 at rate 50", during)
+	}
+	if n := checks(out.observations(t)); n != len(arrivals) {
+		t.Errorf("the lines stand for %d checks, the server saw %d", n, len(arrivals))
+	}
+}
+
+func TestRunHTTPFailureLineBeginsWhenTheRequestBegan(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	o := testOptions(srv.URL)
+	o.Rate, o.Timeout = 5, 400*time.Millisecond
+	obs := runFor(t, o, 150*time.Millisecond).observations(t)
+	if len(obs) == 0 {
+		t.Fatal("no line")
+	}
+	for _, ob := range obs {
+		if ob.OK || ob.Class != "timeout" {
+			t.Fatalf("got %+v, want a timeout", ob)
+		}
+		// The line is written about one timeout after the request began.
+		if took := ob.Written.Sub(ob.T); took < 350*time.Millisecond {
+			t.Errorf("t is %v before the line was written, want about the timeout: t is not the start", took)
+		}
+	}
+}
+
+func TestRunHTTPBadURL(t *testing.T) {
+	for _, tc := range []struct {
+		url     string
+		noParse bool
+	}{
+		{"http://[::1", true},
+		{":nope", true},
+		{"orders.orders.svc/x", false},
+		{"http:///path", false},
+	} {
+		out := &capture{}
+		err := RunHTTP(t.Context(), testOptions(tc.url), out)
+		if err == nil {
+			t.Errorf("%q: RunHTTP returned nil", tc.url)
+			continue
+		}
+		if parse := strings.Contains(err.Error(), "does not parse"); parse != tc.noParse {
+			t.Errorf("%q: error %q, does-not-parse is %v, want %v", tc.url, err, parse, tc.noParse)
+		}
+		if len(out.got) != 0 {
+			t.Errorf("%q: RunHTTP wrote %d lines", tc.url, len(out.got))
+		}
+	}
+}

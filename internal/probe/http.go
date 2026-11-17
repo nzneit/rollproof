@@ -61,11 +61,14 @@ type httpRun struct {
 // writes their lines and returns nil. It returns an error only when the URL's host cannot be
 // resolved at the start.
 //
-// A write to out that fails is not reported: the probe has no one to tell, and its caller sees
-// the silence.
+// A write to out that fails is not reported: RunHTTP's caller has nothing to act on. A reader of
+// the log sees the silence; on a pipe, a failed write ends the process with SIGPIPE.
 func RunHTTP(ctx context.Context, o HTTPOptions, out io.Writer) error {
 	u, err := url.Parse(o.URL)
-	if err != nil || u.Hostname() == "" {
+	if err != nil {
+		return errors.New("the probe's URL does not parse")
+	}
+	if u.Hostname() == "" {
 		return errors.New("the probe's URL names no host")
 	}
 	port := u.Port()
@@ -109,19 +112,37 @@ func RunHTTP(ctx context.Context, o HTTPOptions, out io.Writer) error {
 
 	var wg sync.WaitGroup
 	r.start = time.Now()
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	// The summary lines have a goroutine of their own, so that a Write that blocks never stops
+	// the schedule.
+	stopTicks := make(chan struct{})
+	ticksDone := make(chan struct{})
+	go func() {
+		defer close(ticksDone)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopTicks:
+				return
+			case <-ticker.C:
+				r.flush(-1)
+			}
+		}
+	}()
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for i := 0; ; {
 		select {
 		case <-ctx.Done():
 			wg.Wait()
+			close(stopTicks)
+			<-ticksDone
 			r.flush(math.MaxInt)
 			return nil
-		case <-ticker.C:
-			r.flush(-1)
 		case <-timer.C:
+			if ctx.Err() != nil {
+				continue // select picks among ready cases at random: start nothing once ctx ended
+			}
 			due := r.start.Add(time.Duration(i) * time.Second / time.Duration(o.Rate))
 			wg.Add(1)
 			go func() {
@@ -201,10 +222,11 @@ func (r *httpRun) gather(began time.Time, ms, lag time.Duration) {
 // flush writes one summary line for each gathered second that has ended, oldest first. The
 // count of ended seconds is read under the lock that gather holds, so a pass is never put into
 // a second that has been flushed. A negative upTo means the seconds ended so far; any other
-// value is the first second that is not flushed.
+// value is the first second that is not flushed. The lines are written after the lock is
+// released, so a slow Write holds up no request. Only one flush runs at a time.
 func (r *httpRun) flush(upTo int) {
+	var lines []httpLine
 	r.gatherMu.Lock()
-	defer r.gatherMu.Unlock()
 	if upTo < 0 {
 		upTo = int(time.Since(r.start) / time.Second)
 	}
@@ -214,7 +236,11 @@ func (r *httpRun) flush(upTo int) {
 		}
 		s := r.gathered[k]
 		delete(r.gathered, k)
-		r.write(httpLine{OK: true, N: s.n, T: stamp(s.first), Ms: s.ms, Lag: s.lag})
+		lines = append(lines, httpLine{OK: true, N: s.n, T: stamp(s.first), Ms: s.ms, Lag: s.lag})
+	}
+	r.gatherMu.Unlock()
+	for _, l := range lines {
+		r.write(l)
 	}
 }
 
