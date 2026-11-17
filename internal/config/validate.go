@@ -110,9 +110,22 @@ func validate(c *Config, x *index) error {
 			}
 		}
 	}
+	for i, cmd := range c.Setup {
+		if err := checkCommand(fmt.Sprintf("setup[%d]", i), cmd, true, x); err != nil {
+			return err
+		}
+	}
 	if k := d.Commands; k != nil {
 		if len(k.Install) == 0 {
 			return x.reject("deploy.commands.install", "required")
+		}
+		for _, l := range []struct {
+			name string
+			cmd  []string
+		}{{"install", k.Install}, {"deploy", k.Deploy}, {"rollback", k.Rollback}} {
+			if err := checkCommand("deploy.commands."+l.name, l.cmd, l.cmd != nil, x); err != nil {
+				return err
+			}
 		}
 		if len(k.Rollback) > 0 && len(k.Deploy) == 0 {
 			return x.reject("deploy.commands.deploy", "required beside deploy.commands.rollback")
@@ -141,8 +154,13 @@ func validate(c *Config, x *index) error {
 			return err
 		}
 	}
-	if cu := c.Probe.Custom; cu != nil && cu.Image == "" {
-		return x.reject("probe.custom.image", "required")
+	if cu := c.Probe.Custom; cu != nil {
+		if cu.Image == "" {
+			return x.reject("probe.custom.image", "required")
+		}
+		if err := checkCommand("probe.custom.command", cu.Command, false, x); err != nil {
+			return err
+		}
 	}
 
 	seen := map[string]int{}
@@ -217,6 +235,22 @@ func validateHTTP(h *HTTP, silence time.Duration, x *index) error {
 
 	if h.Timeout+time.Second >= silence {
 		return x.reject("probe.http.timeout", "plus one second must be shorter than limits.silence")
+	}
+	return nil
+}
+
+// checkCommand rejects a command list that is present with no items (when present is true) and
+// one whose program, the first item, is the empty string. An empty argument after the program is
+// a real argument.
+func checkCommand(path string, cmd []string, present bool, x *index) error {
+	if len(cmd) == 0 {
+		if present {
+			return x.reject(path, "must not be empty")
+		}
+		return nil
+	}
+	if cmd[0] == "" {
+		return x.reject(path+"[0]", "must not be empty")
 	}
 	return nil
 }

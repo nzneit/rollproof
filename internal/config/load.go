@@ -383,7 +383,9 @@ func (x *index) decodeError(err error) error {
 
 var syntaxLineRe = regexp.MustCompile(`line (\d+)`)
 
-// Load reads and validates the file at path. env looks up an environment variable. An error is
+// Load reads and validates the file at path. env looks up an environment variable. It also
+// rejects every combination that sections 7 and 8 reject, and makes every relative path
+// absolute from the file's folder. An error is
 // a verdict.Condition with ConfigRejected whose text names the key and never quotes a value.
 func Load(path string, env func(name string) (string, bool)) (*Config, error) {
 	real, err := filepath.Abs(path)
@@ -581,10 +583,10 @@ func matchesQuoted(value, quoted string) bool {
 	return quoted == value
 }
 
-var nullItemRe = regexp.MustCompile(`^(?:registries|deploy\.helm\.(?:previous|candidate)\.values|probe\.custom\.env)\[[0-9]+\]$`)
+var nullItemRe = regexp.MustCompile(`^(?:registries|deploy\.helm\.(?:previous|candidate)\.values|probe\.custom\.env|setup(?:\[[0-9]+\])?|deploy\.commands\.(?:install|deploy|rollback)|probe\.custom\.(?:command|args))\[[0-9]+\]$`)
 
-// checkNullItems rejects a null item in registries, in a release's values or in a custom probe's
-// env. The decoder drops such an item without a word, so only the file's own nodes show it.
+// checkNullItems rejects a null item in registries, in a release's values, in a custom probe's
+// env, and in every command list (setup, the commands driver, a custom probe's command and args). The decoder drops such an item without a word, so only the file's own nodes show it.
 func checkNullItems(x *index) error {
 	for _, e := range x.entries {
 		if e.tag == "!!null" && !e.hasKey && nullItemRe.MatchString(e.path) {
