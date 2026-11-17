@@ -18,7 +18,14 @@ func (w *Writer) Evidence(name string) (io.WriteCloser, error) {
 	if err := checkEvidenceName(name); err != nil {
 		return nil, err
 	}
-	root, err := os.OpenRoot(w.dir)
+	// The evidence folder is the root, so that no link inside it leads out of it,
+	// not even to another place in the results folder.
+	results, err := os.OpenRoot(w.dir)
+	if err != nil {
+		return nil, fmt.Errorf("evidence name %q: %w", name, err)
+	}
+	defer results.Close()
+	root, err := results.OpenRoot("evidence")
 	if err != nil {
 		return nil, fmt.Errorf("evidence name %q: %w", name, err)
 	}
@@ -33,8 +40,7 @@ func (w *Writer) Evidence(name string) (io.WriteCloser, error) {
 		if rel, err := filepath.Rel(evidence, full); err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return nil, fmt.Errorf("evidence name %q leaves the evidence folder", name)
 		}
-		// Through the root, so that no link inside the folder leads out of it.
-		inside := "evidence/" + taken
+		inside := taken
 		if err := root.MkdirAll(path.Dir(inside), 0o755); err != nil {
 			return nil, fmt.Errorf("evidence name %q: %w", name, err)
 		}

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -534,15 +535,35 @@ func TestOpenRefusesWhatIsNotOurs(t *testing.T) {
 				t.Errorf("Open = %v, want an error that names %q", err, out)
 			}
 			// result.json is written first, so a refused evidence leaves the first
-			// file (not final, not verified) and the same tree otherwise.
+			// file (not final, not verified), and the rest of the folder, the refused
+			// evidence included, as it was.
 			if strings.HasPrefix(c.name, "result.json is ") {
 				if after := tree(t, out); !slices.Equal(before, after) {
 					t.Errorf("the folder changed:\nbefore %v\nafter  %v", before, after)
 				}
-			} else if got, err := os.ReadFile(filepath.Join(out, "result.json")); err != nil {
-				t.Error(err)
 			} else {
-				sameAsFile(t, "testdata/result-first.golden.json", got)
+				rest := func(l []string) []string {
+					return slices.DeleteFunc(slices.Clone(l), func(s string) bool { return strings.HasPrefix(s, "result.json ") })
+				}
+				if after := tree(t, out); !slices.Equal(rest(before), rest(after)) {
+					t.Errorf("the folder changed:\nbefore %v\nafter  %v", before, after)
+				}
+				if fi, err := os.Lstat(filepath.Join(out, "evidence")); err != nil {
+					t.Errorf("the refused evidence is gone: %v", err)
+				} else if c.name == "evidence is a file" {
+					if b, _ := os.ReadFile(filepath.Join(out, "evidence")); string(b) != "x" {
+						t.Errorf("evidence = %q, want it unchanged", b)
+					}
+				} else if fi.Mode()&os.ModeSymlink == 0 {
+					t.Errorf("evidence is %v, want the link unchanged", fi.Mode())
+				}
+			}
+			if !strings.HasPrefix(c.name, "result.json is ") {
+				if got, err := os.ReadFile(filepath.Join(out, "result.json")); err != nil {
+					t.Error(err)
+				} else {
+					sameAsFile(t, "testdata/result-first.golden.json", got)
+				}
 			}
 			for p, want := range map[string]string{"target.json": "target\n", "keep.txt": "keep\n"} {
 				if b, _ := os.ReadFile(filepath.Join(elsewhere, p)); string(b) != want {
@@ -672,14 +693,18 @@ func TestOpenFailureLeavesNoEarlierPass(t *testing.T) {
 func TestEvidenceRefusesALinkOut(t *testing.T) {
 	for _, c := range []struct {
 		name string
-		link func(t *testing.T, outside string) string // returns the link's target text
+		link func(t *testing.T, evidence, outside string) string // returns the link's target text
 		use  string
 	}{
-		{"absolute link", func(t *testing.T, outside string) string { return outside }, "link/x"},
-		{"relative link", func(t *testing.T, outside string) string {
-			return "../../../../../../.." + outside
+		{"absolute link", func(t *testing.T, evidence, outside string) string { return outside }, "link/x"},
+		{"relative link", func(t *testing.T, evidence, outside string) string {
+			rel, err := filepath.Rel(evidence, outside)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return rel
 		}, "link/x"},
-		{"link in a folder part", func(t *testing.T, outside string) string { return outside }, "link/new/deeper/x"},
+		{"link in a folder part", func(t *testing.T, evidence, outside string) string { return outside }, "link/new/deeper/x"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w, err := Open(t.TempDir(), noEnv)
@@ -687,7 +712,7 @@ func TestEvidenceRefusesALinkOut(t *testing.T) {
 				t.Fatal(err)
 			}
 			outside := t.TempDir()
-			if err := os.Symlink(c.link(t, outside), filepath.Join(w.Dir(), "evidence", "link")); err != nil {
+			if err := os.Symlink(c.link(t, filepath.Join(w.Dir(), "evidence"), outside), filepath.Join(w.Dir(), "evidence", "link")); err != nil {
 				t.Fatal(err)
 			}
 			f, err := w.Evidence(c.use)
@@ -821,5 +846,52 @@ func TestFinalRefusesAVerdictOutsideTheContract(t *testing.T) {
 		if err := w.Final(r); err != nil {
 			t.Errorf("Final(%q) = %v", v, err)
 		}
+	}
+}
+
+func TestEvidenceRefusesALinkToTheResultsFolder(t *testing.T) {
+	for _, target := range []string{"..", "../sub"} {
+		t.Run(target, func(t *testing.T) {
+			w, err := Open(t.TempDir(), noEnv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(w.Dir(), "sub"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(w.Dir(), "evidence", "link")); err != nil {
+				t.Fatal(err)
+			}
+			for _, use := range []string{"link/x", "link/new/x"} {
+				f, err := w.Evidence(use)
+				if err == nil {
+					f.Close()
+					t.Errorf("Evidence(%q) followed the link to %s", use, target)
+				}
+			}
+			if n := names(t, w.Dir()); !slices.Equal(n, []string{"evidence", "result.json", "sub"}) {
+				t.Errorf("the results folder holds %v, want nothing new", n)
+			}
+			if n := names(t, filepath.Join(w.Dir(), "sub")); len(n) != 0 {
+				t.Errorf("sub holds %v, want nothing", n)
+			}
+		})
+	}
+}
+
+func TestOpenRefusesAFifoNamedResultJSON(t *testing.T) {
+	out := t.TempDir()
+	path := filepath.Join(out, "result.json")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(out, noEnv); err == nil || !strings.Contains(err.Error(), out) {
+		t.Errorf("Open = %v, want an error that names %q", err, out)
+	}
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeNamedPipe == 0 {
+		t.Errorf("result.json = %v, %v; want the fifo left as it was", fi, err)
+	}
+	if n := names(t, out); !slices.Equal(n, []string{"result.json"}) {
+		t.Errorf("the folder holds %v, want only the fifo", n)
 	}
 }

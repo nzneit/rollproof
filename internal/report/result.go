@@ -122,9 +122,10 @@ type Writer struct {
 // GitHub Actions, and under the system's otherwise. It replaces result.json and
 // the evidence folder there and touches nothing else. It writes the first
 // result.json before it touches the evidence, so a failure after that point
-// leaves a file that says the run did not finish. One limit: in a folder that
-// cannot be written, an earlier run's result.json stays, because nothing can
-// replace it; Open then returns its error.
+// leaves a file that says the run did not finish. One limit: when result.json
+// cannot be replaced (a folder that cannot be written, say), an earlier run's
+// result.json stays, because nothing can replace it; Open then returns its
+// error.
 func Open(out string, getenv func(string) string) (*Writer, error) {
 	var dir string
 	if out == "" {
