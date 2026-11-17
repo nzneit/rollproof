@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -512,13 +513,13 @@ func TestOpenRefusesWhatIsNotOurs(t *testing.T) {
 		{"evidence is a file", func(t *testing.T, out, elsewhere string) {
 			write(t, filepath.Join(out, "evidence"), "x")
 		}},
-		{"result.json is a folder", func(t *testing.T, out, elsewhere string) {
-			write(t, filepath.Join(out, "result.json", "inside"), "x")
-		}},
-		{"result.json is a link", func(t *testing.T, out, elsewhere string) {
-			if err := os.Symlink(filepath.Join(elsewhere, "target.json"), filepath.Join(out, "result.json")); err != nil {
+		{"result.json is an empty folder", func(t *testing.T, out, elsewhere string) {
+			if err := os.Mkdir(filepath.Join(out, "result.json"), 0o755); err != nil {
 				t.Fatal(err)
 			}
+		}},
+		{"result.json is a folder", func(t *testing.T, out, elsewhere string) {
+			write(t, filepath.Join(out, "result.json", "inside"), "x")
 		}},
 	}
 	for _, c := range cases {
@@ -532,8 +533,16 @@ func TestOpenRefusesWhatIsNotOurs(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), out) {
 				t.Errorf("Open = %v, want an error that names %q", err, out)
 			}
-			if after := tree(t, out); !slices.Equal(before, after) {
-				t.Errorf("the folder changed:\nbefore %v\nafter  %v", before, after)
+			// result.json is written first, so a refused evidence leaves the first
+			// file (not final, not verified) and the same tree otherwise.
+			if strings.HasPrefix(c.name, "result.json is ") {
+				if after := tree(t, out); !slices.Equal(before, after) {
+					t.Errorf("the folder changed:\nbefore %v\nafter  %v", before, after)
+				}
+			} else if got, err := os.ReadFile(filepath.Join(out, "result.json")); err != nil {
+				t.Error(err)
+			} else {
+				sameAsFile(t, "testdata/result-first.golden.json", got)
 			}
 			for p, want := range map[string]string{"target.json": "target\n", "keep.txt": "keep\n"} {
 				if b, _ := os.ReadFile(filepath.Join(elsewhere, p)); string(b) != want {
@@ -611,5 +620,206 @@ func TestModes(t *testing.T) {
 	}
 	if fi, err := os.Stat(filepath.Join(w.Dir(), "result.json")); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Errorf("result.json mode = %v, %v; want 0600", fi.Mode().Perm(), err)
+	}
+}
+
+func TestOpenReplacesALinkNamedResultJSON(t *testing.T) {
+	out, elsewhere := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(elsewhere, "target.json"), "target\n")
+	if err := os.Symlink(filepath.Join(elsewhere, "target.json"), filepath.Join(out, "result.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(out, noEnv); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(filepath.Join(out, "result.json")); err != nil || !fi.Mode().IsRegular() {
+		t.Errorf("result.json = %v, %v; want a regular file in place of the link", fi, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(elsewhere, "target.json")); string(b) != "target\n" {
+		t.Errorf("the link's target = %q, want it untouched", b)
+	}
+}
+
+func TestOpenFailureLeavesNoEarlierPass(t *testing.T) {
+	pass := `{"schema":1,"final":true,"verdict":"pass"}`
+	for _, c := range []string{"file", "link"} {
+		t.Run("evidence is a "+c, func(t *testing.T) {
+			out := t.TempDir()
+			write(t, filepath.Join(out, "result.json"), pass)
+			if c == "file" {
+				write(t, filepath.Join(out, "evidence"), "x")
+			} else if err := os.Symlink(t.TempDir(), filepath.Join(out, "evidence")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(out, noEnv); err == nil {
+				t.Fatal("Open succeeded")
+			}
+			b, err := os.ReadFile(filepath.Join(out, "result.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got Run
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Final || got.Verdict != "not-verified" {
+				t.Errorf("result.json after a failed Open: final %v, verdict %q; want false, not-verified", got.Final, got.Verdict)
+			}
+		})
+	}
+}
+
+func TestEvidenceRefusesALinkOut(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		link func(t *testing.T, outside string) string // returns the link's target text
+		use  string
+	}{
+		{"absolute link", func(t *testing.T, outside string) string { return outside }, "link/x"},
+		{"relative link", func(t *testing.T, outside string) string {
+			return "../../../../../../.." + outside
+		}, "link/x"},
+		{"link in a folder part", func(t *testing.T, outside string) string { return outside }, "link/new/deeper/x"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w, err := Open(t.TempDir(), noEnv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outside := t.TempDir()
+			if err := os.Symlink(c.link(t, outside), filepath.Join(w.Dir(), "evidence", "link")); err != nil {
+				t.Fatal(err)
+			}
+			f, err := w.Evidence(c.use)
+			if err == nil {
+				f.Close()
+				t.Errorf("Evidence(%q) followed a link out", c.use)
+			}
+			if n := names(t, outside); len(n) != 0 {
+				t.Errorf("the folder outside holds %v, want nothing", n)
+			}
+		})
+	}
+}
+
+func TestFinalReplacesTheFileNotItsContent(t *testing.T) {
+	out := t.TempDir()
+	w, err := Open(out, noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(out, "result.json")
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Final(passRun()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) {
+		t.Error("Final wrote into the same file; want a new file renamed over it")
+	}
+}
+
+func TestWindowKeysAreTheRecordTags(t *testing.T) {
+	var want []string
+	typ := reflect.TypeOf(Window{})
+	for i := 0; i < typ.NumField(); i++ {
+		want = append(want, strings.Split(typ.Field(i).Tag.Get("json"), ",")[0])
+	}
+	b, err := json.Marshal(Window{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if _, err := dec.Token(); err != nil { // {
+		t.Fatal(err)
+	}
+	var got []string
+	for dec.More() {
+		k, err := dec.Token()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, k.(string))
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("window keys %v, want the record's tags %v", got, want)
+	}
+}
+
+func TestWindowReadsBack(t *testing.T) {
+	w := Window{
+		Name: "deploy", Start: at(1000), End: at(2000), Result: "fail", Checks: 11, Failed: 7,
+		FailedAfterFinish: 3, CrossedStart: 2, FailedByClass: map[string]int{"timeout": 5, "status": 2},
+		FirstFailure: at(1500), SlowestMs: 13.5, LagMs: 17.25,
+	}
+	b, err := json.Marshal(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Window
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, w) {
+		t.Errorf("read back %+v, want %+v", got, w)
+	}
+}
+
+func TestDirIsAbsolute(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir("rel", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w, err := Open("", func(k string) string {
+		switch k {
+		case "GITHUB_ACTIONS":
+			return "true"
+		case "RUNNER_TEMP":
+			return "rel"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(w.Dir()) {
+		t.Errorf("Dir() = %q, want an absolute path", w.Dir())
+	}
+}
+
+func TestFinalRefusesAVerdictOutsideTheContract(t *testing.T) {
+	out := t.TempDir()
+	w, err := Open(out, noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"", "passed", "PASS"} {
+		r := passRun()
+		r.Verdict = v
+		if err := w.Final(r); err == nil {
+			t.Errorf("Final accepted the verdict %q", v)
+		}
+	}
+	got, err := os.ReadFile(filepath.Join(out, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameAsFile(t, "testdata/result-first.golden.json", got)
+	for _, v := range []string{"pass", "fail", "not-verified"} {
+		r := passRun()
+		r.Verdict = v
+		if err := w.Final(r); err != nil {
+			t.Errorf("Final(%q) = %v", v, err)
+		}
 	}
 }

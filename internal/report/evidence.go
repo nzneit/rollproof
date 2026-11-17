@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -11,25 +12,33 @@ import (
 // Evidence returns a new file of the evidence folder. name may hold folders. A
 // name that is already taken gets a number after it. A name that is empty,
 // absolute, holds a NUL byte or a .. element, or would leave the evidence
-// folder is refused, and nothing is written.
+// folder, by its text or by a link inside the folder, is refused, and nothing
+// is written.
 func (w *Writer) Evidence(name string) (io.WriteCloser, error) {
 	if err := checkEvidenceName(name); err != nil {
 		return nil, err
 	}
-	root := filepath.Join(w.dir, "evidence")
+	root, err := os.OpenRoot(w.dir)
+	if err != nil {
+		return nil, fmt.Errorf("evidence name %q: %w", name, err)
+	}
+	defer root.Close()
+	evidence := filepath.Join(w.dir, "evidence")
 	for n := 1; ; n++ {
 		taken := name
 		if n > 1 {
 			taken = fmt.Sprintf("%s-%d", name, n)
 		}
-		path := filepath.Join(root, filepath.FromSlash(taken))
-		if rel, err := filepath.Rel(root, path); err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		full := filepath.Join(evidence, filepath.FromSlash(taken))
+		if rel, err := filepath.Rel(evidence, full); err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return nil, fmt.Errorf("evidence name %q leaves the evidence folder", name)
 		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		// Through the root, so that no link inside the folder leads out of it.
+		inside := "evidence/" + taken
+		if err := root.MkdirAll(path.Dir(inside), 0o755); err != nil {
 			return nil, fmt.Errorf("evidence name %q: %w", name, err)
 		}
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		f, err := root.OpenFile(inside, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if os.IsExist(err) {
 			continue
 		}

@@ -120,7 +120,11 @@ type Writer struct {
 // Open makes the results folder ready and writes the first result.json into
 // it. An empty out means a new folder under the runner's temporary directory on
 // GitHub Actions, and under the system's otherwise. It replaces result.json and
-// the evidence folder there and touches nothing else.
+// the evidence folder there and touches nothing else. It writes the first
+// result.json before it touches the evidence, so a failure after that point
+// leaves a file that says the run did not finish. One limit: in a folder that
+// cannot be written, an earlier run's result.json stays, because nothing can
+// replace it; Open then returns its error.
 func Open(out string, getenv func(string) string) (*Writer, error) {
 	var dir string
 	if out == "" {
@@ -132,7 +136,9 @@ func Open(out string, getenv func(string) string) (*Writer, error) {
 		if err != nil {
 			return nil, fmt.Errorf("results folder %s: %w", base, err)
 		}
-		dir = d
+		if dir, err = filepath.Abs(d); err != nil {
+			return nil, fmt.Errorf("results folder %s: %w", d, err)
+		}
 	} else {
 		abs, err := filepath.Abs(out)
 		if err != nil {
@@ -145,19 +151,26 @@ func Open(out string, getenv func(string) string) (*Writer, error) {
 	}
 	w := &Writer{dir: dir}
 
-	// Only a real folder named evidence, and no link or folder named result.json,
-	// is ours to replace.
-	evidence := filepath.Join(dir, "evidence")
-	if fi, err := os.Lstat(evidence); err == nil {
-		if !fi.IsDir() {
-			return nil, fmt.Errorf("results folder %s: evidence is not a folder, and is left as it is", dir)
+	// result.json comes first: whatever fails after this leaves a file that says
+	// the run did not finish, never an earlier run's pass. A link named
+	// result.json is replaced by the rename, and its target is never touched; a
+	// folder or another non-file is not ours and is refused.
+	if fi, err := os.Lstat(filepath.Join(dir, "result.json")); err == nil {
+		if !fi.Mode().IsRegular() && fi.Mode()&os.ModeSymlink == 0 {
+			return nil, fmt.Errorf("results folder %s: result.json is not a file, and is left as it is", dir)
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("results folder %s: %w", dir, err)
 	}
-	if fi, err := os.Lstat(filepath.Join(dir, "result.json")); err == nil {
-		if !fi.Mode().IsRegular() {
-			return nil, fmt.Errorf("results folder %s: result.json is not a file, and is left as it is", dir)
+	if err := w.write(First()); err != nil {
+		return nil, err
+	}
+
+	// Only a real folder named evidence is ours to replace.
+	evidence := filepath.Join(dir, "evidence")
+	if fi, err := os.Lstat(evidence); err == nil {
+		if !fi.IsDir() {
+			return nil, fmt.Errorf("results folder %s: evidence is not a folder, and is left as it is", dir)
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("results folder %s: %w", dir, err)
@@ -168,9 +181,6 @@ func Open(out string, getenv func(string) string) (*Writer, error) {
 	if err := os.Mkdir(evidence, 0o755); err != nil {
 		return nil, fmt.Errorf("results folder %s: %w", dir, err)
 	}
-	if err := w.write(First()); err != nil {
-		return nil, err
-	}
 	return w, nil
 }
 
@@ -180,6 +190,11 @@ func (w *Writer) Dir() string { return w.dir }
 // Final replaces result.json with r, marked final, in one step. It may be
 // called again when a warning arises after the verdict.
 func (w *Writer) Final(r Run) error {
+	switch r.Verdict {
+	case "pass", "fail", "not-verified":
+	default:
+		return fmt.Errorf("results folder %s: verdict %q is not pass, fail or not-verified", w.dir, r.Verdict)
+	}
 	r.Final = true
 	return w.write(r)
 }
