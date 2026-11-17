@@ -811,6 +811,30 @@ func TestTheEventReaderHandsAPanicToTheMainFlow(t *testing.T) {
 		t.Fatal("the main flow did not learn of the reader's panic")
 	}
 	s.ask() // the panic is handed over once, not on every request
+
+	t.Run("the panic lands while a request waits", func(t *testing.T) {
+		s := &runState{}
+		events := make(chan probe.Event, 1)
+		r := &reader{events: events, ask: make(chan chan struct{}),
+			stop: make(chan struct{}), done: make(chan struct{}),
+			add: func(probe.Event) { panic("the timeline broke") }}
+		s.reader = r
+		go s.read(r)
+		events <- probe.Event{} // waiting when the request arrives
+		caught := make(chan any, 1)
+		go func() {
+			defer func() { caught <- recover() }()
+			s.ask()
+		}()
+		select {
+		case p := <-caught:
+			if p != "the timeline broke" {
+				t.Errorf("the main flow caught %v, want the reader's panic", p)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("the request waited for a reply that the reader's panic never sent")
+		}
+	})
 }
 
 func TestNoGapBetweenWindows(t *testing.T) {

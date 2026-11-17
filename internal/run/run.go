@@ -1028,7 +1028,12 @@ func (s *runState) ask() {
 		s.reader.panicIfAny()
 		return
 	}
-	<-reply
+	// A reader that panics while it answers never closes the reply; its done
+	// channel ends the wait instead.
+	select {
+	case <-reply:
+	case <-s.reader.done:
+	}
 	s.reader.panicIfAny()
 }
 
