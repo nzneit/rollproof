@@ -1,0 +1,242 @@
+package verdict
+
+import (
+	"slices"
+	"time"
+)
+
+// Window is one window of a run. Start is zero for a window that never began, and End is zero
+// while it is open. Finished is when its transition last came to be finished: zero for the steady
+// window and for a stall. Conditions are what the caller placed in this window.
+type Window struct {
+	Name       WindowName
+	Start      time.Time
+	Finished   time.Time
+	End        time.Time
+	Conditions []Condition
+}
+
+// Timeline is everything known of a run so far. Before is what happened before the steady window.
+// Windows are all the run's windows in order, those not yet begun included. Timed are conditions
+// that Decide places by their At. Silence is limits.silence. Now is the moment of judging.
+type Timeline struct {
+	Before       []Condition
+	Windows      []Window
+	Observations []Observation
+	Timed        []Condition
+	Silence      time.Duration
+	Now          time.Time
+}
+
+// Reason is one reason of the verdict, as result.json lists it. Window is empty for a reason with
+// no window. Decided marks the one reason that decided.
+type Reason struct {
+	Code    Code
+	Verdict Verdict
+	Window  WindowName
+	Text    string
+	Decided bool
+}
+
+// WindowResult is how one window ended, with its counts. AfterFinish counts failures that began at
+// or after the window's Finished. Crossed counts failures that began before the window's Start and
+// were written in or after it. FirstFailure is zero when nothing failed.
+type WindowResult struct {
+	Name         WindowName
+	Start, End   time.Time
+	Result       Result
+	Checks       int
+	Failed       int
+	AfterFinish  int
+	Crossed      int
+	ByClass      map[string]int
+	FirstFailure time.Time
+	SlowestMs    float64
+	LagMs        float64
+}
+
+// Decision is the verdict so far. GoOn says whether the run starts its next transition. Uncounted
+// is the number of observations outside every window. Ignored are Timed conditions later than the
+// last window's End; the report shows them as warnings.
+type Decision struct {
+	Verdict   Verdict
+	GoOn      bool
+	Reasons   []Reason
+	Windows   []WindowResult
+	Uncounted int
+	Ignored   []Condition
+}
+
+// Decide judges everything known so far by the rules of section 10. Call it at the end of each
+// window and once more after the probe has stopped; the last call's Decision is the run's. GoOn is
+// true when the verdict so far is Pass. A Timeline in which no window has begun, with nothing in
+// Before, gives NotVerified with InternalError.
+func Decide(t Timeline) Decision { return judge(t, place(t)) }
+
+// placement is a Timeline with every condition in its place (rule 3).
+type placement struct {
+	before    []Condition    // t.Before, then Timed conditions earlier than the first window
+	windows   [][]Condition  // the conditions of each window of t.Windows, in order
+	ignored   []Condition    // Timed conditions at or after the last begun window's end
+	ends      []time.Time    // where each begun window ends for placing; zero if it never began
+	results   []WindowResult // Name, Start and End of each window; Task 14 adds the counts
+	uncounted int            // set by Task 14
+}
+
+// place applies rule 3 and fills results with each window's Name, Start and End.
+func place(t Timeline) placement {
+	n := len(t.Windows)
+	p := placement{
+		before:  slices.Clone(t.Before),
+		windows: make([][]Condition, n),
+		ends:    make([]time.Time, n),
+		results: make([]WindowResult, n),
+	}
+	var begun []int
+	for i, w := range t.Windows {
+		p.windows[i] = slices.Clone(w.Conditions)
+		p.results[i] = WindowResult{Name: w.Name, Start: w.Start, End: w.End}
+		if !w.Start.IsZero() {
+			begun = append(begun, i)
+		}
+	}
+	for k, i := range begun {
+		switch {
+		case k+1 < len(begun):
+			p.ends[i] = t.Windows[begun[k+1]].Start
+		case !t.Windows[i].End.IsZero():
+			p.ends[i] = t.Windows[i].End
+		default:
+			p.ends[i] = t.Now
+		}
+	}
+	for _, c := range t.Timed {
+		if len(begun) == 0 || c.At.Before(t.Windows[begun[0]].Start) {
+			p.before = append(p.before, c)
+			continue
+		}
+		placed := false
+		for _, i := range begun {
+			if !c.At.Before(t.Windows[i].Start) && c.At.Before(p.ends[i]) {
+				p.windows[i] = append(p.windows[i], c)
+				placed = true
+				break
+			}
+		}
+		if !placed {
+			p.ignored = append(p.ignored, c)
+		}
+	}
+	return p
+}
+
+// judge applies rules 1, 2 and 4 to 7 to what place gave.
+func judge(t Timeline, p placement) Decision {
+	d := Decision{
+		Windows:   slices.Clone(p.results),
+		Uncounted: p.uncounted,
+		Ignored:   slices.Clone(p.ignored),
+	}
+	begun := false
+	for _, w := range t.Windows {
+		begun = begun || !w.Start.IsZero()
+	}
+
+	if len(p.before) > 0 {
+		for i := range d.Windows {
+			d.Windows[i].Result = NotRun
+		}
+		d.Verdict = NotVerified
+		d.Reasons = reasonsOf("", p.before, NotVerified)
+		return d
+	}
+	if !begun {
+		for i := range d.Windows {
+			d.Windows[i].Result = NotRun
+		}
+		d.Verdict = NotVerified
+		d.Reasons = []Reason{{Code: InternalError, Verdict: NotVerified, Text: "the run did not finish", Decided: true}}
+		return d
+	}
+
+	d.Verdict = Pass
+	deciding := -1
+	for i, w := range t.Windows {
+		switch {
+		case deciding >= 0 && !w.Start.IsZero():
+			d.Windows[i].Result = NotJudged
+		case w.Start.IsZero():
+			d.Windows[i].Result = NotRun
+		default:
+			r := resultOf(w.Name, p.windows[i])
+			d.Windows[i].Result = r
+			if r != ResultPass {
+				deciding = i
+				d.Verdict = Verdict(r)
+			}
+		}
+	}
+	for i := 0; deciding >= 0 && i <= deciding; i++ {
+		if t.Windows[i].Start.IsZero() {
+			continue
+		}
+		if i == deciding {
+			d.Reasons = append(d.Reasons, reasonsOf(t.Windows[i].Name, p.windows[i], d.Verdict)...)
+		} else {
+			d.Reasons = append(d.Reasons, reasonsOf(t.Windows[i].Name, p.windows[i], "")...)
+		}
+	}
+	d.GoOn = d.Verdict == Pass
+	return d
+}
+
+// resultOf judges one begun window by its conditions: the steady window is not verified by any
+// condition, a transition's window fails on a Fail code and is otherwise not verified by any
+// condition.
+func resultOf(name WindowName, cs []Condition) Result {
+	if len(cs) == 0 {
+		return ResultPass
+	}
+	if name == Steady {
+		return ResultNotVerified
+	}
+	for _, c := range cs {
+		if c.Code.Verdict() == Fail {
+			return ResultFail
+		}
+	}
+	return ResultNotVerified
+}
+
+// reasonsOf lists cs as reasons of window w, in the order of Codes. When decides is not empty, the
+// first reason whose code's verdict equals it is marked Decided; when none does, the first reason is.
+func reasonsOf(w WindowName, cs []Condition, decides Verdict) []Reason {
+	rank := map[Code]int{}
+	for i, c := range Codes() {
+		rank[c] = i
+	}
+	pos := func(c Code) int {
+		if i, ok := rank[c]; ok {
+			return i
+		}
+		return len(rank)
+	}
+	sorted := slices.Clone(cs)
+	slices.SortStableFunc(sorted, func(a, b Condition) int { return pos(a.Code) - pos(b.Code) })
+	var rs []Reason
+	for _, c := range sorted {
+		rs = append(rs, Reason{Code: c.Code, Verdict: c.Code.Verdict(), Window: w, Text: c.Text})
+	}
+	if len(rs) == 0 || decides == "" {
+		return rs
+	}
+	pick := 0
+	for i, r := range rs {
+		if r.Verdict == decides {
+			pick = i
+			break
+		}
+	}
+	rs[pick].Decided = true
+	return rs
+}
