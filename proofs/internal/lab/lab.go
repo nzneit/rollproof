@@ -396,7 +396,9 @@ func (l *Lab) Registry(ctx context.Context, name string, env ...string) (Registr
 	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
 	ln.Close()
 
-	args := []string{"-p", "127.0.0.1:" + port + ":5000"}
+	// The image declares VOLUME /var/lib/registry. A tmpfs there keeps the
+	// engine from creating an anonymous volume, which Down's rm -f would leave.
+	args := []string{"-p", "127.0.0.1:" + port + ":5000", "--tmpfs", "/var/lib/registry"}
 	for _, e := range env {
 		args = append(args, "-e", e)
 	}
