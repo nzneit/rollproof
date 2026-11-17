@@ -19,6 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/kind/pkg/apis/config/defaults"
@@ -46,12 +47,43 @@ const (
 	logLineMissed  = "could not find a log line that matches"
 )
 
-// kindCreate and kindDelete are the kind provider's Create and Delete as step 3 of Create calls
-// them. A test replaces them.
+// leftBehind ends the failure text of Create when the clean-up after a failed step failed too.
+const leftBehind = ". Parts of the run may be left behind; the next run with this name removes them."
+
+// kindCreate and kindDelete are the kind provider's Create and Delete, as step 3 of Create and
+// remove call them. A test replaces them.
 var (
 	kindCreate = (*kindcluster.Provider).Create
 	kindDelete = (*kindcluster.Provider).Delete
 )
+
+// joined is the error of several errors, like errors.Join, with "; " between their texts instead
+// of a newline, so that a reason made from it stays on one line.
+type joined []error
+
+func (j joined) Error() string {
+	texts := make([]string, len(j))
+	for i, err := range j {
+		texts[i] = err.Error()
+	}
+	return strings.Join(texts, "; ")
+}
+
+func (j joined) Unwrap() []error { return j }
+
+// join returns the errors of errs that are not nil as one error, or nil when there is none.
+func join(errs ...error) error {
+	var j joined
+	for _, err := range errs {
+		if err != nil {
+			j = append(j, err)
+		}
+	}
+	if len(j) == 0 {
+		return nil
+	}
+	return j
+}
 
 // DefaultNodeImage returns the node image of the linked kind release, with its digest.
 func DefaultNodeImage() string {
@@ -100,13 +132,15 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	}
 
 	// fail is the failure of a step after the first: it removes what the run made, unless s.Keep
-	// is set or ctx has ended.
+	// is set or ctx has ended. When that removal fails, the text says that parts may be left, and
+	// the removal's error is joined to the Condition for the log.
 	fail := func(step string, err error) (*Cluster, error) {
 		failure := verdict.Condition{Code: verdict.ClusterFailed, Text: step + ": " + err.Error()}
 		if s.Keep || ctx.Err() != nil {
 			return nil, failure
 		}
 		if rerr := remove(ctx, e, s.Name, s.RunDir); rerr != nil {
+			failure.Text += leftBehind
 			return nil, errors.Join(failure, fmt.Errorf("the clean-up after it failed: %w", rerr))
 		}
 		return nil, failure
@@ -174,7 +208,7 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 		return fail("set the kubeconfig's namespace", err)
 	}
 
-	version, err := client.Discovery().ServerVersion()
+	version, err := discovery.ToServerVersionInterfaceWithContext(client.Discovery()).ServerVersionWithContext(ctx)
 	if err != nil {
 		return fail("read the versions", err)
 	}
@@ -189,7 +223,7 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 // at its wait for a node's log line and ctx has not ended, it deletes the failed attempt with
 // kubeconfig, whatever the options say about keeping nodes, and tries again, createAttempts
 // times in all. The error is that of the last attempt, its text unchanged; a delete that fails
-// ends the attempts, and its error is joined to that of the attempt before it.
+// ends the attempts, and its error is joined, after "; ", to that of the attempt before it.
 func createKind(ctx context.Context, p *kindcluster.Provider, name, kubeconfig string, options ...kindcluster.CreateOption) error {
 	for attempt := 1; ; attempt++ {
 		err := kindCreate(p, name, options...)
@@ -197,7 +231,7 @@ func createKind(ctx context.Context, p *kindcluster.Provider, name, kubeconfig s
 			return err
 		}
 		if derr := kindDelete(p, name, kubeconfig); derr != nil {
-			return errors.Join(err, fmt.Errorf("delete the failed attempt %d: %w", attempt, derr))
+			return join(err, fmt.Errorf("delete the failed attempt %d: %w", attempt, derr))
 		}
 	}
 }
@@ -359,7 +393,7 @@ func (c *Cluster) Nodes() []string {
 // is an error that carries the output.
 func (c *Cluster) Exec(ctx context.Context, node string, args ...string) ([]byte, error) {
 	if len(args) == 0 {
-		return nil, errors.New("Exec needs a command")
+		return nil, errors.New("no command given to Exec")
 	}
 	i := slices.IndexFunc(c.nodes, func(n nodes.Node) bool { return n.String() == node })
 	if i < 0 {
@@ -379,8 +413,8 @@ func (c *Cluster) Delete(ctx context.Context) error {
 }
 
 // remove deletes the kind cluster name, the registry container NAME-registry with its volumes,
-// and runDir, going on after an error and joining the errors. It refuses, with InternalError, a
-// name without namePrefix and a runDir whose last element is not the name.
+// and runDir, going on after an error and joining the errors with "; ". It refuses, with
+// InternalError, a name without namePrefix and a runDir whose last element is not the name.
 func remove(ctx context.Context, e Engine, name, runDir string) error {
 	if !strings.HasPrefix(name, namePrefix) {
 		return verdict.Condition{Code: verdict.InternalError, Text: "refused to remove a cluster whose name does not start with " + namePrefix}
@@ -394,7 +428,7 @@ func remove(ctx context.Context, e Engine, name, runDir string) error {
 	if err := os.Remove(kubeconfig + ".lock"); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		errs = append(errs, err)
 	}
-	if err := e.provider().Delete(name, kubeconfig); err != nil {
+	if err := kindDelete(e.provider(), name, kubeconfig); err != nil {
 		errs = append(errs, fmt.Errorf("delete the kind cluster %s: %w", name, err))
 	}
 	if err := e.removeContainer(ctx, name+"-registry"); err != nil {
@@ -404,5 +438,5 @@ func remove(ctx context.Context, e Engine, name, runDir string) error {
 	if err := os.RemoveAll(runDir); err != nil {
 		errs = append(errs, err)
 	}
-	return errors.Join(errs...)
+	return join(errs...)
 }

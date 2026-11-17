@@ -55,32 +55,41 @@ func startRegistry(ctx context.Context, e Engine, name, image string, deadline t
 }
 
 // waitForRegistry sends GET url every registryPoll until one answers 200. Past deadline it returns
-// an error that says the registry did not answer, with the last result.
+// an error that says the registry did not answer, with the last answer it had: a status, or a
+// request that failed before the deadline ended it. With no such answer, it names the deadline.
 func waitForRegistry(ctx context.Context, url string, deadline time.Time) error {
 	waitCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	client := &http.Client{Timeout: registryRequest}
 	tick := time.NewTicker(registryPoll)
 	defer tick.Stop()
+	var last error // the last answer that was not 200; nil while there has been none
 	for {
 		req, err := http.NewRequestWithContext(waitCtx, http.MethodGet, url, nil)
 		if err != nil {
 			return err
 		}
 		resp, err := client.Do(req)
-		if err == nil {
+		switch {
+		case err == nil:
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				return nil
 			}
-			err = errors.New(resp.Status)
+			last = errors.New(resp.Status)
+		case waitCtx.Err() == nil:
+			// A request that the deadline or ctx ended is no answer.
+			last = err
 		}
 		select {
 		case <-waitCtx.Done():
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return fmt.Errorf("the registry did not answer GET %s with 200 in time; the last answer: %v", url, err)
+			if last == nil {
+				return fmt.Errorf("the registry did not answer GET %s before the deadline", url)
+			}
+			return fmt.Errorf("the registry did not answer GET %s with 200 in time; the last answer: %v", url, last)
 		case <-tick.C:
 		}
 	}

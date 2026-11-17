@@ -6,7 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,6 +18,8 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	kindcluster "sigs.k8s.io/kind/pkg/cluster"
+
+	"rollproof/internal/verdict"
 )
 
 // missedLine returns the error of kind's Create when its wait for a node's log line ended, as
@@ -43,7 +49,7 @@ func TestCreateKindRetries(t *testing.T) {
 		{"another failure after a missed line", []error{missedLine(1), other, nil}, nil, false, 2, 1, other.Error()},
 		{"ctx has ended", []error{missedLine(1), nil}, nil, true, 1, 0, missedLine(1).Error()},
 		{"the delete of a failed attempt fails", []error{missedLine(1), nil}, errors.New("exit status 1"), false, 1, 1,
-			missedLine(1).Error() + "\ndelete the failed attempt 1: exit status 1"},
+			missedLine(1).Error() + "; delete the failed attempt 1: exit status 1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
@@ -114,5 +120,94 @@ func TestEnsureNamespaces(t *testing.T) {
 	})
 	if err := ensureNamespaces(ctx, refused, ProbeNamespace); err == nil {
 		t.Error("ensureNamespaces gave no error when the server refused the create")
+	}
+}
+
+// Create's failure texts, with kind's Create and Delete replaced and an engine command that does
+// not exist (which remove reads as a registry container that is gone): each reason stays on one
+// line, and a clean-up that fails says that parts of the run may be left behind.
+func TestCreateFailureTexts(t *testing.T) {
+	const name = "rollproof-test-unit"
+	gone := errors.New("the engine is gone")
+	for _, tc := range []struct {
+		name    string
+		setup   func(t *testing.T, runDir string)
+		creates []error // what each attempt of kind's Create returns, in order
+		deletes []error // what each call of kind's Delete returns, in order: step 1's first
+		want    func(runDir string) string
+		joined  error // an error that the returned error holds beside the Condition, for the log
+	}{
+		{
+			name:    "the clean-up after a failed step fails",
+			creates: []error{errors.New("exit status 125")},
+			deletes: []error{nil, gone},
+			want: func(string) string {
+				return "create the kind cluster: exit status 125" + inotifyHint + leftBehind
+			},
+			joined: gone,
+		},
+		{
+			name:    "the delete of a failed attempt fails",
+			creates: []error{missedLine(1)},
+			deletes: []error{nil, errors.New("exit status 1"), nil},
+			want: func(string) string {
+				return "create the kind cluster: " + missedLine(1).Error() + "; delete the failed attempt 1: exit status 1" + inotifyHint
+			},
+		},
+		{
+			name: "two removals of leftovers fail",
+			setup: func(t *testing.T, runDir string) {
+				if err := os.MkdirAll(filepath.Join(runDir, "kubeconfig.lock", "x"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+			deletes: []error{gone},
+			want: func(runDir string) string {
+				return "remove leftovers: remove " + filepath.Join(runDir, "kubeconfig.lock") + ": directory not empty; delete the kind cluster " + name + ": the engine is gone"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldCreate, oldDelete := kindCreate, kindDelete
+			t.Cleanup(func() { kindCreate, kindDelete = oldCreate, oldDelete })
+			var creates, deletes int
+			kindCreate = func(*kindcluster.Provider, string, ...kindcluster.CreateOption) error {
+				if creates == len(tc.creates) {
+					t.Fatalf("attempt %d of kind's Create, want %d", creates+1, len(tc.creates))
+				}
+				creates++
+				return tc.creates[creates-1]
+			}
+			kindDelete = func(*kindcluster.Provider, string, string) error {
+				if deletes == len(tc.deletes) {
+					t.Fatalf("delete %d of kind's Delete, want %d", deletes+1, len(tc.deletes))
+				}
+				deletes++
+				return tc.deletes[deletes-1]
+			}
+			runDir := filepath.Join(t.TempDir(), name)
+			if tc.setup != nil {
+				tc.setup(t, runDir)
+			}
+			s := Spec{Name: name, RunDir: runDir, Workers: 1, Namespace: "app", Timeout: time.Minute}
+
+			_, err := Create(context.Background(), s, Engine{Binary: "rollproof-test-no-such-engine"})
+			if err == nil {
+				t.Fatal("Create gave no error")
+			}
+			c := verdict.AsCondition(err)
+			if c.Code != verdict.ClusterFailed || c.Text != tc.want(runDir) {
+				t.Errorf("Create = %s: %q\nwant cluster-failed: %q", c.Code, c.Text, tc.want(runDir))
+			}
+			if strings.Contains(c.Text, "\n") {
+				t.Errorf("the reason spans lines: %q", c.Text)
+			}
+			if tc.joined != nil && !errors.Is(err, tc.joined) {
+				t.Errorf("the error %q does not hold %q", err, tc.joined)
+			}
+			if creates != len(tc.creates) || deletes != len(tc.deletes) {
+				t.Errorf("%d creates and %d deletes, want %d and %d", creates, deletes, len(tc.creates), len(tc.deletes))
+			}
+		})
 	}
 }
