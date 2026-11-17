@@ -93,28 +93,37 @@ func pushImage(ctx context.Context, registry, repository string, img v1.Image) (
 
 // pull has node pull ref through the node's own registry settings, the ones the kubelet's pulls
 // use; exec runs a command in a node, and timeout bounds the pull. A failure is a Condition with
-// ClusterFailed whose text names the node and ref and says that the pull failed, followed by the
-// last line of the output that is not empty, or by the error when the output has none. The text
-// gives no cause of its own: for an image under TestHost the failure may come from the run's
-// registry or from the node's settings, and the node's runtime says only "not found" and hides
-// that it also tried https://rollproof.test (proof p01, case e).
+// ClusterFailed whose text names the node and ref and says that the pull failed. When timeout
+// ended the pull while ctx had not ended, the text is "NODE could not pull REF within TIMEOUT";
+// otherwise the line that lastLine picks from the output follows. The text gives no cause of its
+// own: for an image under TestHost the failure may come from the run's registry or from the
+// node's settings, and the node's runtime says only "not found" and hides that it also tried
+// https://rollproof.test (proof p01, case e).
 func pull(ctx context.Context, exec func(ctx context.Context, node string, args ...string) ([]byte, error), node, ref string, timeout time.Duration) error {
 	pullCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	// crictl pull uses the node's registry settings; ctr -n k8s.io images pull ignores them (proof p01).
 	out, err := exec(pullCtx, node, "crictl", "pull", ref)
-	if err != nil {
-		return verdict.Condition{Code: verdict.ClusterFailed, Text: node + " could not pull " + ref + ": " + lastLine(out, err)}
+	if err == nil {
+		return nil
 	}
-	return nil
+	if pullCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+		return verdict.Condition{Code: verdict.ClusterFailed, Text: node + " could not pull " + ref + " within " + timeout.String()}
+	}
+	return verdict.Condition{Code: verdict.ClusterFailed, Text: node + " could not pull " + ref + ": " + lastLine(out, err)}
 }
 
+// execReport is part of the line that nerdctl writes after the output of a command it ran in a
+// node, when that command exits non-zero (proof p01, cases e and f).
+const execReport = `msg="exec failed with exit code `
+
 // lastLine returns the last line of out that is not empty, with the space around it removed, or
-// the text of err, so trimmed, when out has none.
+// the text of err, so trimmed, when out has none. It first skips the trailing lines that hold
+// execReport: they are the engine's, so the command's own last line is the one before them.
 func lastLine(out []byte, err error) string {
 	lines := strings.Split(string(out), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
-		if l := strings.TrimSpace(lines[i]); l != "" {
+		if l := strings.TrimSpace(lines[i]); l != "" && !strings.Contains(l, execReport) {
 			return l
 		}
 	}

@@ -64,6 +64,8 @@ func TestMain(m *testing.M) {
 }
 
 // tinyProgram builds a static program that prints ok and sleeps, and returns its folder and path.
+// -trimpath keeps the temporary folder's name out of the binary, so that its bytes repeat from
+// run to run and BuildKit reuses its record of the image's COPY.
 func tinyProgram(t *testing.T) (dir, bin string) {
 	t.Helper()
 	dir = t.TempDir()
@@ -74,7 +76,7 @@ func tinyProgram(t *testing.T) (dir, bin string) {
 		}
 	}
 	bin = filepath.Join(dir, "app")
-	cmd := exec.Command("go", "build", "-o", bin, ".")
+	cmd := exec.Command("go", "build", "-trimpath", "-o", bin, ".")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -110,7 +112,11 @@ func TestStoreOwnAndLocal(t *testing.T) {
 	if out, err := exec.Command(c.Engine.Binary, "build", "-t", "rollproof-test-img:one", dir).CombinedOutput(); err != nil {
 		t.Fatalf("build the local image: %v\n%s", err, out)
 	}
-	t.Cleanup(func() { exec.Command(c.Engine.Binary, "rmi", "rollproof-test-img:one").Run() })
+	t.Cleanup(func() {
+		if out, err := exec.Command(c.Engine.Binary, "rmi", "rollproof-test-img:one").CombinedOutput(); err != nil {
+			t.Errorf("remove the local image rollproof-test-img:one: %v\n%s", err, out)
+		}
+	})
 
 	s, err := Store(ctx, c, bin, map[string]config.Image{"app": {Local: "rollproof-test-img:one"}}, 2*time.Minute)
 	if err != nil {

@@ -67,6 +67,9 @@ func TestOwnImage(t *testing.T) {
 	if hdr.Name != "rollproof" || hdr.Typeflag != tar.TypeReg || hdr.Mode != 0o755 {
 		t.Errorf("entry %q, type %c, mode %o; want rollproof, a regular file, 0755", hdr.Name, hdr.Typeflag, hdr.Mode)
 	}
+	if !hdr.ModTime.Equal(time.Unix(0, 0)) || hdr.Uid != 0 || hdr.Gid != 0 {
+		t.Errorf("entry dated %v and owned by %d:%d; want the Unix epoch and 0:0", hdr.ModTime, hdr.Uid, hdr.Gid)
+	}
 	got, err := io.ReadAll(tr)
 	if err != nil {
 		t.Fatal(err)
@@ -133,6 +136,21 @@ func TestNodeThatCannotPull(t *testing.T) {
 		t.Errorf("a full disk: %v, want cluster-failed naming the node, the reference and the last line", err)
 	}
 
+	// Under nerdctl, the node's exec ends the output with nerdctl's own report of the exit code,
+	// after crictl's line.
+	trailer := func(context.Context, string, ...string) ([]byte, error) {
+		return []byte(`time="2026-11-17T05:18:55Z" level=fatal msg="pulling image: failed to pull and unpack image: write /var/lib/containerd/x: no space left on device"` + "\n" +
+			`time="2026-11-17T00:18:55-05:00" level=fatal msg="exec failed with exit code 1"` + "\n"), errors.New("exit status 1")
+	}
+	err = pull(ctx, trailer, node, ref, time.Minute)
+	if err == nil {
+		t.Fatal("a full disk under nerdctl gave no error, want cluster-failed")
+	}
+	if c := verdict.AsCondition(err); c.Code != verdict.ClusterFailed || !strings.Contains(c.Text, "no space left on device") ||
+		strings.Contains(c.Text, "exec failed") {
+		t.Errorf("a full disk under nerdctl: %v, want cluster-failed with crictl's line and not nerdctl's", err)
+	}
+
 	stuck := func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -142,11 +160,34 @@ func TestNodeThatCannotPull(t *testing.T) {
 	if err == nil {
 		t.Fatal("a pull that never ends gave no error, want cluster-failed")
 	}
-	if c := verdict.AsCondition(err); c.Code != verdict.ClusterFailed {
-		t.Errorf("a pull that never ends: %v, want cluster-failed", err)
+	if c := verdict.AsCondition(err); c.Code != verdict.ClusterFailed || c.Text != node+" could not pull "+ref+" within 50ms" {
+		t.Errorf("a pull that never ends: %v, want cluster-failed saying it did not end within 50ms", err)
 	}
 	if d := time.Since(start); d > time.Second {
 		t.Errorf("a pull with a timeout of 50ms returned after %v", d)
+	}
+
+	// A pull that the caller's ctx ends, by a cancel or at the caller's own deadline, did not run
+	// out of its timeout: it keeps the usual text.
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	expired, cancelExpired := context.WithDeadline(ctx, time.Now())
+	defer cancelExpired()
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want string
+	}{
+		{"cancelled", cancelled, ": context canceled"},
+		{"past the caller's deadline", expired, ": context deadline exceeded"},
+	} {
+		err = pull(tc.ctx, stuck, node, ref, time.Minute)
+		if err == nil {
+			t.Fatalf("a pull whose ctx is %s gave no error, want cluster-failed", tc.name)
+		}
+		if c := verdict.AsCondition(err); c.Code != verdict.ClusterFailed || c.Text != node+" could not pull "+ref+tc.want {
+			t.Errorf("a pull whose ctx is %s: %v, want cluster-failed with the usual text", tc.name, err)
+		}
 	}
 
 	var got []string

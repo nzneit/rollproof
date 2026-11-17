@@ -33,7 +33,8 @@ func storeLocal(ctx context.Context, c *cluster.Cluster, entry, local string) (c
 	file := filepath.Join(dir, entry+".tar")
 	// A file that cannot be removed stays in the run's folder, which Delete removes.
 	defer os.Remove(file)
-	out, err := exec.CommandContext(ctx, c.Engine.Binary, "save", local, "-o", file).CombinedOutput()
+	// After --, a value of local that begins with - is an image's name, not an option.
+	out, err := exec.CommandContext(ctx, c.Engine.Binary, "save", "-o", file, "--", local).CombinedOutput()
 	if err != nil {
 		return fail("the engine could not save " + local + ": " + lastLine(out, err))
 	}
