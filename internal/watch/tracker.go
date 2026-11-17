@@ -1,7 +1,8 @@
 // Package watch tells what happens to the watched workloads of one namespace: when an install is
 // ready, when a transition has finished or stalled, and which pods were replaced. It hides the
 // rollout rules of each kind, pod ownership and the settle time. It changes nothing in the
-// cluster.
+// cluster. A workload that matches the selector at any moment of a transition is watched in it
+// for the rest of that transition.
 package watch
 
 import (
@@ -83,7 +84,7 @@ type workloadRecord struct {
 	obj        runtime.Object
 	uid        types.UID
 	generation int64
-	matched    bool // its labels matched the selector at its last Set
+	matched    bool // its labels matched the selector at its last Set; Begin seeds the watched set from it
 	firstSeen  time.Time
 	gone       time.Time // zero while it exists
 }
@@ -108,6 +109,11 @@ type transition struct {
 	// atStart holds the pods that the transition may replace: those recorded at Begin whose
 	// first sight is at or before its start and that were not gone by then.
 	atStart map[types.UID]bool
+	// watched holds the workloads watched in the transition. Begin seeds it with those that
+	// exist and match the selector then; a Set or Gone that shows a workload matching while the
+	// window is open adds it. A workload stays in it for the rest of the transition, whatever its
+	// later labels.
+	watched map[Workload]bool
 }
 
 // NewTracker returns a Tracker with nothing in it. It does no I/O and reads no clock: it is told
@@ -144,7 +150,7 @@ func (t *Tracker) Gone(obj runtime.Object, at time.Time) {
 	t.endIfDue(at)
 	var c change
 	if w, meta, ok := workloadOf(obj); ok {
-		t.goneWorkload(w, obj, meta, at)
+		c = t.goneWorkload(w, obj, meta, at)
 	} else if p, ok := obj.(*corev1.Pod); ok {
 		c = t.gonePod(p, at)
 	}
@@ -156,7 +162,7 @@ func (t *Tracker) Gone(obj runtime.Object, at time.Time) {
 // replace. One transition at a time.
 func (t *Tracker) Begin(name verdict.WindowName, at time.Time) {
 	t.endIfDue(at)
-	if t.cur != nil && t.cur.t.Ended.IsZero() {
+	if t.windowOpen() {
 		panic(fmt.Sprintf("watch: Begin(%s) while the window of %s is open", name, t.cur.t.Name))
 	}
 	atStart := map[types.UID]bool{}
@@ -165,16 +171,27 @@ func (t *Tracker) Begin(name verdict.WindowName, at time.Time) {
 			atStart[uid] = true
 		}
 	}
-	t.cur = &transition{t: Transition{Name: name, Began: at}, atStart: atStart}
+	watched := map[Workload]bool{}
+	for w, rec := range t.workloads {
+		if rec.matched && (rec.gone.IsZero() || rec.gone.After(at)) {
+			watched[w] = true
+		}
+	}
+	t.cur = &transition{t: Transition{Name: name, Began: at}, atStart: atStart, watched: watched}
 }
 
 // CommandExited tells the Tracker that the transition's command has exited, however it ended.
 func (t *Tracker) CommandExited(at time.Time) {
 	t.endIfDue(at)
-	if t.cur != nil && t.cur.t.Ended.IsZero() && t.cur.exited.IsZero() {
+	if t.windowOpen() && t.cur.exited.IsZero() {
 		t.cur.exited = at
 	}
 	t.afterChange(change{}, at)
+}
+
+// windowOpen reports whether a transition has begun and its window has not ended.
+func (t *Tracker) windowOpen() bool {
+	return t.cur != nil && t.cur.t.Ended.IsZero()
 }
 
 // State returns the transition so far, and whether its window has ended: it finished and the
@@ -209,7 +226,9 @@ func (t *Tracker) endIfDue(at time.Time) {
 }
 
 // changeKind is a change that starts the settle time again when it concerns a workload that takes
-// part in the finish.
+// part in the finish: a pod created or deleted, a change of spec, a workload that joins the
+// watched set, or a workload deleted. Nothing else starts it again: not readiness, not a
+// restarted container, not a change of status.
 type changeKind int
 
 const (
@@ -217,6 +236,8 @@ const (
 	podCreated
 	podDeleted
 	specChanged
+	workloadJoined
+	workloadDeleted
 )
 
 // change is what one Set or Gone did that may start the settle time again.
@@ -236,6 +257,10 @@ func (c change) sentence(since time.Duration) string {
 		return fmt.Sprintf("pod %s of %s was created %.1f s after the transition began", c.pod, c.workload, s)
 	case podDeleted:
 		return fmt.Sprintf("pod %s of %s was deleted %.1f s after the transition began", c.pod, c.workload, s)
+	case workloadJoined:
+		return fmt.Sprintf("%s joined the watched workloads %.1f s after the transition began", c.workload, s)
+	case workloadDeleted:
+		return fmt.Sprintf("%s was deleted %.1f s after the transition began", c.workload, s)
 	default:
 		return fmt.Sprintf("the spec of %s changed %.1f s after the transition began", c.workload, s)
 	}
@@ -244,10 +269,10 @@ func (c change) sentence(since time.Duration) string {
 // afterChange applies a change to the open transition: it starts the settle time again, or, when
 // the transition is not finished, finishes it when all three conditions hold.
 func (t *Tracker) afterChange(c change, at time.Time) {
-	tr := t.cur
-	if tr == nil || !tr.t.Ended.IsZero() {
+	if !t.windowOpen() {
 		return
 	}
+	tr := t.cur
 	if !tr.t.Finished.IsZero() {
 		if c.kind == noChange || !t.takesPart(c.workload) {
 			return
@@ -272,11 +297,11 @@ func (t *Tracker) finished() bool {
 	if t.cur.exited.IsZero() {
 		return false
 	}
-	for w, rec := range t.workloads {
+	for w := range t.cur.watched {
 		if !t.takesPart(w) {
 			continue
 		}
-		if rec.gone.IsZero() {
+		if rec := t.workloads[w]; rec.gone.IsZero() {
 			if done, _ := Complete(rec.obj); !done {
 				return false
 			}
@@ -295,18 +320,10 @@ func (t *Tracker) finished() bool {
 	return true
 }
 
-// takesPart reports whether w takes part in the finish of the open transition: it is watched in
-// it, and its last object updates by rolling. A workload is watched when it existed at the
-// transition's start or appeared later, and its labels matched at its last Set.
+// takesPart reports whether w takes part in the finish of the open transition: it is in the
+// transition's watched set, and its last object updates by rolling.
 func (t *Tracker) takesPart(w Workload) bool {
-	rec, ok := t.workloads[w]
-	if !ok || !rec.matched {
-		return false
-	}
-	if !rec.gone.IsZero() && !rec.gone.After(t.cur.t.Began) {
-		return false
-	}
-	return Rolling(rec.obj)
+	return t.cur.watched[w] && Rolling(t.workloads[w].obj)
 }
 
 // podsLeft reports whether a pod of w is not gone.
@@ -355,38 +372,65 @@ func (t *Tracker) selects(meta *metav1.ObjectMeta) bool {
 	return t.o.Selector == nil || t.o.Selector.Matches(labels.Set(meta.Labels))
 }
 
-// setWorkload records a Set of a workload. Its spec changed when it is seen for the first time,
-// when its record is gone, when its UID differs from the recorded one, or when its generation is
-// higher than the recorded one. The first three hold whatever the generations are: a workload
-// created, or made again under its old name, in the settle time starts it again.
+// setWorkload records a Set of a workload. The Set is of a new object when the workload is seen
+// for the first time, when its record is gone, or when its UID differs from the recorded one; its
+// first sight is then this moment. Its spec changed when the object is new, whatever the
+// generations are, or when its generation is higher than the recorded one: a workload created, or
+// made again under its old name, in the settle time starts it again. While a window is open, a
+// Set that shows the workload matching adds it to the watched set; one that adds it, and is not a
+// change of spec, says that it joined.
 func (t *Tracker) setWorkload(w Workload, obj runtime.Object, meta *metav1.ObjectMeta, at time.Time) change {
 	rec, known := t.workloads[w]
 	if !known {
-		rec = &workloadRecord{firstSeen: at}
+		rec = &workloadRecord{}
 		t.workloads[w] = rec
 	}
-	specChange := !known || !rec.gone.IsZero() || meta.UID != rec.uid || meta.Generation > rec.generation
+	newObject := !known || !rec.gone.IsZero() || meta.UID != rec.uid
+	if newObject {
+		rec.firstSeen = at
+	}
+	specChange := newObject || meta.Generation > rec.generation
 	rec.obj = obj
 	rec.uid = meta.UID
 	rec.generation = meta.Generation
 	rec.matched = t.selects(meta)
 	rec.gone = time.Time{}
-	if specChange {
+	joined := t.watch(w, rec.matched)
+	switch {
+	case specChange:
 		return change{kind: specChanged, workload: w}
+	case joined:
+		return change{kind: workloadJoined, workload: w}
 	}
 	return change{}
 }
 
-// goneWorkload records that a workload no longer exists.
-func (t *Tracker) goneWorkload(w Workload, obj runtime.Object, meta *metav1.ObjectMeta, at time.Time) {
+// goneWorkload records that a workload no longer exists. A workload not told before is recorded
+// as seen and gone at once. While a window is open, a Gone that shows the workload matching adds
+// it to the watched set, so that its pods are waited for. A workload that goes from existing to
+// gone was deleted at this moment.
+func (t *Tracker) goneWorkload(w Workload, obj runtime.Object, meta *metav1.ObjectMeta, at time.Time) change {
 	rec, known := t.workloads[w]
 	if !known {
 		rec = &workloadRecord{obj: obj, uid: meta.UID, generation: meta.Generation, matched: t.selects(meta), firstSeen: at}
 		t.workloads[w] = rec
 	}
-	if rec.gone.IsZero() {
-		rec.gone = at
+	if !rec.gone.IsZero() {
+		return change{}
 	}
+	rec.gone = at
+	t.watch(w, t.selects(meta))
+	return change{kind: workloadDeleted, workload: w}
+}
+
+// watch adds w to the open transition's watched set when matches holds, and reports whether it
+// was not in the set before.
+func (t *Tracker) watch(w Workload, matches bool) bool {
+	if !matches || !t.windowOpen() || t.cur.watched[w] {
+		return false
+	}
+	t.cur.watched[w] = true
+	return true
 }
 
 // setReplicaSet records the Deployment that is a ReplicaSet's controller, or that it has none.

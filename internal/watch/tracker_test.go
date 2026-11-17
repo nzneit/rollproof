@@ -136,6 +136,18 @@ func TestTransitionFinish(t *testing.T) {
 	agentNew.UID = "uid-agent-2"
 	agentNewDone := daemonSet("agent", 1, 1, 3, 3, 3, dsRolling)
 	agentNewDone.UID = "uid-agent-2"
+	// relabelled gives d the label app: app in place of its own.
+	relabelled := func(d *appsv1.Deployment, app string) *appsv1.Deployment {
+		d.Labels = map[string]string{"app": app}
+		return d
+	}
+	onlyOrders := labels.SelectorFromSet(labels.Set{"app": "orders"})
+	incOther := relabelled(deployment("orders", 2, 1, 2, 2, 2, 2), "other")
+	doneOther := relabelled(deployment("orders", 2, 2, 2, 2, 2, 2), "other")
+	jobs := deployment("jobs", 2, 1, 1, 1, 1, 1) // app=jobs, a new spec not observed yet
+	jobsIn := relabelled(deployment("jobs", 2, 1, 1, 1, 1, 1), "orders")
+	jobsInDone := relabelled(deployment("jobs", 2, 2, 1, 1, 1, 1), "orders")
+	a3 := pod("orders-a-3", "a3", "ReplicaSet", "orders-a", false, false)
 	for _, r := range []struct {
 		name     string
 		selector labels.Selector // nil: every workload
@@ -241,7 +253,8 @@ func TestTransitionFinish(t *testing.T) {
 			before:   append(base(), agent),
 			events:   []ev{exited(2), gone(3, agent), set(5, agentNew), set(9, agentNewDone)},
 			finished: 9, open: 23, end: 24,
-			restarts: []string{"the spec of daemonset/agent changed 5.0 s after the transition began"}},
+			restarts: []string{"daemonset/agent was deleted 3.0 s after the transition began",
+				"the spec of daemonset/agent changed 5.0 s after the transition began"}},
 		{name: "a workload whose UID changes with no Gone told starts it again",
 			before:   append(base(), agent),
 			events:   []ev{exited(2), set(5, agentNew), set(9, agentNewDone)},
@@ -251,7 +264,8 @@ func TestTransitionFinish(t *testing.T) {
 			before:   append(base(), agent),
 			events:   []ev{exited(2), gone(3, agent), set(5, agent)},
 			finished: 5, open: 19, end: 20,
-			restarts: []string{"the spec of daemonset/agent changed 5.0 s after the transition began"}},
+			restarts: []string{"daemonset/agent was deleted 3.0 s after the transition began",
+				"the spec of daemonset/agent changed 5.0 s after the transition began"}},
 		{name: "a workload first told gone waits for its pods",
 			before: []runtime.Object{replicaSet("orders-a", "orders"), liveA1,
 				pod("orders-a-2", "a2", "ReplicaSet", "orders-a", true, false)},
@@ -261,6 +275,52 @@ func TestTransitionFinish(t *testing.T) {
 		{name: "an object of another kind changes nothing",
 			before: base(), events: []ev{exited(2), set(5, &corev1.ConfigMap{}), gone(6, &corev1.ConfigMap{})},
 			finished: 2, open: 16, end: 17},
+		{name: "a workload that stops matching while it rolls out stays watched in the transition",
+			selector: onlyOrders,
+			before:   base(), events: []ev{set(1, inc), set(2, incOther), exited(3), set(20, doneOther)},
+			finished: 20, open: none, end: 35},
+		{name: "a workload that joins in the settle time must complete its rollout",
+			selector: onlyOrders,
+			before:   append(base(), jobs),
+			events:   []ev{exited(2), set(5, jobsIn), set(9, jobsInDone)},
+			finished: 9, open: 23, end: 24,
+			restarts: []string{"deployment/jobs joined the watched workloads 5.0 s after the transition began"}},
+		{name: "a workload that a Set before the transition shows matching is watched from its start",
+			selector: onlyOrders,
+			before:   append(base(), jobs, jobsIn),
+			events:   []ev{exited(2), set(9, jobsInDone)},
+			finished: 9, open: 23, end: 24},
+		{name: "a workload outside the selector that changes in the transition counts for nothing",
+			selector: onlyOrders,
+			before:   append(base(), jobs),
+			events:   []ev{exited(2), set(5, deployment("jobs", 3, 1, 1, 1, 1, 1))},
+			finished: 2, open: 16, end: 17},
+		{name: "a workload told gone twice is deleted once",
+			before:   append(base(), agent),
+			events:   []ev{exited(2), gone(3, agent), gone(6, agent)},
+			finished: 3, open: 17, end: 18,
+			restarts: []string{"daemonset/agent was deleted 3.0 s after the transition began"}},
+		{name: "the rollout completes after the timeout: a stall at the timeout",
+			before: base(), events: []ev{set(1, inc), exited(2), set(305, done)},
+			finished: none, stalled: true, open: none, end: 300},
+		{name: "the last old pod is gone after the timeout: a stall at the timeout",
+			before: base(), events: []ev{set(1, inc), exited(2), set(10, oldA1), set(20, done), gone(305, oldA1)},
+			finished: none, stalled: true, open: none, end: 300},
+		{name: "the command exits after the timeout: a stall at the timeout",
+			before: base(), events: []ev{set(1, inc), set(20, done), exited(305)},
+			finished: none, stalled: true, open: none, end: 300},
+		{name: "a pod created when the settle time ends belongs to no transition",
+			before: base(), events: []ev{exited(2), set(17, a3)},
+			finished: 2, open: none, end: 17},
+		{name: "a change exactly at the timeout, in the settle time, is a stall",
+			before: base(), events: []ev{set(1, inc), exited(2), set(290, done), set(300, a3)},
+			finished: none, stalled: true, open: none, end: 300,
+			restarts: []string{"pod orders-a-3 of deployment/orders was created 300.0 s after the transition began"}},
+		{name: "a workload deleted in the settle time holds the window until its pods are gone",
+			before: base(), events: []ev{set(1, deployment("orders-v2", 1, 1, 2, 2, 2, 2)), exited(2),
+				gone(5, deployment("orders", 1, 1, 2, 2, 2, 2)), set(20, oldA1), set(20, oldA2), gone(22, oldA1), gone(23, oldA2)},
+			finished: 23, open: 37, end: 38,
+			restarts: []string{"deployment/orders was deleted 5.0 s after the transition began"}},
 	} {
 		t.Run(r.name, func(t *testing.T) {
 			o := options()
