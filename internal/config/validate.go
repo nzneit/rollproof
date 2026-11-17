@@ -188,6 +188,9 @@ func validateRelease(path string, r *Release, x *index) error {
 	if chartHoldsUserInfo(r.Chart) {
 		return x.reject(path+".chart", "must not hold a user name or password")
 	}
+	if chartHoldsQuery(r.Chart) {
+		return x.reject(path+".chart", "must not hold a query")
+	}
 	switch {
 	case r.IsPath && r.Version != "":
 		return x.reject(path+".version", "not allowed beside a chart that is a path")
@@ -218,6 +221,20 @@ func chartHoldsUserInfo(chart string) bool {
 	}
 	authority, _, _ := strings.Cut(rest, "/")
 	return strings.Contains(authority, "@")
+}
+
+// chartHoldsQuery says whether a chart reference in URL form has a query, which may carry a
+// credential. A form that does not parse is judged by a question mark before any number sign.
+func chartHoldsQuery(chart string) bool {
+	_, rest, ok := strings.Cut(chart, "://")
+	if !ok {
+		return false
+	}
+	if u, err := url.Parse(chart); err == nil {
+		return u.RawQuery != ""
+	}
+	beforeFragment, _, _ := strings.Cut(rest, "#")
+	return strings.Contains(beforeFragment, "?")
 }
 
 func validateHTTP(h *HTTP, silence time.Duration, x *index) error {

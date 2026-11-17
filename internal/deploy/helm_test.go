@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -521,5 +522,31 @@ func TestHelmSecondFetch(t *testing.T) {
 		if c.Name == "install" && c.Args[4] != want {
 			t.Errorf("install names %q, want the second pull's archive %q", c.Args[4], want)
 		}
+	}
+}
+
+func TestHelmFetchNeedsAnAbsoluteRunFolder(t *testing.T) {
+	for _, runDir := range []string{"", "run"} {
+		t.Run("run folder "+strconv.Quote(runDir), func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			keep := filepath.Join(runDir, "charts", "previous")
+			if err := os.MkdirAll(keep, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			f := scripted()
+			drv := NewHelm(HelmOptions{Helm: helmConfig(), Namespace: "orders", Kubeconfig: kubeconfig, Context: kubeContext,
+				RunDir: runDir, Dir: "/work/app", Timeout: timeout, Runner: f})
+			var c verdict.Condition
+			if err := drv.Fetch(context.Background()); !errors.As(err, &c) || c.Code != verdict.InternalError ||
+				c.Text != "the run folder must be an absolute path" {
+				t.Fatalf("got %v, want an internal-error condition with the run folder's text", err)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("%d commands ran, want none", len(f.calls))
+			}
+			if _, err := os.Stat(keep); err != nil {
+				t.Errorf("the folder %s was removed: %v", keep, err)
+			}
+		})
 	}
 }

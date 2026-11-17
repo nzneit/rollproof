@@ -77,6 +77,9 @@ func (d *HelmDriver) run(ctx context.Context, name string, args ...string) Resul
 // Fetch pulls and reads both charts and writes the inline values. It stops at the first error.
 func (d *HelmDriver) Fetch(ctx context.Context) error {
 	d.ready = false
+	if !filepath.IsAbs(d.o.RunDir) {
+		return verdict.Condition{Code: verdict.InternalError, Text: "the run folder must be an absolute path"}
+	}
 	prev, err := d.fetch(ctx, "previous", d.o.Helm.Previous)
 	if err != nil {
 		return err
