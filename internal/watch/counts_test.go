@@ -953,13 +953,14 @@ func TestNoStallDetailsForAFinish(t *testing.T) {
 	}
 }
 
-// A Transition whose window has not ended, or that ended without finishing,
-// is judged as a stall (ruling T26-2): read while open, before it finishes or
-// in its settle time, or cut short by its caller before the timeout. Its
-// details are those of the moment State was asked.
+// A Transition that did not stall and whose window has not ended, or ended
+// without finishing, is not verified (ruling T26-2 as amended): read while
+// open, before it finishes or in its settle time, or cut short by its caller
+// before the timeout. It gives one InternalError, no stall and no
+// no-pod-replaced. Its details are those of the moment State was asked.
 func TestConditionsOfAWindowThatDidNotEnd(t *testing.T) {
 	const notObserved = "deployment/orders: Waiting for deployment spec update to be observed..."
-	stalled := verdict.Condition{Code: verdict.TransitionStalled, Text: "did not finish within limits.timeout"}
+	early := verdict.Condition{Code: verdict.InternalError, Text: "the transition was judged before its window ended"}
 	pending := pod("orders-b-1", "b1", "ReplicaSet", "orders-b", false, false)
 	pending.Status.Phase = corev1.PodPending
 	pending.Status.Conditions = append(pending.Status.Conditions, corev1.PodCondition{Type: corev1.PodScheduled,
@@ -978,10 +979,10 @@ func TestConditionsOfAWindowThatDidNotEnd(t *testing.T) {
 		{name: "read while open, before it finishes",
 			events: []ev{set(1, inc), exited(2)}, now: 3,
 			incomplete: []string{notObserved},
-			conditions: []verdict.Condition{stalled}},
+			conditions: []verdict.Condition{early}},
 		{name: "read while open, in its settle time, which gives no no-pod-replaced",
 			events: []ev{exited(2)}, now: 10, finished: true,
-			conditions: []verdict.Condition{stalled}},
+			conditions: []verdict.Condition{early}},
 		{name: "cut short before the timeout",
 			events: []ev{set(1, inc), exited(2), set(10, oldA1), set(11, replicaSet("orders-b", "orders")),
 				set(12, pending)},
@@ -990,9 +991,7 @@ func TestConditionsOfAWindowThatDidNotEnd(t *testing.T) {
 				"pod orders-b-1: phase Pending, not scheduled (Unschedulable: no room)",
 				"pod orders-a-1 has been stopping for 40.0 s and is not gone"},
 			unschedulable: []string{"pod orders-b-1 could not be scheduled on the test cluster's 3 worker nodes (cluster.workers): no room"},
-			conditions: []verdict.Condition{stalled, {Code: verdict.PodUnschedulable,
-				Text: "pod orders-b-1 could not be scheduled on the test cluster's 3 worker nodes (cluster.workers): no room" +
-					"; a rolling update needs room for one more pod"}}},
+			conditions:    []verdict.Condition{early}},
 	} {
 		t.Run(r.name, func(t *testing.T) {
 			s, ended := feed(options(), base(), r.events).State(at(r.now))
@@ -1013,6 +1012,58 @@ func TestConditionsOfAWindowThatDidNotEnd(t *testing.T) {
 				if diff := cmp.Diff(r.conditions, s.Conditions(ok)); diff != "" {
 					t.Errorf("Conditions(%v) (-want +got):\n%s", ok, diff)
 				}
+			}
+		})
+	}
+}
+
+// A deploy cut short by SIGINT, before it finishes or in its settle time: the
+// caller sets Ended to the moment its context ended and clears Finished
+// (T26-3), and the run places interrupted in the deploy's window. The verdict
+// is not verified, decided by interrupted, and no condition is a fail code
+// (spec section 12; review row).
+func TestConditionsOfASignalDuringTheDeploy(t *testing.T) {
+	for _, r := range []struct {
+		name   string
+		events []ev
+		now    float64
+	}{
+		{"before it finishes", []ev{set(1, inc), exited(2)}, 50},
+		{"in its settle time", rollingUpdate(), 20},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			s, ended := feed(options(), base(), r.events).State(at(r.now))
+			if ended {
+				t.Fatalf("State(+%v s) has ended", r.now)
+			}
+			s.Ended, s.Finished = at(r.now), time.Time{}
+			cs := append(s.Conditions(true), verdict.Condition{Code: verdict.Interrupted, Text: "a signal stopped the run"})
+			for _, c := range cs {
+				if c.Code.Verdict() == verdict.Fail {
+					t.Errorf("condition %v gives a fail verdict", c)
+				}
+			}
+			var obs []verdict.Observation
+			for x := -10.0; x < r.now; x += 0.5 {
+				obs = append(obs, verdict.Observation{Written: at(x), T: at(x), OK: true, N: 1})
+			}
+			d := verdict.Decide(verdict.Timeline{
+				Windows: []verdict.Window{
+					{Name: verdict.Steady, Start: at(-10), End: t0},
+					{Name: verdict.Deploy, Start: t0, End: at(r.now), Conditions: cs},
+					{Name: verdict.Rollback},
+				},
+				Observations: obs, Silence: 5 * time.Second, Now: at(r.now),
+			})
+			var decided verdict.Code
+			for _, rs := range d.Reasons {
+				if rs.Decided {
+					decided = rs.Code
+				}
+			}
+			if d.Verdict != verdict.NotVerified || decided != verdict.Interrupted {
+				t.Errorf("verdict %s decided by %s from conditions %v; want not-verified decided by interrupted",
+					d.Verdict, decided, cs)
 			}
 		})
 	}

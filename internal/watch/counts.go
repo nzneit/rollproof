@@ -17,14 +17,18 @@ import (
 
 // Conditions returns what the transition gives the verdict: a stall, with a second condition when
 // a pod could not be scheduled; a workload the tool cannot judge; and, only when it finished and
-// its command succeeded, that it replaced no pod. A Transition whose window has not ended, or
-// that ended without finishing (read while open, or cut short by its caller), is judged as a
-// stall: it gives TransitionStalled, PodUnschedulable when a pod could not be scheduled, and never
-// NoPodReplaced, so that such a Transition never passes.
+// its command succeeded, that it replaced no pod. The stall, and PodUnschedulable with it, come
+// only from a window that stalled by its own rule. A Transition that did not stall and whose
+// window has not ended, or ended without finishing (read while open, or cut short by its caller),
+// gives InternalError, "the transition was judged before its window ended", in place of the
+// stall, and never NoPodReplaced: such a Transition is not verified and never passes, and a
+// signal that cut the window short still decides it, because interrupted comes before
+// internal-error.
 func (tr Transition) Conditions(commandSucceeded bool) []verdict.Condition {
-	stalled := tr.Stalled || tr.Finished.IsZero() || tr.Ended.IsZero()
+	finished := !tr.Stalled && !tr.Finished.IsZero() && !tr.Ended.IsZero()
 	var cs []verdict.Condition
-	if stalled {
+	switch {
+	case tr.Stalled:
 		text := "did not finish within limits.timeout"
 		if len(tr.SettleRestarts) > 0 {
 			text += "; the settle time started again: " + strings.Join(tr.SettleRestarts, "; ")
@@ -34,6 +38,9 @@ func (tr Transition) Conditions(commandSucceeded bool) []verdict.Condition {
 			cs = append(cs, verdict.Condition{Code: verdict.PodUnschedulable,
 				Text: strings.Join(tr.Unschedulable, "; ") + "; a rolling update needs room for one more pod"})
 		}
+	case !finished:
+		cs = append(cs, verdict.Condition{Code: verdict.InternalError,
+			Text: "the transition was judged before its window ended"})
 	}
 	if len(tr.Unsupported) > 0 {
 		// A Transition holds no object. The API server admits only RollingUpdate and OnDelete as a
@@ -43,7 +50,7 @@ func (tr Transition) Conditions(commandSucceeded bool) []verdict.Condition {
 			return string(appsv1.OnDeleteStatefulSetStrategyType)
 		}))
 	}
-	if !stalled && commandSucceeded && !tr.Replaced {
+	if finished && commandSucceeded && !tr.Replaced {
 		cs = append(cs, verdict.Condition{Code: verdict.NoPodReplaced,
 			Text: "the transition finished and replaced no pod: it changed nothing the test can judge"})
 	}
