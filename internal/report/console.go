@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -32,6 +33,7 @@ var notExercised = []string{
 // folder. It is a pure function of r: no clock, no environment, no terminal
 // width.
 func Console(r Run) string {
+	r = cleanRun(r)
 	var blocks [][]string
 	blocks = append(blocks, []string{verdictLine(r)})
 	blocks = append(blocks, setUp(r))
@@ -63,11 +65,99 @@ func Console(r Run) string {
 	return b.String()
 }
 
-// oneLine writes s on one line: each line break becomes one space.
-func oneLine(s string) string {
+// clean writes s as text for one line of a terminal: CR LF, CR and LF each
+// become one space, and so does every other control character (category Cc),
+// the line and paragraph separators, and the bidirectional controls. Text from
+// the cluster, from commands and from the configuration is cleaned with it
+// before it is printed, so that none of it can redraw or split a line.
+func clean(s string) string {
+	if !strings.ContainsFunc(s, isControl) {
+		return s
+	}
 	s = strings.ReplaceAll(s, "\r\n", " ")
-	s = strings.ReplaceAll(s, "\n", " ")
-	return strings.ReplaceAll(s, "\r", " ")
+	return strings.Map(func(r rune) rune {
+		if isControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+func isControl(r rune) bool {
+	return unicode.Is(unicode.Cc, r) || r == '\u2028' || r == '\u2029' ||
+		(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069')
+}
+
+func cleanAll(s []string) []string {
+	out := make([]string, len(s))
+	for i, x := range s {
+		out[i] = clean(x)
+	}
+	return out
+}
+
+func cleanSettings(s []Setting) []Setting {
+	out := make([]Setting, len(s))
+	for i, x := range s {
+		out[i] = Setting{Key: clean(x.Key), Value: clean(x.Value), Default: clean(x.Default)}
+	}
+	return out
+}
+
+// cleanRun is a copy of r with every string that the console prints cleaned.
+// Console prints only from this copy, so no print site can miss a field.
+func cleanRun(r Run) Run {
+	c := r
+	c.Verdict, c.Driver, c.Name, c.Out = clean(r.Verdict), clean(r.Driver), clean(r.Name), clean(r.Out)
+	c.RemovedVariables, c.Warnings = cleanAll(r.RemovedVariables), cleanAll(r.Warnings)
+	c.Settings = cleanSettings(r.Settings)
+	c.Reasons = nil
+	for _, x := range r.Reasons {
+		x.Code, x.Verdict, x.Window, x.Text, x.Detail = clean(x.Code), clean(x.Verdict), clean(x.Window), clean(x.Text), cleanAll(x.Detail)
+		c.Reasons = append(c.Reasons, x)
+	}
+	c.Windows = nil
+	for _, x := range r.Windows {
+		x.Name, x.Result = clean(x.Name), clean(x.Result)
+		c.Windows = append(c.Windows, x)
+	}
+	c.Transitions = nil
+	for _, x := range r.Transitions {
+		x.Name = clean(x.Name)
+		x.Workloads = nil
+		for _, w := range r.Transitions[len(c.Transitions)].Workloads {
+			w.Workload, w.Probed = clean(w.Workload), clean(w.Probed)
+			x.Workloads = append(x.Workloads, w)
+		}
+		c.Transitions = append(c.Transitions, x)
+	}
+	c.Probes = nil
+	for _, x := range r.Probes {
+		x.Kind, x.Target = clean(x.Kind), clean(x.Target)
+		x.Settings, x.Notes = cleanSettings(x.Settings), cleanAll(x.Notes)
+		c.Probes = append(c.Probes, x)
+	}
+	c.Releases = nil
+	for _, x := range r.Releases {
+		x.Role, x.Chart, x.Version, x.Source = clean(x.Role), clean(x.Chart), clean(x.Version), clean(x.Source)
+		x.ValuesFiles, x.InlineKeys = cleanAll(x.ValuesFiles), cleanAll(x.InlineKeys)
+		c.Releases = append(c.Releases, x)
+	}
+	c.Images = nil
+	for _, x := range r.Images {
+		x.Name = clean(x.Name)
+		x.RunBy = nil
+		for _, b := range r.Images[len(c.Images)].RunBy {
+			x.RunBy = append(x.RunBy, RunBy{Workload: clean(b.Workload), Transition: clean(b.Transition)})
+		}
+		c.Images = append(c.Images, x)
+	}
+	if r.Cluster != nil {
+		cl := *r.Cluster
+		cl.Provider, cl.Kubernetes = clean(cl.Provider), clean(cl.Kubernetes)
+		c.Cluster = &cl
+	}
+	return c
 }
 
 func verdictLine(r Run) string {
@@ -237,7 +327,7 @@ func probeLines(p Probe) []string {
 		lines = append(lines, indent+"the server's certificate was not verified")
 	}
 	for _, n := range p.Notes {
-		lines = append(lines, indent+oneLine(n))
+		lines = append(lines, indent+clean(n))
 	}
 	if !p.StoppedWhenAsked {
 		lines = append(lines, indent+"the probe did not stop when asked; checks still in flight were not reported")
@@ -415,6 +505,9 @@ func transitionsTable(r Run) []string {
 func exercisedLists(r Run) []string {
 	lines := []string{"exercised"}
 	for _, tr := range r.Transitions {
+		if windowNotRun(r, tr.Name) {
+			continue
+		}
 		text := ""
 		switch tr.Name {
 		case "deploy":
@@ -430,7 +523,7 @@ func exercisedLists(r Run) []string {
 		lines = append(lines, "  "+pad(tr.Name, 12)+text)
 	}
 	lines = append(lines, "not exercised")
-	if hasWindow(r, "deploy") && !hasWindow(r, "rollback") {
+	if hasWindowThatRan(r, "deploy") && !hasWindowThatRan(r, "rollback") {
 		lines = append(lines, "  the candidate's shutdown, because the run has no rollback")
 	}
 	for _, n := range notExercised {
@@ -465,13 +558,13 @@ func last(r Run) []string {
 		if rs.Window != "" {
 			head = rs.Window + ": "
 		}
-		lines = append(lines, head+oneLine(rs.Text)+"   ["+rs.Code+"]")
+		lines = append(lines, head+clean(rs.Text)+"   ["+rs.Code+"]")
 		for _, d := range rs.Detail {
-			lines = append(lines, wrap("  ", oneLine(d))...)
+			lines = append(lines, wrap("  ", clean(d))...)
 		}
 	}
 	for _, w := range r.Warnings {
-		lines = append(lines, "warning: "+oneLine(w))
+		lines = append(lines, "warning: "+clean(w))
 	}
 	return append(lines, "results: "+r.Out)
 }
@@ -509,10 +602,22 @@ func wrap(indent, text string) []string {
 	}
 }
 
-// hasWindow reports whether the record has a window with the given name.
-func hasWindow(r Run, name string) bool {
+// hasWindowThatRan reports whether the record has a window with the given
+// name whose result is not "not-run".
+func hasWindowThatRan(r Run, name string) bool {
 	for _, w := range r.Windows {
-		if w.Name == name {
+		if w.Name == name && w.Result != "not-run" {
+			return true
+		}
+	}
+	return false
+}
+
+// windowNotRun reports whether the record has a window with the given name
+// whose result is "not-run".
+func windowNotRun(r Run, name string) bool {
+	for _, w := range r.Windows {
+		if w.Name == name && w.Result == "not-run" {
 			return true
 		}
 	}

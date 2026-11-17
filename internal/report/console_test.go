@@ -402,3 +402,95 @@ func TestConsoleDeployWithoutRollback(t *testing.T) {
 		}
 	}
 }
+
+// A rollback window that did not run is not a rollback the run exercised: a
+// deploy-only pass says so, and "exercised" has no rollback line.
+func TestConsoleDeployWithoutRollbackThatRan(t *testing.T) {
+	r := passRun()
+	r.Windows[2] = Window{Name: "rollback", Result: "not-run"}
+	r.Transitions = r.Transitions[:1]
+	got := Console(r)
+	want := "not exercised\n  the candidate's shutdown, because the run has no rollback\n  " + notExercised[0] + "\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("Console has no\n%s\nin\n%s", want, got)
+	}
+	if strings.Contains(got, "  rollback ") {
+		t.Errorf("Console has a rollback line in\n%s", got)
+	}
+	// A transition whose window did not run prints no line either.
+	r = passRun()
+	r.Windows[2] = Window{Name: "rollback", Result: "not-run"}
+	if got := Console(r); strings.Contains(got, "  rollback ") {
+		t.Errorf("Console has a rollback line for a window that did not run:\n%s", got)
+	}
+}
+
+// The word of a window with a not-verified result, in the window table.
+func TestConsoleNotVerifiedWindow(t *testing.T) {
+	r := failRun()
+	r.Windows[1].Result = "not-verified"
+	if got := Console(r); !strings.Contains(got, "   NOT VERIFIED\n") {
+		t.Errorf("Console has no NOT VERIFIED result in\n%s", got)
+	}
+}
+
+func TestClean(t *testing.T) {
+	for _, c := range []struct{ name, in, want string }{
+		{"plain text and spaces", "a  b c", "a  b c"},
+		{"unicode text", "café 世", "café 世"},
+		{"LF", "a\nb", "a b"},
+		{"CR LF is one space", "a\r\nb", "a b"},
+		{"CR", "a\rb", "a b"},
+		{"tab", "a\tb", "a b"},
+		{"VT", "a\vb", "a b"},
+		{"FF", "a\fb", "a b"},
+		{"ESC", "a\x1b[2Ab", "a [2Ab"},
+		{"BEL", "a\ab", "a b"},
+		{"NUL", "a\x00b", "a b"},
+		{"DEL", "a\x7fb", "a b"},
+		{"C1 low", "a\u0080b", "a b"},
+		{"NEL", "a\u0085b", "a b"},
+		{"C1 high", "a\u009fb", "a b"},
+		{"line separator", "a b", "a b"},
+		{"paragraph separator", "a b", "a b"},
+		{"bidi embedding", "a‪b‮b", "a b b"},
+		{"bidi isolate", "a⁦b⁩b", "a b b"},
+		{"empty", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := clean(c.in); got != c.want {
+				t.Errorf("clean(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// Text from the cluster, the commands and the configuration cannot redraw or
+// split the verdict line or any other line.
+func TestConsoleCleansEveryField(t *testing.T) {
+	const bad = "\x1b[2J\a\v\f\u0085 ‮\t"
+	r := passRun()
+	r.Name = "or" + bad + "ders"
+	r.Releases[1].Source = "./ch" + bad + "art"
+	r.Probes[0].Target = "GET http://o" + bad + "rders"
+	r.Probes[0].Notes = []string{"no" + bad + "te"}
+	r.Transitions[0].Workloads[0].Workload = "deployment/or" + bad + "ders"
+	r.Warnings = []string{"war" + bad + "ning"}
+	r.Verdict = "fail"
+	r.Reasons = []Reason{{Code: "probe-failures", Verdict: "fail", Window: "deploy", Text: "te" + bad + "xt",
+		Detail: []string{"de" + bad + "tail"}, Decided: true}}
+	got := Console(r)
+	for _, c := range strings.TrimPrefix(bad, "\x1b[2J") {
+		if strings.ContainsRune(got, c) {
+			t.Errorf("Console holds %U", c)
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
+		if strings.ContainsAny(line, "\r\v\f\x1b") {
+			t.Errorf("line %q holds a control character", line)
+		}
+	}
+	if strings.Contains(got, "\x1b") || !strings.HasPrefix(got, "rollproof: FAIL   or ") || strings.Count(got, "rollproof: ") != 1 {
+		t.Errorf("line 1 is not the verdict line:\n%s", got)
+	}
+}
