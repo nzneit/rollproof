@@ -430,6 +430,9 @@ func exercisedLists(r Run) []string {
 		lines = append(lines, "  "+pad(tr.Name, 12)+text)
 	}
 	lines = append(lines, "not exercised")
+	if hasWindow(r, "deploy") && !hasWindow(r, "rollback") {
+		lines = append(lines, "  the candidate's shutdown, because the run has no rollback")
+	}
 	for _, n := range notExercised {
 		lines = append(lines, "  "+n)
 	}
@@ -504,4 +507,14 @@ func wrap(indent, text string) []string {
 		out = append(out, string(line[:cut]))
 		text = string(line[cut+1:])
 	}
+}
+
+// hasWindow reports whether the record has a window with the given name.
+func hasWindow(r Run, name string) bool {
+	for _, w := range r.Windows {
+		if w.Name == name {
+			return true
+		}
+	}
+	return false
 }

@@ -374,3 +374,31 @@ func TestConsoleWrapsDetail(t *testing.T) {
 		}
 	}
 }
+
+// A pass with a deploy and no rollback says that the candidate's shutdown was
+// not exercised, first under "not exercised"; a pass with a rollback says
+// nothing new.
+func TestConsoleDeployWithoutRollback(t *testing.T) {
+	const line = "the candidate's shutdown, because the run has no rollback"
+	r := passRun()
+	r.Windows = r.Windows[:2]
+	r.Transitions = r.Transitions[:1]
+	got := Console(r)
+	want := "not exercised\n  " + line + "\n  " + strings.Join(notExercised, "\n  ") + "\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("Console has no\n%s\nin\n%s", want, got)
+	}
+	if strings.Contains(got, "  rollback ") {
+		t.Errorf("Console has a rollback line in\n%s", got)
+	}
+	if pass := Console(passRun()); strings.Contains(pass, line) {
+		t.Errorf("a pass with a rollback holds %q:\n%s", line, pass)
+	}
+	for _, n := range []string{"fail", "not-verified"} {
+		f := r
+		f.Verdict = n
+		if strings.Contains(Console(f), line) {
+			t.Errorf("a %s run holds %q", n, line)
+		}
+	}
+}
