@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+      annotations:
+        marker: {{ .Values.marker | quote }}
+    spec:
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+          imagePullPolicy: IfNotPresent

@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "properties": {
+    "replicas": { "type": "integer" },
+    "marker": { "type": "string" }
+  },
+  "required": ["replicas"]
+}
