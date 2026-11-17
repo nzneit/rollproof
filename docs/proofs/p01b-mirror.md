@@ -200,7 +200,7 @@ info: d: the hosts in containerd's lines, in order: 10.4.1.211:5000, mirror.corp
 ok: d: crictl pull registry.example/team/app@sha256:0000000000000000000000000000000000000000000000000000000000000000 failed; its error names registry.example; the last host tried, in containerd's lines, is registry.example (it is "registry.example")
 ```
 
-The error names `registry.example` only because it quotes the reference. It says "not found" and says nothing about the failed lookup of `registry.example`: a 404 outranks a failure to connect (resolver.go, lines 321 to 341), as in p01's case e. The `server` line was the last host, as written, and containerd sent it no `?ns=` query. The six attempts took 3 ms by the journal's times.
+The error names `registry.example` only because it quotes the reference. It says "not found" and says nothing about the failed lookup of `registry.example`: a 404 outranks a failure to connect (resolver.go, lines 321 to 341), as in p01's case e. The `server` line was the last host, as written, and containerd sent it no `?ns=` query. With no `server` line the last host would have been the same, containerd's default for `registry.example`, so this case cannot tell the two apart. The six attempts took 3 ms by the journal's times.
 
 **e. Form A with its two `[host…]` blocks swapped, and the pull of a.** prefixed was asked first. containerd's one line names it, and its log shows a 404 for the manifest and for each blob, each of which run then served with 200. The file's order is the order of attempts:
 
@@ -283,10 +283,9 @@ p01b: 5 checks failed
 
 ## Decision
 
-**The one settings file, for the plan of step 5.** For a host HOST that an entry of `images` names in `as`, and whose `registries` entry has a `mirror` and a `ca`, the tool writes `/etc/containerd/certs.d/HOST/hosts.toml` in every node in the form of case b, and the `ca` file beside it:
+**The one settings file, for the plan of step 5: proposed, not run.** For a host HOST that an entry of `images` names in `as`, and whose `registries` entry has a `mirror` and a `ca`, the tool writes `/etc/containerd/certs.d/HOST/hosts.toml` in every node with no `server` line, and the `ca` file beside it:
 
 ```toml
-server = "https://HOST"
 [host."http://ADDRESS:5000"]
   capabilities = ["pull"]
 [host."https://MIRROR"]
@@ -294,12 +293,14 @@ server = "https://HOST"
   ca = "/etc/containerd/certs.d/HOST/ca.pem"
 ```
 
-ADDRESS is the run's registry's address on the network `kind`, and `https://MIRROR` is the mirror's block as below. The `ca` line is needed: the file next to `hosts.toml` is not read without it (case c). A node tries the places in the order of the file (cases d and e). A tag is resolved by the mirror, never by the run's registry (case b), and a digest goes to the run's registry first (cases a and d).
+ADDRESS is the run's registry's address on the network `kind`, and `https://MIRROR` is the mirror's block as below. **This form was not run.** The file that ran is form A in Method: the same two blocks after `server = "https://registry.example"`. Without a `server` line, the last host is containerd's own default for the name: `https://registry-1.docker.io` for `docker.io`, and `https://HOST` for any name that is not a localhost name, as `docs/proofs/p01-registry-order.md` records (hosts.go, lines 95 to 135). The file leaves the line out for the reason that record gives for Task 20: a `server` line is used as written, so `server = "https://docker.io"` would not name `registry-1.docker.io`.
 
-Three limits of what was run, for step 5:
+What the runs showed carries over to this form only as far as the two `[host]` blocks go. The `ca` line is needed: the file next to `hosts.toml` is not read without it (case c). A node tries the places in the order of the file (cases d and e). A tag is resolved by the mirror, never by the run's registry (case b), and a digest goes to the run's registry first (cases a and d). Case d's last host cannot tell a `server` line from containerd's default: the image's host is `registry.example`, so the last host is `https://registry.example` either way.
 
-- **The `server` line.** This proof wrote `server = "https://registry.example"`, a name that does not resolve, and no pull reached a real host over HTTPS. The p01 record decided that Task 20 writes no `server` line, because a `server` line is used as written and `https://docker.io` would not name `registry-1.docker.io`. Without the line, containerd adds its own default for HOST as the last host, and keeps the file's top-level fields for it (hosts.go, lines 95 to 135; read, not run). Step 5 either leaves the line out, as Task 20 does, or writes `server = "https://registry-1.docker.io"` for `docker.io`.
-- **The `ca` for the real host.** Section 9 says the nodes trust `ca` for the entry's host as well as for its mirror. In the file above, the `ca` line applies to the mirror's block only. For the real host, a `ca` line goes at the top of the file, where hosts.go reads it into the last host's settings (lines 414 to 419). That was read, not run.
+Three more limits of what was run, for step 5:
+
+- **No real host.** The last host was a name that does not resolve, and no pull reached a real host over HTTPS.
+- **The `ca` for the real host.** Section 9 says the nodes trust `ca` for the entry's host as well as for its mirror. In the file above, the `ca` line applies to the mirror's block only. For the real host, a `ca` line goes at the top of the file. hosts.go reads the top-level fields into the last host's settings (lines 414 to 419), and keeps them when, with no `server` line, it fills in its default for the name (lines 95 to 135). That was read, not run.
 - **The names.** The proof gave the mirrors their names through `/etc/hosts` in the nodes. The tool writes no `/etc/hosts`: a caller's mirror resolves through the nodes' DNS, which kind takes from the engine. Both mirrors ignored the `?ns=HOST` query; a cache that reads it was not tried.
 
 **The `mirror` key: a proposal.** The two kinds of mirror path differ only in where the registry API's root is. The proposal is that `mirror` is an `https://` URL with an optional path, and that the tool reads the path as follows:
@@ -307,7 +308,16 @@ Three limits of what was run, for step 5:
 - A path whose first segment is not `v2` is a prefix in front of the API, and the tool writes the URL as the block, as in form A. containerd then puts `/v2/` and the repository after it. Example: `https://mirror.corp.example/registry-example` gives `[host."https://mirror.corp.example/registry-example"]`, and the node asks for `/registry-example/v2/team/app/…` (case b).
 - A path whose first segment is `v2` already holds the API's root, with what the cache wants inside it, and the tool writes the URL as the block with `override_path = true`, as in form B. Example: `https://cache.corp.example/v2/proxy-project` gives `[host."https://cache.corp.example/v2/proxy-project"]` with `override_path = true`, and the node asks for `/v2/proxy-project/team/app/…` (case f).
 
-The caller then writes the URL that the mirror's own documentation gives, and needs no second key. Written the other way, the cache fails with no sign at the mirror but a 404 (case g). A URL with the path `/v2` alone gives the same requests either way. A URL with no path is a mirror at the host's root and is written as in form A: with `override_path` and no path, containerd would leave out `/v2` altogether (hosts.go, lines 440 to 447). The alternative is an explicit key beside `mirror` that names the kind; it costs the caller a second key and a way to get the two out of step. A path whose first segment only starts with `v2`, such as `/v2cache`, counts as a prefix. The configuration would reject a `mirror` that is not `https://`, or that has a query or a fragment.
+The caller then writes the URL that the mirror's own documentation gives, and needs no second key. Written the other way, the cache fails with no sign at the mirror but a 404 (case g). The alternative is an explicit key beside `mirror` that names the kind; it costs the caller a second key and a way to get the two out of step. The configuration would reject a `mirror` that is not `https://`, or that has a query or a fragment.
+
+The rule is read from hosts.go (lines 440 to 447). The runs tried only its two examples (cases b and f) and the cache written the other way (case g). Each of these other cases is not run:
+
+- A URL with the path `/v2` alone gives the same requests either way: containerd keeps a path that ends in `/v2`. Not run.
+- A URL with no path is a mirror at the host's root and is written as in form A: with `override_path` and no path, containerd would leave out `/v2` altogether. Not run.
+- A path whose first segment only starts with `v2`, such as `/v2cache`, counts as a prefix, and containerd puts `/v2` after it. Not run.
+- A mirror whose own prefix starts with `v2/`, such as `/v2/foo`, would be read as form B. The proposal has no way to say otherwise, and no source line stands behind how such a mirror should be written. Not run.
+
+The `yes` below holds for the file as measured, which has a `server` line; the form without a `server` line was not run.
 
 Plan assumed: "For one host the node's settings file lists, in this order, the run's registry (pull only), the mirror over HTTPS with its `ca` (pull and resolve), and the real host as `server`. A node tries them in that order. A mirror whose registry API sits under a path prefix is written as the host with that prefix; a cache that wants its project name inside the API path needs `override_path = true`."
 Holds: yes
