@@ -80,6 +80,9 @@ type Tracker struct {
 	// transitions holds every transition so far, in the order they began, so that PodsAt can
 	// answer for a moment of any of them. The last is the open or last transition.
 	transitions []*transition
+	// missedOutside holds, in order, the moments Missed was told while no window was open, since
+	// the last Begin. Begin carries the first of them at or after its start into its transition.
+	missedOutside []time.Time
 }
 
 // workloadRecord is what the Tracker keeps of one Deployment, StatefulSet or DaemonSet.
@@ -176,7 +179,8 @@ func (t *Tracker) Gone(obj runtime.Object, at time.Time) {
 }
 
 // Begin starts a transition at the given moment. The pods that exist then are the ones it may
-// replace. One transition at a time.
+// replace. A moment that Missed was told, at or after the start and before Begin, is the
+// transition's Missed. One transition at a time.
 func (t *Tracker) Begin(name verdict.WindowName, at time.Time) {
 	t.endIfDue(at)
 	if t.windowOpen() {
@@ -201,7 +205,15 @@ func (t *Tracker) Begin(name verdict.WindowName, at time.Time) {
 			existed[w] = true
 		}
 	}
-	t.transitions = append(t.transitions, &transition{t: Transition{Name: name, Began: at},
+	var missed time.Time
+	for _, m := range t.missedOutside {
+		if !m.Before(at) {
+			missed = m
+			break
+		}
+	}
+	t.missedOutside = nil
+	t.transitions = append(t.transitions, &transition{t: Transition{Name: name, Began: at, Missed: missed},
 		atStart: atStart, existed: existed, watched: watched, unsupported: map[Workload]bool{}})
 	for w := range watched {
 		t.noteUnsupported(w)
@@ -219,12 +231,21 @@ func (t *Tracker) CommandExited(at time.Time) {
 
 // Missed tells the Tracker that the watch of the cluster may have missed changes at the given
 // moment: it listed again, so a change between its last event and that list is seen only by its
-// sum, or not at all. While a transition's window is open, the first such moment is its Missed;
-// outside a window it does nothing.
+// sum, or not at all. It records the moment whenever it is told. The first such moment in a
+// transition's window is its Missed. Begin may be told after the transition's start, so a moment
+// told while no window is open counts for the next transition when it is at or after that
+// transition's start. An earlier moment counts for no transition, and a window that has ended
+// never changes.
 func (t *Tracker) Missed(at time.Time) {
 	t.endIfDue(at)
-	if t.windowOpen() && t.current().t.Missed.IsZero() {
-		t.current().t.Missed = at
+	switch {
+	case t.windowOpen():
+		if t.current().t.Missed.IsZero() {
+			t.current().t.Missed = at
+		}
+	case len(t.missedOutside) == 0 || at.After(t.missedOutside[len(t.missedOutside)-1]):
+		// A list again tells one moment for each object it lists; equal moments add nothing.
+		t.missedOutside = append(t.missedOutside, at)
 	}
 }
 

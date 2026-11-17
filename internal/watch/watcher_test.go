@@ -653,48 +653,62 @@ func withVersion(p *corev1.Pod, v string) *corev1.Pod {
 
 // What the handlers tell the Tracker as a sign that the watch missed changes
 // (T27-1): an update whose resource version did not change, or a tombstone,
-// while a window is open. A real update tells nothing, and neither does a
-// sign while no window is open.
+// while a window is open, or after the transition's start and before its
+// Begin is told. A real update tells nothing, and neither does a sign before
+// the transition's start.
 func TestMissedChanges(t *testing.T) {
 	a1 := pod("orders-a-1", "a1", "ReplicaSet", "orders-a", true, false)
-	text := "the watch of the cluster missed changes 2.0 s after the transition began"
+	// When the sign comes. Begin is told after the start, as run tells it.
+	const (
+		inWindow    = iota // 2 s after the window began
+		beforeStart        // 1 s before the transition's start
+		beforeBegin        // 1 s after the transition's start, before Begin is told
+	)
+	after := map[int]time.Duration{inWindow: 2 * time.Second, beforeBegin: time.Second}
 	for _, r := range []struct {
 		name   string
-		open   bool // the sign comes while the window is open, 2 s after it began
+		when   int
 		tell   func(h handler)
 		missed bool
 	}{
-		{"an update with the same resource version", true, func(h handler) {
+		{"an update with the same resource version", inWindow, func(h handler) {
 			h.OnUpdate(withVersion(a1, "7"), withVersion(a1, "7"))
 		}, true},
-		{"a tombstone", true, func(h handler) {
+		{"a tombstone", inWindow, func(h handler) {
 			h.OnDelete(cache.DeletedFinalStateUnknown{Key: "orders/orders-a-1", Obj: a1})
 		}, true},
-		{"an update with the same resource version and no window open", false, func(h handler) {
+		{"an update with the same resource version and no window open", beforeStart, func(h handler) {
 			h.OnUpdate(withVersion(a1, "7"), withVersion(a1, "7"))
 		}, false},
-		{"an update whose resource version changed", true, func(h handler) {
+		{"an update with the same resource version after the start and before Begin", beforeBegin, func(h handler) {
+			h.OnUpdate(withVersion(a1, "7"), withVersion(a1, "7"))
+		}, true},
+		{"an update whose resource version changed", inWindow, func(h handler) {
 			h.OnUpdate(withVersion(a1, "7"), withVersion(a1, "8"))
 		}, false},
 		// The fake client gives no object a resource version; the API server
 		// gives every object one.
-		{"an update with no resource version", true, func(h handler) {
+		{"an update with no resource version", inWindow, func(h handler) {
 			h.OnUpdate(a1, a1)
 		}, false},
 	} {
 		t.Run(r.name, func(t *testing.T) {
 			w, _, clock := startWatcher(t, nil, base()...)
 			h := handler{w: w, kind: "Pod"}
-			if !r.open {
+			if r.when == beforeStart {
 				r.tell(h)
 				clock.Advance(time.Second)
 			}
+			began := clock.Now()
+			if r.when == beforeBegin {
+				clock.Advance(time.Second)
+				r.tell(h)
+			}
 			exited := make(chan struct{})
 			res := make(chan Transition, 1)
-			go func() { res <- w.Transition(t.Context(), verdict.Deploy, clock.Now(), exited) }()
+			go func() { res <- w.Transition(t.Context(), verdict.Deploy, began, exited) }()
 			until(t, w, clock, func(s Transition) bool { return s.Name == verdict.Deploy })
-			began := clock.Now()
-			if r.open {
+			if r.when == inWindow {
 				clock.Advance(2 * time.Second)
 				r.tell(h)
 			}
@@ -702,11 +716,13 @@ func TestMissedChanges(t *testing.T) {
 			tr := drive(t, clock, res)
 			var want time.Time
 			if r.missed {
-				want = began.Add(2 * time.Second)
+				want = began.Add(after[r.when])
 			}
 			if !tr.Missed.Equal(want) {
 				t.Errorf("Missed = %v, want %v", tr.Missed, want)
 			}
+			text := fmt.Sprintf("the watch of the cluster missed changes %.1f s after the transition began",
+				after[r.when].Seconds())
 			has := slices.ContainsFunc(tr.Conditions(true), func(c verdict.Condition) bool {
 				return c.Code == verdict.InternalError && c.Text == text
 			})

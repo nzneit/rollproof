@@ -1330,11 +1330,12 @@ func decided(s Transition) (verdict.Verdict, verdict.Code) {
 	return d.Verdict, ""
 }
 
-// The watch of the cluster missed changes (T27-1). The first moment told while
-// the window is open is the transition's Missed; outside the window, or at its
-// end, Missed does nothing. Conditions gives an InternalError of its own for
-// it, beside a stall's fail codes, so a stall still fails and a finished
-// window is not verified.
+// The watch of the cluster missed changes (T27-1, widened). The first moment
+// at or after the transition's start is its Missed, also when it is told
+// before Begin; a moment before the start, after the window ended, or at its
+// end, is not. Conditions gives an InternalError of its own for it, beside a
+// stall's fail codes, so a stall still fails and a finished window is not
+// verified.
 func TestMissed(t *testing.T) {
 	missed := func(s float64) verdict.Condition {
 		return verdict.Condition{Code: verdict.InternalError,
@@ -1358,13 +1359,35 @@ func TestMissed(t *testing.T) {
 		{"before the transition began", func() *Tracker {
 			tr := NewTracker(options())
 			for _, obj := range base() {
+				tr.Set(obj, at(-2))
+			}
+			tr.Missed(at(-1))
+			tr.Begin(verdict.Deploy, t0)
+			play(tr, rollingUpdate())
+			return tr
+		}, time.Time{}, nil, verdict.Pass, ""},
+		{"at the transition's start, told before its Begin", func() *Tracker {
+			tr := NewTracker(options())
+			for _, obj := range base() {
 				tr.Set(obj, t0)
 			}
 			tr.Missed(t0)
 			tr.Begin(verdict.Deploy, t0)
 			play(tr, rollingUpdate())
 			return tr
-		}, time.Time{}, nil, verdict.Pass, ""},
+		}, t0, []verdict.Condition{missed(0)}, verdict.NotVerified, verdict.InternalError},
+		{"the first of the moments after the start, told before its Begin", func() *Tracker {
+			tr := NewTracker(options())
+			for _, obj := range base() {
+				tr.Set(obj, at(-2))
+			}
+			tr.Missed(at(-1))
+			tr.Missed(at(0.1))
+			tr.Missed(at(0.15))
+			tr.Begin(verdict.Deploy, t0)
+			play(tr, rollingUpdate())
+			return tr
+		}, at(0.1), []verdict.Condition{missed(0.1)}, verdict.NotVerified, verdict.InternalError},
 		{"after the window ended", func() *Tracker {
 			tr := feed(options(), base(), rollingUpdate())
 			tr.State(at(30))
@@ -1395,6 +1418,39 @@ func TestMissed(t *testing.T) {
 			}
 			if v, c := decided(s); v != r.verdict || c != r.code {
 				t.Errorf("verdict %s decided by %q; want %s decided by %q", v, c, r.verdict, r.code)
+			}
+		})
+	}
+}
+
+// A moment told after a window ended changes that window in no case, and is
+// the next transition's Missed only when it is at or after that transition's
+// start; the first such moment is (T27-1, widened).
+func TestMissedAfterAWindowEnded(t *testing.T) {
+	for _, r := range []struct {
+		name    string
+		moments []float64
+		want    time.Time
+	}{
+		{"before the next start", []float64{31}, time.Time{}},
+		{"before and after the next start", []float64{31, 33, 34}, at(33)},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			tr := feed(options(), base(), rollingUpdate())
+			if _, ended := tr.State(at(30)); !ended {
+				t.Fatal("the deploy's window has not ended at +30 s")
+			}
+			for _, m := range r.moments {
+				tr.Missed(at(m))
+			}
+			if deploy, _ := tr.State(at(35)); deploy.Name != verdict.Deploy || !deploy.Missed.IsZero() {
+				t.Errorf("the deploy after the moments: %s, Missed %v; want the deploy, unchanged", deploy.Name, deploy.Missed)
+			}
+			tr.Begin(verdict.Rollback, at(32))
+			tr.CommandExited(at(35))
+			rollback, ended := tr.State(at(60))
+			if !ended || !rollback.Missed.Equal(r.want) {
+				t.Errorf("rollback: ended %v, Missed %v; want ended, Missed %v", ended, rollback.Missed, r.want)
 			}
 		})
 	}
