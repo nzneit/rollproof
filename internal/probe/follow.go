@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -83,7 +84,7 @@ func (f *follower) counts() (lines, jsonText int) {
 // A stream that ends while the container runs is opened again at once. A last piece with no line
 // end that came with that end is dropped, because the next stream gives the whole line; when the
 // log has ended for good, the piece is a line before stopAsked and is only kept in raw after it.
-// Where run cannot tell that it read the log to its end, it emits the gap at now: when a stream
+// Where run cannot tell that it read the log to its end, it emits the gap: when a stream
 // ended with an error other than io.EOF and the container no longer runs, so that the stream is
 // not opened again or cannot be; and when a stream opened again ended, with the container ended,
 // before as many lines of the last timestamp as were read had come back.
@@ -102,7 +103,7 @@ func (f *follower) run(ctx context.Context) {
 				return
 			case !f.running(ctx):
 				if broken {
-					f.gap()
+					f.gap(time.Time{})
 				}
 				return
 			case !pause(ctx, pollEvery):
@@ -121,7 +122,7 @@ func (f *follower) run(ctx context.Context) {
 			broken = !errors.Is(err, io.EOF)
 		case !errors.Is(err, io.EOF):
 			f.keep(s, piece)
-			f.gap()
+			f.gap(time.Time{})
 			return
 		default:
 			if piece != "" && !f.asked.Load() {
@@ -130,7 +131,7 @@ func (f *follower) run(ctx context.Context) {
 				f.keep(s, piece)
 			}
 			if s.skipping && s.skipped < f.atLast {
-				f.gap()
+				f.gap(time.Time{})
 			}
 			return
 		}
@@ -181,7 +182,7 @@ func (f *follower) take(s *stream, line, asCame string) {
 		}
 		s.skipping = false
 		if s.skipped < f.atLast {
-			f.gap()
+			f.gap(ts)
 		}
 	}
 	f.write(asCame)
@@ -231,9 +232,29 @@ func (f *follower) keep(s *stream, piece string) {
 	f.write(piece + "\n")
 }
 
-// gap emits the fault of a stretch of the log that may be lost, at now.
-func (f *follower) gap() {
-	f.emit(Event{Fault: &verdict.Condition{Code: verdict.InternalError, At: f.now(), Text: gapText}})
+// gap emits the fault of a stretch of the log that may be lost, so that every window the stretch
+// touches is not verified. The fault is placed at the timestamp of the last line read before the
+// stretch, at after, the timestamp of the first line after it, when one came (zero otherwise),
+// and at now, the moment the tool failed, which section 10 (rule 3) places in the window in
+// progress. A window wholly inside the stretch holds no observation, and the verdict judges it
+// silent. A moment equal to one before it in that order gives no second fault.
+func (f *follower) gap(after time.Time) {
+	var moments []time.Time
+	if f.read {
+		moments = append(moments, f.last)
+	}
+	if !after.IsZero() {
+		moments = append(moments, after)
+	}
+	moments = append(moments, f.now())
+	var placed []time.Time
+	for _, at := range moments {
+		if slices.ContainsFunc(placed, at.Equal) {
+			continue
+		}
+		placed = append(placed, at)
+		f.emit(Event{Fault: &verdict.Condition{Code: verdict.InternalError, At: at, Text: gapText}})
+	}
 }
 
 // write gives s to raw. A failed write is not reported: raw is evidence, the verdict does not

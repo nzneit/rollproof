@@ -86,10 +86,15 @@ func quickPolling(t *testing.T) {
 // followAll runs a follower over l until the log has ended for good.
 func followAll(t *testing.T, l *fakeLog, stopAsked bool) (f *follower, events []Event, raw string) {
 	t.Helper()
+	return followAt(t, l, stopAsked, logAt(60_000))
+}
+
+// followAt is followAll with now as the follower's clock.
+func followAt(t *testing.T, l *fakeLog, stopAsked bool, now time.Time) (f *follower, events []Event, raw string) {
+	t.Helper()
 	quickPolling(t)
 	var buf bytes.Buffer
-	now := func() time.Time { return logAt(60_000) }
-	f = newFollower(l.open, l.running, &buf, now, func(e Event) { events = append(events, e) })
+	f = newFollower(l.open, l.running, &buf, func() time.Time { return now }, func(e Event) { events = append(events, e) })
 	if stopAsked {
 		f.stopAsked()
 	}
@@ -100,6 +105,26 @@ func followAll(t *testing.T, l *fakeLog, stopAsked bool) (f *follower, events []
 		t.Fatal("the follower did not end by itself")
 	}
 	return f, events, buf.String()
+}
+
+// checkGap checks that events are before observations, then the gap's faults
+// at the moments want, in that order, then after observations.
+func checkGap(t *testing.T, events []Event, before int, want []time.Time, after int) {
+	t.Helper()
+	if len(events) != before+len(want)+after {
+		t.Fatalf("%d events, want %d observations, %d faults for the gap and %d observations: %+v",
+			len(events), before, len(want), after, events)
+	}
+	for i, e := range events {
+		if gap := i >= before && i < before+len(want); gap {
+			if f := e.Fault; f == nil || f.Code != verdict.InternalError || !f.At.Equal(want[i-before]) ||
+				f.Text != "the probe's log could not be followed without a gap" {
+				t.Errorf("event %d = %+v, want internal-error for the gap at %v", i, e, want[i-before])
+			}
+		} else if e.Obs == nil {
+			t.Errorf("event %d = %+v, want an observation", i, e)
+		}
+	}
 }
 
 func TestFollowLineKinds(t *testing.T) {
@@ -183,31 +208,42 @@ func TestFollowRetriesAnOpeningThatFails(t *testing.T) {
 	}
 }
 
+// Ruling T29-1: the gap's fault is placed at the last line read before it, at
+// the first line after it and at now; a moment equal to one before it gives
+// no second fault. LAST and the first line after are never equal: a line at
+// LAST after as many as were read is no gap.
 func TestFollowGap(t *testing.T) {
 	ok := `{"ok":true}`
 	for _, c := range []struct {
 		name          string
 		first, second string
+		now           time.Time
+		before        int
+		faults        []time.Time
+		after         int
 	}{
+		// The brief: 4 events, one fault at now (ruling T29-1 changed the value).
 		{"the first line after the break is later than the last line read",
 			logLine(logAt(1200), ok) + logLine(logAt(1700), ok),
-			logLine(logAt(3700), ok)},
+			logLine(logAt(3700), ok),
+			logAt(60_000), 2, []time.Time{logAt(1700), logAt(3700), logAt(60_000)}, 1},
+		// The brief: 4 events, one fault at now (ruling T29-1 changed the value).
 		{"fewer lines of the last timestamp came back than were read",
 			logLine(logAt(1700), ok) + logLine(logAt(1700), ok),
-			logLine(logAt(1700), ok) + logLine(logAt(2900), ok)},
+			logLine(logAt(1700), ok) + logLine(logAt(2900), ok),
+			logAt(60_000), 2, []time.Time{logAt(1700), logAt(2900), logAt(60_000)}, 1},
+		{"the follower lags behind the log: LAST, the first line after and now fall far apart",
+			logLine(logAt(1700), ok),
+			logLine(logAt(12_000), ok) + logLine(logAt(13_000), ok),
+			logAt(25_000), 1, []time.Time{logAt(1700), logAt(12_000), logAt(25_000)}, 2},
+		{"the first line after the gap is read at the moment it was written",
+			logLine(logAt(1700), ok),
+			logLine(logAt(2900), ok),
+			logAt(2900), 1, []time.Time{logAt(1700), logAt(2900)}, 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			_, events, _ := followAll(t, newFakeLog(c.first, c.second), false)
-			if len(events) != 4 {
-				t.Fatalf("%d events, want 4: %+v", len(events), events)
-			}
-			if f := events[2].Fault; f == nil || f.Code != verdict.InternalError || !f.At.Equal(logAt(60_000)) ||
-				f.Text != "the probe's log could not be followed without a gap" {
-				t.Errorf("event 2 = %+v, want internal-error for the gap, at now", events[2])
-			}
-			if events[3].Obs == nil {
-				t.Errorf("event 3 = %+v, want the line after the gap", events[3])
-			}
+			_, events, _ := followAt(t, newFakeLog(c.first, c.second), false, c.now)
+			checkGap(t, events, c.before, c.faults, c.after)
 		})
 	}
 }
@@ -285,48 +321,52 @@ func TestFollowDropsAPieceWhenTheLogIsOpenedAgain(t *testing.T) {
 }
 
 // Where the follower cannot tell that it read the log to its end, it emits the
-// gap at now; where it can, it emits none.
+// gap at the last line read and at now (ruling T29-1); where it can, it emits
+// none.
 func TestFollowGapAtTheEnd(t *testing.T) {
 	ok := `{"ok":true}`
 	piece := logAt(200).Format(time.RFC3339Nano) + ` {"ok":fa`
 	for _, c := range []struct {
 		name    string
 		streams []io.Reader
-		gap     bool
+		now     time.Time
+		faults  []time.Time
 		raw     string
+		lines   int // the lines read, each an observation
 	}{
 		{"a stream breaks and the container has ended",
-			[]io.Reader{breaks(logLine(logAt(100), ok) + piece)}, true, logLine(logAt(100), ok) + piece + "\n"},
+			[]io.Reader{breaks(logLine(logAt(100), ok) + piece)},
+			logAt(60_000), []time.Time{logAt(100), logAt(60_000)}, logLine(logAt(100), ok) + piece + "\n", 1},
+		{"a stream breaks before its first line: there is no LAST",
+			[]io.Reader{breaks("")},
+			logAt(60_000), []time.Time{logAt(60_000)}, "", 0},
 		{"a stream breaks and the log cannot be opened again",
-			[]io.Reader{breaks(logLine(logAt(100), ok)), nil}, true, logLine(logAt(100), ok)},
+			[]io.Reader{breaks(logLine(logAt(100), ok)), nil},
+			logAt(60_000), []time.Time{logAt(100), logAt(60_000)}, logLine(logAt(100), ok), 1},
+		{"a stream breaks at the moment of its last line: LAST and now are one moment",
+			[]io.Reader{breaks(logLine(logAt(100), ok))},
+			logAt(100), []time.Time{logAt(100)}, logLine(logAt(100), ok), 1},
 		{"a stream opened again ends before the lines of the last timestamp came back",
-			[]io.Reader{strings.NewReader(logLine(logAt(1700), ok)), strings.NewReader("")}, true, logLine(logAt(1700), ok)},
+			[]io.Reader{strings.NewReader(logLine(logAt(1700), ok)), strings.NewReader("")},
+			logAt(60_000), []time.Time{logAt(1700), logAt(60_000)}, logLine(logAt(1700), ok), 1},
 		{"a stream opened again breaks inside a repeat and the container has ended",
 			[]io.Reader{strings.NewReader(logLine(logAt(1700), ok)), breaks(logAt(1700).Format(time.RFC3339Nano) + ` {"ok":tr`)},
-			true, logLine(logAt(1700), ok)},
+			logAt(60_000), []time.Time{logAt(1700), logAt(60_000)}, logLine(logAt(1700), ok), 1},
 		{"a stream ends with io.EOF and the log cannot be opened again",
-			[]io.Reader{strings.NewReader(logLine(logAt(100), ok)), nil}, false, logLine(logAt(100), ok)},
+			[]io.Reader{strings.NewReader(logLine(logAt(100), ok)), nil},
+			logAt(60_000), nil, logLine(logAt(100), ok), 1},
 		{"a stream opened again gives back every line of the last timestamp",
-			[]io.Reader{strings.NewReader(logLine(logAt(1700), ok)), strings.NewReader(logLine(logAt(1700), ok))}, false, logLine(logAt(1700), ok)},
+			[]io.Reader{strings.NewReader(logLine(logAt(1700), ok)), strings.NewReader(logLine(logAt(1700), ok))},
+			logAt(60_000), nil, logLine(logAt(1700), ok), 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			f, events, raw := followAll(t, &fakeLog{streams: c.streams}, false)
-			want := 1
-			if c.gap {
-				want = 2
-			}
-			if len(events) != want || events[0].Obs == nil {
-				t.Fatalf("events = %+v, want the observation and %d more", events, want-1)
-			}
-			if g := events[len(events)-1].Fault; c.gap && (g == nil || g.Code != verdict.InternalError ||
-				g.Text != "the probe's log could not be followed without a gap" || !g.At.Equal(logAt(60_000))) {
-				t.Errorf("last event = %+v, want internal-error for the gap, at now", events[len(events)-1])
-			}
+			f, events, raw := followAt(t, &fakeLog{streams: c.streams}, false, c.now)
+			checkGap(t, events, c.lines, c.faults, 0)
 			if raw != c.raw {
 				t.Errorf("raw = %q, want %q", raw, c.raw)
 			}
-			if lines, _ := f.counts(); lines != 1 {
-				t.Errorf("lines = %d, want 1", lines)
+			if lines, _ := f.counts(); lines != c.lines {
+				t.Errorf("lines = %d, want %d", lines, c.lines)
 			}
 		})
 	}
