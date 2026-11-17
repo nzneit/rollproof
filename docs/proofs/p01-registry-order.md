@@ -12,7 +12,7 @@ Point 1 of section 14: a node's containerd settings for a registry host can list
 - kind: `sigs.k8s.io/kind` v0.33.0; `k8s.io/client-go` v0.37.2; `github.com/google/go-containerregistry` v0.22.1, which pushes the images.
 - Node image: kind's default, `kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5`, which is Kubernetes v1.37.0, as the p08 record read it. In the worker, `ctr --version` gives `ctr github.com/containerd/containerd/v2 v2.3.4` and `crictl --version` gives `crictl version 1.36.0`.
 - Registries: `docker.io/library/registry:3`, held in the engine's store as `registry@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c`. Its log gives `version=3.1.2` and `go.version=go1.26.8`.
-- Sources read: section 9 and section 14 point 1 of the design; `docs/hosts.md` of containerd at v2.3.4; `site/static/examples/kind-with-registry.sh` of kind at v0.33.0. To explain case e: `core/remotes/docker/resolver.go` and `core/remotes/docker/config/hosts.go` of containerd at v2.3.4.
+- Sources read: section 9 and section 14 point 1 of the design; `docs/hosts.md` of containerd at v2.3.4; `site/static/examples/kind-with-registry.sh` of kind at v0.33.0. To explain case e and the settings form: `core/remotes/docker/resolver.go`, `core/remotes/docker/config/hosts.go` and `internal/cri/server/images/image_pull.go` of containerd at v2.3.4.
 
 ## Method
 
@@ -167,7 +167,7 @@ info: e real: no new request
 ok: e: crictl pull rollproof.test/probe/rollproof@sha256:e21e3313a4f09fb3bc0a9a5f8142d791568e7b08d795a7a627f4a4702e6686e6 succeeded
 ```
 
-The pull of the zero digest failed after 56 ms (92 ms in run 1). The run's registry answered 404 for the manifest path and then for the blob path:
+The pull of the zero digest failed. The program's timer covers the whole `l.Exec`, the `nerdctl exec` of `crictl pull`, which returned non-zero after 56 ms (92 ms in run 1). containerd's own PullImage took about 20 ms, by the journal below. The run's registry answered 404 for the manifest path and then for the blob path:
 
 ```
 info: e-zero run: HEAD /v2/probe/rollproof/manifests/sha256:0000000000000000000000000000000000000000000000000000000000000000?ns=rollproof.test 404
@@ -184,16 +184,18 @@ time="2026-11-17T00:38:53Z" level=fatal msg="pulling image: rpc error: code = No
 time="…" level=fatal msg="exec failed with exit code 1"
 ```
 
-The last line is nerdctl's, and its time is left out here. The error says only "not found". containerd's journal shows that the pull also tried `https://rollproof.test`, where the name did not resolve:
+The last line is nerdctl's, and its time is left out here. The error says only "not found". containerd's journal shows that the pull also tried `https://rollproof.test`, where the name did not resolve. From the `PullImage` line to its `failed` line is 20 ms:
 
 ```
+info: e-zero: containerd: time="2026-11-17T00:38:53.613515796Z" level=info msg="PullImage \"rollproof.test/probe/rollproof@sha256:0000000000000000000000000000000000000000000000000000000000000000\""
 info: e-zero: containerd: time="2026-11-17T00:38:53.626068804Z" level=info msg="trying next host after status: 404 Not Found" host="10.4.1.207:5000" method=HEAD url="http://10.4.1.207:5000/v2/probe/rollproof/manifests/sha256:0000000000000000000000000000000000000000000000000000000000000000?ns=rollproof.test"
 info: e-zero: containerd: time="2026-11-17T00:38:53.628989491Z" level=info msg="fetch failed" error="failed to do request: Head \"https://rollproof.test/v2/probe/rollproof/manifests/sha256:0000000000000000000000000000000000000000000000000000000000000000\": dial tcp: lookup rollproof.test on 10.0.2.3:53: no such host" host=rollproof.test method=HEAD url="https://rollproof.test/v2/probe/rollproof/manifests/sha256:0000000000000000000000000000000000000000000000000000000000000000"
 info: e-zero: containerd: time="2026-11-17T00:38:53.629225503Z" level=info msg="trying next host after status: 404 Not Found" host="10.4.1.207:5000" method=HEAD url="http://10.4.1.207:5000/v2/probe/rollproof/blobs/sha256:0000000000000000000000000000000000000000000000000000000000000000?ns=rollproof.test"
 info: e-zero: containerd: time="2026-11-17T00:38:53.632056882Z" level=info msg="fetch failed" error="failed to do request: Head \"https://rollproof.test/v2/probe/rollproof/blobs/sha256:0000000000000000000000000000000000000000000000000000000000000000\": dial tcp: lookup rollproof.test on 10.0.2.3:53: no such host" host=rollproof.test method=HEAD url="https://rollproof.test/v2/probe/rollproof/blobs/sha256:0000000000000000000000000000000000000000000000000000000000000000"
+info: e-zero: containerd: time="2026-11-17T00:38:53.633553859Z" level=error msg="PullImage \"rollproof.test/probe/rollproof@sha256:0000000000000000000000000000000000000000000000000000000000000000\" failed" error="rpc error: code = NotFound desc = failed to pull and unpack image \"rollproof.test/probe/rollproof@sha256:0000000000000000000000000000000000000000000000000000000000000000\": failed to resolve reference \"rollproof.test/probe/rollproof@sha256:0000000000000000000000000000000000000000000000000000000000000000\": rollproof.test/probe/rollproof@sha256:0000000000000000000000000000000000000000000000000000000000000000: not found"
 ```
 
-The source explains both parts. A settings file with no `server` line gets the host in the image's name, over HTTPS, as its last host, with every capability (hosts.go, lines 95 to 135). In the resolver, a 404 outranks a later failure to connect when the error is chosen (resolver.go, lines 280 to 341). So the error names the run registry's 404 and says nothing about `https://rollproof.test`.
+The source explains both parts. A settings file with no `server` line gets, as its last host, containerd's own default for the name in the image, with every capability (hosts.go, lines 95 to 135). For `rollproof.test`, which is neither `docker.io` nor a localhost name, that default is `https://rollproof.test`. In the resolver, a 404 outranks a later failure to connect when the error is chosen (resolver.go, lines 280 to 341). So the error names the run registry's 404 and says nothing about `https://rollproof.test`.
 
 **f. `ctr`.** `ctr` did not use the node's settings. It went straight to `https://registry.example`, whose name did not resolve, and neither registry had a request:
 
@@ -263,7 +265,7 @@ FAILED: the run was interrupted
 p01: 5 checks failed
 ```
 
-**Volumes.** `nerdctl volume ls -q` counted 57 volumes before and after each of the four runs, and before and after the lab's cluster test. Each run started two registries, and none left a volume.
+**Volumes.** `nerdctl volume ls -q` counted 57 volumes before and after each of the four runs, and before and after the lab's cluster test. Runs 1, 3 and 4 started two registries each, six in all, and none left a volume. Run 2 was interrupted inside `Up` and started no registry.
 
 ## Decision
 
@@ -274,11 +276,21 @@ p01: 5 checks failed
   capabilities = ["pull"]
 ```
 
-ADDRESS is the run's registry's address on the network `kind`. The real host comes last. In this proof, `server` named the stand-in for the real host. For a real host, `server = "https://HOST"` and no `server` line both give `https://HOST` as the last host. hosts.go appends the `server` after the `[host]` entries (lines 414 to 419), and when there is no `server` line, it puts the host in the image's name in that place (lines 95 to 135). Case e ran the second form. A mirror's `[host]` entry would go between the two; this proof did not try a mirror. For `rollproof.test`, the tool writes the form of case e, with the run's registry alone. A pull of a digest that the run's registry lacks then fails with "not found", here in 56 ms and 92 ms. On the way, the pull also tries `https://rollproof.test`, which does not resolve, and the error text does not show that.
+ADDRESS is the run's registry's address on the network `kind`.
 
-**The pull command, for Tasks 21 and 22.** The tool has a node pull with `crictl pull REPOSITORY@sha256:…`, run in the node through the engine's exec (in the lab, `l.Exec(node, nil, "crictl", "pull", ref)`). That pull uses the node's registry settings, the ones that the kubelet's pulls use. The tool judges the command only by whether it exits zero, because nerdctl reports exit 1 for any non-zero code. **The tool must not use `ctr -n k8s.io images pull`.** Without `--hosts-dir`, it ignores `/etc/containerd/certs.d` and goes straight to the host in the image's name.
+**Task 20 writes no `server` line.** The last host is then containerd's own default for the host name. The CRI plugin sets no default scheme when `config_path` is set (`internal/cri/server/images/image_pull.go` at v2.3.4, lines 497 to 509), so hosts.go at v2.3.4 (lines 95 to 135) gives:
 
-**The report's lines on images can rest on `imageID`.** `status.containerStatuses[].imageID` is `REPOSITORY@sha256:DIGEST`. REPOSITORY is the repository of the pod's image reference, and DIGEST is the manifest digest that the push returned. It holds this form both when the kubelet pulled the image and when the node already held it. The report compares the digest after the `@` with the digest it recorded, not the whole string. This was measured only with images of one manifest each (an image index was not tried), and with one container in each pod.
+- for `docker.io`: `https://registry-1.docker.io`;
+- for `localhost` or a loopback address, with or without a port: the name itself, over `https` when the port is absent or 443 and over `http` for any other port. Certificate checks are skipped unless the port is 80;
+- for any other name: `https://NAME`, as `https://rollproof.test` in case e.
+
+A `server` line is not the same. hosts.go puts it, as written, after the `[host]` entries (lines 414 to 419), and puts `https://` in front of a value that has no scheme (lines 430 to 433). So `server = "https://docker.io"` would name `docker.io`, not `registry-1.docker.io`. In this proof, `server` named the `http://` stand-in for the real host (case c), and in case e the default last host failed at DNS. **No pull that fell through to a real HTTPS host was run.** A mirror's `[host]` entry would go between the run's registry and the last host; this proof did not try a mirror.
+
+For `rollproof.test`, the tool writes the form of case e, with the run's registry alone. A pull of a digest that the run's registry lacks then fails with "not found". The `nerdctl exec` of `crictl pull` returned after 56 ms and 92 ms, and containerd's own PullImage took about 20 ms in run 4. On the way, the pull also looks up the name `rollproof.test` for `https://rollproof.test`. The name does not resolve, and the error text does not show that. What the lookup costs depends on the node's resolver. The form `server = "http://ADDRESS:5000"` for `rollproof.test`, which would avoid the lookup, was not tried.
+
+**The pull command, for Tasks 21 and 22.** The tool has a node pull with `crictl pull REPOSITORY@sha256:…`, run in the node through the engine's exec (in the lab, `l.Exec(node, nil, "crictl", "pull", ref)`). That pull uses the node's registry settings, the ones that the kubelet's pulls use. The tool judges the command only by whether it exits zero, because nerdctl reports exit 1 for any non-zero code. **The tool must not use `ctr -n k8s.io images pull`.** As run in case f, it ignored `/etc/containerd/certs.d` and went straight to the host in the image's name. Its `--hosts-dir` option was not tried.
+
+**The report's lines on images can rest on `imageID`.** `status.containerStatuses[].imageID` is `REPOSITORY@sha256:DIGEST`, where DIGEST is the manifest digest that the push returned. It had this form both when the kubelet pulled the image and when the node already held it. In both pods, REPOSITORY was the repository of the pod's image reference, and each image had only one name on the node. An image held under two names was not tried, and its `imageID` may name the other repository. So the report compares only the digest after the `@` with the digest it recorded, never the whole string. This was measured only with images of one manifest each (an image index was not tried), and with one container in each pod.
 
 Plan assumed: "For a host, the node's settings file lists the run's registry as `[host.\"http://ADDRESS:5000\"]` with `capabilities = [\"pull\"]`, before the real host. A reference by digest is then served by the run's registry; a reference by tag is not answered by it and goes to the real host; a reference with a tag and a digest is pulled by the digest alone; an image the run's registry lacks is fetched from the real host."
 Holds: yes
