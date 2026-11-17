@@ -47,13 +47,13 @@ Point 8, nerdctl, holds `no`, and the rule's answer is written here instead of b
 
 Tasks 21, 22, 27 and 29 create clusters through the tool's `cluster.Create` on a machine with nerdctl, so the text of **Task 21** changes. Its Create step 3 tries `provider.Create` again, at most 4 attempts in all. It makes a new attempt only when the error text contains `could not find a log line that matches` and the context has not ended. Before each new attempt it removes the failed attempt with `provider.Delete`, also when the cluster is to be kept, so that only the last attempt's nodes stay. After the last attempt the failure is step 3's, its text unchanged. Task 21 adds a unit test of the retry. No signature, condition or user-visible text changes.
 
-Point 11 holds `not measured here` because its second assumption is not measured; the first and the third hold. No task's text changes for it. Task 29's unit test `TestFollowReopensWithoutLossOrRepeat` covers the counting of lines that share one timestamp. No cluster run can produce such lines, because containerd stamps every line to the nanosecond; the record's Decision says why.
+Point 11 holds `not measured here` because its second assumption is not measured; the first and the third hold. No task's text changes for it. Task 29's unit test `TestFollowReopensWithoutLossOrRepeat` covers the counting of lines that share one timestamp. None occurred in the record's runs, even at about 1.3 million lines a second, because containerd stamps each line with its own clock reading in nanoseconds; the record's Decision says why.
 
 Part 3 starts on these decisions. This section waits for the maintainer's review.
 
 ## What the proofs leave on the machine
 
-The proofs removed every cluster, container and volume they made. After the last proof, this command printed no name that starts with `rollproof-proof-`:
+The proofs removed every cluster and container they made. Volumes were not checked by a listing. The records give a reason for none: `p08-kind-library` says that kind gives each node an anonymous volume at `/var`, deletes the nodes with `nerdctl rm -f -v`, and that no volume was created during its runs; and the proofs' registries run with `--tmpfs /var/lib/registry` (`proofs/internal/lab/lab.go`), so the engine makes no anonymous volume for the image's `VOLUME`. After the last proof, this command printed no name that starts with `rollproof-proof-`:
 
     nerdctl ps -a --format "{{.Names}}"
 
