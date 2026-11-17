@@ -71,7 +71,16 @@ type Decision struct {
 // window and once more after the probe has stopped; the last call's Decision is the run's. GoOn is
 // true when the verdict so far is Pass. A Timeline in which no window has begun, with nothing in
 // Before, gives NotVerified with InternalError.
-func Decide(t Timeline) Decision { return judge(t, place(t)) }
+//
+// Decide also reads the observations: it counts them into windows by T, turns a failure into
+// ProbeFailures in a transition's window and into SteadyNotClean in the steady window, and turns a
+// stretch with no observation longer than Silence into ProbeSilent for every window the stretch
+// overlaps.
+func Decide(t Timeline) Decision {
+	p := place(t)
+	observe(t, &p)
+	return judge(t, p)
+}
 
 // placement is a Timeline with every condition in its place (rule 3).
 type placement struct {
@@ -79,8 +88,8 @@ type placement struct {
 	windows   [][]Condition  // the conditions of each window of t.Windows, in order
 	ignored   []Condition    // Timed conditions at or after the last begun window's end
 	ends      []time.Time    // where each begun window ends for placing; zero if it never began
-	results   []WindowResult // Name, Start and End of each window; Task 14 adds the counts
-	uncounted int            // set by Task 14
+	results   []WindowResult // Name, Start and End of each window; observe adds the counts
+	uncounted int            // set by observe
 }
 
 // place applies rule 3 and fills results with each window's Name, Start and End.
