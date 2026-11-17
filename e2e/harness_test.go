@@ -80,7 +80,7 @@ func helmEnv(dir string) []string {
 func checkHelmMajor(major, prefix string) {
 	dir := filepath.Join(root, ".tools", major)
 	binary := filepath.Join(dir, "helm")
-	cmd := exec.Command("helm", "version", "--short")
+	cmd := exec.Command(binary, "version", "--short")
 	cmd.Dir = dir
 	cmd.Env = helmEnv(dir)
 	out, err := cmd.CombinedOutput()
