@@ -84,6 +84,19 @@ func pollUntil(d time.Duration, cond func() bool) bool {
 	return false
 }
 
+// goUntilEnd runs f in a goroutine that the test waits for before it ends, so
+// that a t.Error in f never comes after the test: that would panic the binary
+// and orphan the processes of the test that is running.
+func goUntilEnd(t *testing.T, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	t.Cleanup(func() { <-done })
+	go func() {
+		defer close(done)
+		f()
+	}()
+}
+
 // waitFor fails the test unless cond becomes true within d.
 func waitFor(t *testing.T, d time.Duration, what string, cond func() bool) {
 	t.Helper()
@@ -394,14 +407,15 @@ func TestCloseKillsPendingStops(t *testing.T) {
 	rec := &closeRecorder{}
 	r := NewRunner(RunnerOptions{Dir: t.TempDir(), Kubeconfig: testKubeconfig, Environ: os.Environ(),
 		Evidence: func(string) (io.WriteCloser, error) { return rec, nil }})
+	t.Cleanup(r.Close)
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
+	goUntilEnd(t, func() {
 		defer cancel()
 		if !pollUntil(2*time.Second, func() bool { _, err := os.Stat(pidFile); return err == nil }) {
 			t.Error("the script did not write its pid")
 		}
-	}()
+	})
 	res := r.Run(ctx, Command{Name: "c", Args: []string{"sh", "-c", `echo $$ > "$0"; trap "" TERM; while :; do sleep 0.05; done`, pidFile}})
 	if res.Ending != StoppedBySignal {
 		t.Fatalf("ending %s, want stopped-by-signal", res.Ending)
@@ -521,7 +535,7 @@ func TestRunRefusesAndAdapts(t *testing.T) {
 		h := newHarness(t, os.Environ())
 		t.Cleanup(h.runner.Close)
 		ctx, cancel := context.WithCancel(context.Background())
-		go func() {
+		goUntilEnd(t, func() {
 			defer cancel()
 			if !pollUntil(2*time.Second, func() bool {
 				b, _ := os.ReadFile(filepath.Join(h.evidence, "c"))
@@ -529,7 +543,7 @@ func TestRunRefusesAndAdapts(t *testing.T) {
 			}) {
 				t.Error("the output did not appear")
 			}
-		}()
+		})
 		r := h.runner.Run(ctx, Command{Name: "c", Args: []string{"sh", "-c", "echo hello; sleep 30"}})
 		if r.Ending != StoppedBySignal || r.Stdout != "hello\n" {
 			t.Errorf("got %s with Stdout %q, want stopped-by-signal with the output so far", r.Ending, r.Stdout)
@@ -555,12 +569,13 @@ func TestCloseWaitsForEvidenceHeldOutsideTheGroup(t *testing.T) {
 	rec := &closeRecorder{}
 	r := NewRunner(RunnerOptions{Dir: t.TempDir(), Kubeconfig: testKubeconfig, Environ: os.Environ(),
 		Evidence: func(string) (io.WriteCloser, error) { return rec, nil }})
+	t.Cleanup(r.Close)
 	dir := t.TempDir()
 	pidFile, holderFile := filepath.Join(dir, "pid"), filepath.Join(dir, "holder")
 	// The holder starts its own session, so it is outside the group and holds the output open.
 	script := `echo $$ > "$0"; trap "" TERM; setsid sh -c 'echo $$ > "$0"; exec sleep 30' "$1" & while :; do sleep 0.05; done`
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
+	goUntilEnd(t, func() {
 		defer cancel()
 		if !pollUntil(2*time.Second, func() bool {
 			a, _ := os.ReadFile(pidFile)
@@ -569,7 +584,7 @@ func TestCloseWaitsForEvidenceHeldOutsideTheGroup(t *testing.T) {
 		}) {
 			t.Error("the scripts did not write their pids")
 		}
-	}()
+	})
 	res := r.Run(ctx, Command{Name: "c", Args: []string{"sh", "-c", script, pidFile, holderFile}})
 	holder := groupOf(t, holderFile)
 	t.Cleanup(func() { syscall.Kill(holder, syscall.SIGKILL) })
