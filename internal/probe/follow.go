@@ -165,8 +165,8 @@ func (f *follower) follow(ctx context.Context, rc io.ReadCloser, s *stream) (pie
 
 // take reads one line: line has no line end, and asCame is the line as it came, with its line
 // end. A line whose timestamp does not parse is written to raw and is a fault at now. In a
-// stream opened again a repeat is skipped, and the first line that is not one ends the
-// skipping, after the gap when fewer lines of the last timestamp came back than were read.
+// stream opened again a repeat (see repeat) is skipped, and the first line that is not one ends
+// the skipping, after the gap when fewer lines of the last timestamp came back than were read.
 // Every other line is written to raw, counted, and read by ParseLine with its timestamp.
 func (f *follower) take(s *stream, line, asCame string) {
 	stamp, text, _ := strings.Cut(line, " ")
@@ -206,13 +206,18 @@ func (f *follower) take(s *stream, line, asCame string) {
 }
 
 // repeat reports whether a line stamped ts, in the stream s opened again, is one that was read
-// before: its timestamp is before the last one read, or equal to it while fewer lines with it
-// were skipped in s than were read. It counts each repeat at the last timestamp.
+// before. Until as many lines at the last timestamp as were read have come back in s, a line is
+// a repeat when its timestamp is before the last one read, or equal to it. After them every line
+// is new, whatever its timestamp: it comes after the last line read, and containerd stamps a
+// container's standard output and standard error apart, so a line stamped before the last one
+// read can follow it in the log. It counts each repeat at the last timestamp.
 func (f *follower) repeat(s *stream, ts time.Time) bool {
 	switch {
+	case s.skipped == f.atLast:
+		return false
 	case ts.Before(f.last):
 		return true
-	case ts.Equal(f.last) && s.skipped < f.atLast:
+	case ts.Equal(f.last):
 		s.skipped++
 		return true
 	}

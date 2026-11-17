@@ -195,6 +195,45 @@ func TestFollowReopensWithoutLossOrRepeat(t *testing.T) {
 	}
 }
 
+// Ruling T29-2: containerd stamps standard output and standard error apart,
+// so a line stamped before LAST can follow the last line read. Once the lines
+// at LAST have come back, every line is taken, whatever its stamp. When such a
+// pair sits before the break, the stream opened again shows a line later than
+// LAST first: a gap, and both lines read twice, which fails closed.
+func TestFollowReopensWithStampsOutOfOrder(t *testing.T) {
+	ok, fail := `{"ok":true}`, `{"ok":false,"class":"refused"}`
+	later := logAt(1500).Add(2 * time.Microsecond)   // stamped by one stream's goroutine
+	earlier := logAt(1500).Add(1 * time.Microsecond) // written after it by the other's
+	t.Run("a line stamped before LAST after the lines at LAST is taken", func(t *testing.T) {
+		l := newFakeLog(
+			logLine(logAt(1200), ok)+logLine(later, ok),
+			logLine(logAt(1200), ok)+logLine(later, ok)+logLine(earlier, fail)+logLine(logAt(2700), ok),
+		)
+		f, events, raw := followAll(t, l, false)
+		checkGap(t, events, 4, nil, 0)
+		if len(events) == 4 && events[2].Obs != nil && (events[2].Obs.OK || !events[2].Obs.Written.Equal(earlier)) {
+			t.Errorf("event 2 = %+v, want the failure stamped before LAST", events[2].Obs)
+		}
+		if n := strings.Count(raw, logLine(earlier, fail)); n != 1 {
+			t.Errorf("raw has the line stamped before LAST %d times, want once:\n%s", n, raw)
+		}
+		if lines, _ := f.counts(); lines != 4 {
+			t.Errorf("lines = %d, want 4", lines)
+		}
+	})
+	t.Run("a pair out of order before the break gives a gap", func(t *testing.T) {
+		l := newFakeLog(
+			logLine(logAt(1200), ok)+logLine(later, ok)+logLine(earlier, fail),
+			logLine(logAt(1200), ok)+logLine(later, ok)+logLine(earlier, fail)+logLine(logAt(2700), ok),
+		)
+		f, events, _ := followAll(t, l, false)
+		checkGap(t, events, 3, []time.Time{earlier, later, logAt(60_000)}, 3)
+		if lines, _ := f.counts(); lines != 6 {
+			t.Errorf("lines = %d, want 6: the pair is read twice", lines)
+		}
+	})
+}
+
 func TestFollowRetriesAnOpeningThatFails(t *testing.T) {
 	l := &fakeLog{streams: []io.Reader{nil, nil, strings.NewReader(logLine(logAt(100), `{"ok":true}`))}}
 	_, events, _ := followAll(t, l, false)
