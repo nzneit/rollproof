@@ -58,8 +58,8 @@ type httpRun struct {
 
 // RunHTTP sends GET requests to o.URL on an open schedule, each on a new connection, and writes
 // contract lines to out until ctx ends. Then it starts no new request, waits for those in flight,
-// writes their lines and returns nil. It returns an error only when the URL's host cannot be
-// resolved at the start.
+// writes their lines and returns nil. It returns an error only before the first request: the URL
+// does not parse or names no host, or the host cannot be resolved.
 //
 // When o.Warmup is above zero, RunHTTP first sends one check at a time, leaving no more than the
 // rate's interval between two of them, and writes nothing for them. The observations begin once

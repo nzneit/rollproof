@@ -63,7 +63,7 @@ var reservedNamespaces = map[string]bool{
 	"local-path-storage": true, "rollproof-probe": true,
 }
 
-// validate returns the first rejection of sections 7 and 8, in the order of the design's list.
+// validate returns the first rejection of sections 7 and 8.
 //
 // An image archive that holds more than one image is rejected too (section 8). That check needs
 // the file, so the plan that builds `archive` reads it.

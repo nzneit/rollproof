@@ -35,9 +35,10 @@ type Facts struct {
 	ClockDifference      time.Duration
 }
 
-// Probe is one probe of a run. Start returns when the first observation has arrived; its error
-// is a Condition: the probe did not start in time, it exited first, or the nodes' clock differs
-// from the runner's. Stop asks the probe to stop, reads what it still writes, and closes Events.
+// Probe is one probe of a run. Start returns when the first observation has arrived. Its error
+// is a Condition when the probe did not start in time, exited first, or the nodes' clock differs
+// from the runner's; any other error is plain, from the API or the context. Stop asks the probe
+// to stop, reads what it still writes, and closes Events.
 type Probe interface {
 	Start(ctx context.Context) (Started, error)
 	Stop(ctx context.Context) (Facts, error)

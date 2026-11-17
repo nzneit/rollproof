@@ -311,8 +311,8 @@ var (
 	unmarshalRe   = regexp.MustCompile(`^cannot unmarshal (!![a-z]+) `)
 )
 
-// decodeError turns an error of the strict decode into a rejection. It never uses the decoder's
-// text, which quotes values.
+// decodeError turns an error of the strict decode into a rejection. It never writes the
+// decoder's text, which quotes values, into the rejection.
 func (x *index) decodeError(err error) error {
 	var le *leafError
 	if errors.As(err, &le) {
@@ -386,7 +386,8 @@ var syntaxLineRe = regexp.MustCompile(`line (\d+)`)
 // Load reads and validates the file at path. env looks up an environment variable. It fills
 // every ${env.NAME} form, checks every ${images.…} form and leaves it for Resolve, rejects every
 // combination that sections 7 and 8 reject, and makes every relative path absolute from the
-// file's folder. An error is a verdict.Condition with ConfigRejected whose text names the key and never quotes a value.
+// file's folder. An error is a verdict.Condition with ConfigRejected. Where the tool can find the
+// key at fault, the text names it; the text never quotes a value.
 func Load(path string, env func(name string) (string, bool)) (*Config, error) {
 	real, err := filepath.Abs(path)
 	if err == nil {

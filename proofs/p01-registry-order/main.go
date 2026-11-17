@@ -328,7 +328,8 @@ func (p *proof) pull(ref string) (string, error) {
 	return p.l.Exec(p.worker, nil, "crictl", "pull", ref)
 }
 
-// rmi removes the image ref from the worker; an error is ignored.
+// rmi removes the image ref from the worker. Its error is ignored: the step is that the image is
+// absent before the pull, and an image that is already absent meets it.
 func (p *proof) rmi(ref string) { _, _ = p.l.Exec(p.worker, nil, "crictl", "rmi", ref) }
 
 // inspect returns status.repoTags and status.repoDigests of the image ref in

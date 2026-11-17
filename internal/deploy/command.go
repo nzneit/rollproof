@@ -88,7 +88,8 @@ var waitDelay = time.Second
 // stdoutCap is how much standard output Result keeps when a command sets no MaxStdout.
 const stdoutCap = 1 << 20
 
-// helmActingVariables are the variables by which Helm would act on another cluster.
+// helmActingVariables are the variables by which Helm would act on another cluster or in another
+// namespace, or keep its release records somewhere else.
 var helmActingVariables = map[string]bool{
 	"HELM_KUBECONTEXT":                  true,
 	"HELM_KUBEAPISERVER":                true,
@@ -119,7 +120,8 @@ type OSRunner struct {
 
 // NewRunner returns an OSRunner, a Runner that starts real processes. Each
 // gets KUBECONFIG set to o.Kubeconfig and none of the variables by which Helm
-// would act on another cluster.
+// would act on another cluster or in another namespace, or keep its release
+// records somewhere else.
 func NewRunner(o RunnerOptions) *OSRunner {
 	abs, dirErr := o.Dir, error(nil)
 	if o.Dir != "" {

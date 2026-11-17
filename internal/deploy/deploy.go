@@ -9,10 +9,10 @@ import (
 )
 
 // Deployer is a deploy driver. Fetch gets everything from outside the cluster that the
-// later calls need, before the probe starts. Install, Deploy and Rollback
-// each run one command and return how it ended; a command may return before
-// its rollout is complete. Transitions are the windows this driver gives a
-// run, in order.
+// later calls need, before the probe starts. Install, Deploy and Rollback each
+// run the commands of one step and return how it ended; a command may return
+// before its rollout is complete. Transitions are the windows this driver gives
+// a run, in order.
 type Deployer interface {
 	Fetch(ctx context.Context) error
 	Install(ctx context.Context) Result

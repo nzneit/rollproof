@@ -537,6 +537,7 @@ func checkOverrides(ctx context.Context, c *checks, h *helm) {
 	case r.code != 0 && strings.Contains(r.stderr, "release: not found"):
 		info("with HELM_NAMESPACE=elsewhere, helm status exits %d and says %s: HELM_NAMESPACE wins", r.code, firstLine(r.stderr))
 	default:
+		// The status ran but measured neither outcome: fail closed rather than guess which won.
 		c.fail("with HELM_NAMESPACE=elsewhere, helm status neither finds the release in %s nor says release: not found (%v); not measured", namespace, err)
 	}
 

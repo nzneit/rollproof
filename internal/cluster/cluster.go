@@ -130,8 +130,9 @@ type Cluster struct {
 
 // Create removes whatever an earlier run of this name left, then creates the cluster and its
 // registry and returns when every node is ready, DNS runs and both namespaces exist. On an error
-// nothing of the run is left behind, unless s.Keep is set or ctx has ended. An error is a
-// Condition with ClusterFailed. A name without the prefix rollproof- is an InternalError.
+// it removes the run, unless s.Keep is set or ctx has ended; when that removal fails too, parts
+// stay behind and the text says so. An error is a Condition with ClusterFailed. A name without
+// the prefix rollproof- is an InternalError.
 func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	deadline := time.Now().Add(s.Timeout)
 

@@ -106,6 +106,9 @@ func (d *HelmDriver) fetch(ctx context.Context, role string, r *config.Release) 
 	ref := r.Chart
 	if !r.IsPath {
 		dest := filepath.Join(d.o.RunDir, "charts", role)
+		// The folder is emptied first, so that a second Fetch finds only the archive it pulled;
+		// the listing below uses os.ReadDir, not a glob, because a run folder's name may hold a
+		// pattern character.
 		if err := os.RemoveAll(dest); err != nil {
 			return nil, fmt.Errorf("fetch the %s chart: empty its folder: %w", role, err)
 		}
@@ -214,6 +217,8 @@ func (d *HelmDriver) Install(ctx context.Context) Result {
 		Version *int `json:"version"`
 	}
 	if json.Unmarshal([]byte(st.Stdout), &status) != nil || status.Version == nil || *status.Version < 1 {
+		// An unreadable status ends the install like a command that did not end well: the run
+		// has one handler for such a command.
 		st.Ending = ExitedNonZero
 		return st
 	}

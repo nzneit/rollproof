@@ -35,7 +35,8 @@ type Target struct {
 
 // CheckTarget reads the URL's host as a Service's name and looks the Service up. An error is a
 // Condition with TargetUnsupported: a Service that does not exist, is headless, routes only
-// within a node, or a host that names one pod of a headless Service. The text names a way out.
+// within a node, a host that names one pod of a headless Service, or a host that cannot be read
+// as NAME.NAMESPACE.svc. The text names a way out.
 // A URL that cannot be read, or an API error other than "not found", is a plain error. No text
 // of an error quotes the URL, which can hold a user, a password or a query.
 func CheckTarget(ctx context.Context, client kubernetes.Interface, rawURL string) (Target, error) {
@@ -124,7 +125,8 @@ func readHost(host string) (name, namespace string, explicit bool, err error) {
 }
 
 // unreadableHost is the error of a host that ends in .svc or in the cluster's domain, or has an
-// empty label, and that is not NAME.NAMESPACE.svc or POD.NAME.NAMESPACE.svc.
+// empty label, and that is not NAME.NAMESPACE.svc or POD.NAME.NAMESPACE.svc. The refusal fails
+// closed: a name that the tool cannot read is not probed as it is.
 func unreadableHost() error {
 	return unsupported("the host cannot be read as a Service: it has an empty label, or it ends in .svc or in the " +
 		"cluster's domain and is not NAME.NAMESPACE.svc")

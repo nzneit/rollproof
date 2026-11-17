@@ -516,7 +516,7 @@ type reopen struct {
 	last    time.Time // LAST when the stream was opened
 	at      int       // AT when the stream was opened
 	lastN   int       // N of the last line taken before the stream was opened
-	first   *line     // the first line the stream returned; nil when it returned none
+	first   *line     // the first line of the stream that could be read; nil when it returned none
 	atLast  int       // how many lines the stream returned that carry exactly last
 	skipped int       // how many lines the rule skipped
 }
