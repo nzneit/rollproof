@@ -176,3 +176,22 @@ func TestBadSettings(t *testing.T) {
 		}
 	}
 }
+
+// TestNoReadyChannel starts serve as main does, with nothing reading the
+// address it listens on, and stops it.
+func TestNoReadyChannel(t *testing.T) {
+	env := map[string]string{"ADDR": "127.0.0.1:0", "SHUTDOWN": "drain-now"}
+	ctx, stop := context.WithCancel(context.Background())
+	t.Cleanup(stop)
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, func(k string) string { return env[k] }, nil) }()
+	stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return within 5 s when no channel reads its address")
+	}
+}
