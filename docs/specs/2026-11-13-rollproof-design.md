@@ -1,6 +1,6 @@
 # rollproof: design
 
-Date: 2026-11-13. Revised on 2026-11-16.
+Date: 2026-11-13. Revised on 2026-11-16. Amended on 2026-11-17.
 
 Status: the design below was agreed section by section in conversation on 2026-11-13. Three
 reviews followed. The first two:
@@ -33,6 +33,11 @@ tentatively (section 14, point 22).
 
 This text includes all of it. This written form waits for the maintainer's review. No code exists
 yet.
+
+One amendment followed on 2026-11-17, while the first plan was built: the built-in probe warms up
+before its first observation (sections 4 and 6). The plan's first end-to-end runs showed why. The
+maintainer accepted it for now. Section 14, point 23 says what it costs and what the next plan
+owes.
 
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
 Fable model wrote each of the first two reviews. AI agents on an Opus model gathered the evidence,
@@ -207,7 +212,8 @@ verdict    report, evidence, exit code
    and run the caller's `setup` commands.
 2. **Install** the previous release and wait until it is ready (section 7).
 3. **Start the probe** and hold a steady window before anything changes. The window begins at the
-   probe's first observation.
+   probe's first observation. The built-in probe writes that only once its target has answered
+   without a failure for one second (section 6).
 4. **Deploy the candidate.** Wait for the transition to finish, under a timeout, and keep the
    probe running for the settle time after it.
 5. **Roll back** to the previous release, with the same wait and the same settle time. This step
@@ -231,7 +237,8 @@ done (section 3). It has to be quiet: a pod change inside it puts the transition
 
 The time before the probe's first observation, and the time in which the tool stops the probe,
 belong to no window. A result that the probe writes while it is being stopped still counts, by
-its `t` (section 6).
+its `t` (section 6). The built-in probe's warm-up falls in the time before its first observation,
+so what its checks meet there is not judged (section 6).
 
 ### When a run passes
 
@@ -469,7 +476,10 @@ because the transition may be what cut them.
   `limits.timeout`, the run is not verified, and the report shows the state of the probe's pod
   (section 10). A probe that exits before its first observation ends that wait at once: the run
   is not verified because the probe exited, and nobody waits out the timeout for a probe that is
-  gone.
+  gone. Everything from the first observation on is judged, and a failure in the steady window
+  makes it not verified. A target that the install has just created may need a moment before the
+  cluster routes to it, so a probe should check it until it answers before it writes its first
+  observation, as the built-in probe's warm-up does.
 - **Exit.** The probe's pod is never restarted: its restart policy is `Never`. The tool reads an
   exit from the state of the container named `probe`. A probe that exits before the tool stops it
   makes the window in which it exited not verified. The silence that follows an exit is not
@@ -554,7 +564,19 @@ on the namespace cannot keep it out. For a custom probe the image decides.
 
 It speaks the same contract. It is the tool's own binary, started as `rollproof probe http`.
 
-- **Open model.** Request *i* starts at start + *i*/rate, whatever earlier requests did.
+- **Warm-up.** Before its first observation it sends one request at a time, with no more than the
+  rate's interval between two, and writes nothing for them. Its observations begin once requests
+  have passed without a failure for one second, timed from when the first of them returned; a
+  failed request starts that time again. The second is fixed, with no key. The reason is the
+  cluster, not the workload: kube-proxy can route a Service that the install has just created
+  about a second after its endpoints are ready (its shortest time between syncs is 1 s by
+  default, section 16). A probe that began at once met refused connections that no release
+  caused, and the fixtures' steady windows were not verified under both Helm majors. What the
+  warm-up's requests meet is not judged and not reported. A target that never answers for a
+  whole second gives no observation, so the run waits out `limits.timeout` and is
+  `probe-not-started` (section 10). Section 14, point 23 says what the next plan owes.
+- **Open model.** Request *i* starts at start + *i*/rate, whatever earlier requests did. Start is
+  the end of the warm-up.
 - **Requests.** HTTP GET to `probe.http.url`, with the headers of `probe.http.headers` when the
   configuration gives any. A `Host` header sets the host that the request names. A URL may be
   `https`. The probe then does not verify the server's certificate, as the kubelet's own HTTP
@@ -1816,7 +1838,7 @@ results: /tmp/rollproof-results-7f3a
 | `nothing-watched` | not verified | `limits.settle` after the install command returned, no Deployment, StatefulSet or DaemonSet matched `deploy.namespace` and `deploy.selector` |
 | `workload-unsupported` | not verified | A watched StatefulSet or DaemonSet has an update strategy other than the rolling one |
 | `target-unsupported` | not verified | The built-in probe's URL names a Service that does not exist, is headless, or routes only within a node, or it names one pod of a headless Service |
-| `probe-not-started` | not verified | No observation arrived inside `limits.timeout`, and the probe was still running |
+| `probe-not-started` | not verified | No observation arrived inside `limits.timeout`, and the probe was still running. For the built-in probe this includes a target that never answered without a failure for one second (section 6) |
 | `probe-exited` | not verified | The probe exited before the tool stopped it, whether before its first observation or in a window |
 | `probe-line-invalid` | not verified | A line broke the probe contract: its form, a field's type or value, a `t` later than the line, or an observation behind a prefix |
 | `steady-not-clean` | not verified | The probe reported a failure in the steady window |
@@ -2122,8 +2144,8 @@ the fourth on gets a plan of its own. The first plan covers steps 1 to 3.
 The plan settles each open point with a test or a reading before anything is built on what it
 decides. Points 6, 17 and 18 are settled and stay here for the record. Points 7 and 16 are settled
 by the fixture runs, and points 13 and 14 before the first release. Point 15 is a caveat with
-nothing to settle, and point 22 records two rules that stand for now. The build order of
-section 13 says which step proves which point.
+nothing to settle, point 22 records two rules that stand for now, and point 23 an amendment that
+stands for now. The build order of section 13 says which step proves which point.
 
 1. **Registry order in the nodes.** That a node tries the run's registry first for a host and then
    falls back to the real registry is what the container runtime's documentation and source say
@@ -2248,6 +2270,22 @@ section 13 says which step proves which point.
       warning.
     - A probe that exits before its first observation is `probe-exited`, at once (section 6). The
       other way would wait out `limits.timeout` and report `probe-not-started`.
+23. **The built-in probe's warm-up, an amendment of 2026-11-17.** The plan's first end-to-end runs
+    found that kube-proxy on the probe's node routed a Service that the install had just created
+    about a second after its endpoints were ready. The probe's first requests were refused, and
+    the steady window was not verified under both Helm majors. The built-in probe now warms up
+    before its first observation (section 6). The maintainer accepted it on 2026-11-17 "for now".
+    The other way, starting the steady window at the probe's first passing observation, was not
+    taken because it reaches into four units. What the warm-up costs, and what the next plan owes:
+    - Neither `result.json` nor the console says how long the warm-up took or how many of its
+      requests failed. The record should carry both.
+    - A target that never answers for a whole second, because the previous release refuses or
+      fails often, waits out `limits.timeout` and is `probe-not-started`, which points at the
+      probe. Without the warm-up its failures showed in the steady window within
+      `limits.steady`. A warm-up that does not end should have a reason of its own that names the
+      target, with the number of failed requests and the last failure.
+    - A custom probe has no warm-up from the tool. Section 6 tells its author to check the target
+      until it answers before the first observation.
 
 ## 15. Not in the first release
 
