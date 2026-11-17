@@ -68,3 +68,7 @@ Two things stay that the proofs did not remove: kind's network `kind`, and the n
 - A server-side apply conflict with another writer of a field, which section 14 point 5 gives to the fixtures.
 - From `p01b-mirror`, the mirror form with no `server` line, which step 5 writes; the proof ran the form with a `server` line.
 - From `p01-registry-order`, the limits of its measurements: images of one manifest each (no image index), one container per pod, no image held under two names, and no pull that fell through to a real HTTPS host.
+
+## Clock check
+
+Measured on 2026-11-17 by `TestPodOnACluster` (`internal/probe/pod_cluster_test.go`) on rootless nerdctl 2.4.2: the first observation was read 176.461µs after the node's runtime stamped it. The bound is 2 s (`probe.ClockBound`). An engine in a virtual machine, which can give the nodes a clock of their own, was not measured (section 14, point 21).

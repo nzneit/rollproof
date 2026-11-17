@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app.kubernetes.io/name: rollproof-probe
+  name: probe
+  namespace: rollproof-probe
+spec:
+  automountServiceAccountToken: false
+  containers:
+  - args:
+    - probe
+    - http
+    - --url
+    - http://orders.orders.svc/api/orders/latest
+    - --rate
+    - "200"
+    - --timeout
+    - 2s
+    - --expect-status
+    - 200-299
+    image: rollproof.test/rollproof@sha256:1333aec6e2215a19bb2a7361377cf1cb27f1261bcf1ddae03e4ea086c8bab89c
+    imagePullPolicy: IfNotPresent
+    name: probe
+    resources: {}
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      runAsNonRoot: true
+      runAsUser: 65532
+      seccompProfile:
+        type: RuntimeDefault
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 7
+  tolerations:
+  - effect: NoSchedule
+    key: node-role.kubernetes.io/control-plane
+    operator: Exists
+status: {}
