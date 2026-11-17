@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "final": false,
+  "verdict": "not-verified",
+  "driver": "",
+  "name": "",
+  "reasons": [
+    {
+      "code": "internal-error",
+      "verdict": "not-verified",
+      "text": "the run did not finish",
+      "detail": [],
+      "decided": true
+    }
+  ],
+  "windows": [],
+  "transitions": [],
+  "probes": [],
+  "releases": [],
+  "settings": [],
+  "images": [],
+  "removed_variables": [],
+  "warnings": [],
+  "tool": {
+    "version": ""
+  },
+  "cluster": null
+}

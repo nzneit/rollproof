@@ -1,0 +1,203 @@
+{
+  "schema": 1,
+  "final": true,
+  "verdict": "pass",
+  "driver": "helm",
+  "name": "orders",
+  "reasons": [],
+  "windows": [
+    {
+      "name": "steady",
+      "start": "2026-11-13T09:59:52.000Z",
+      "end": "2026-11-13T10:00:02.000Z",
+      "result": "pass",
+      "checks": 2000,
+      "failed": 0,
+      "failed_after_finish": 0,
+      "crossed_start": 0,
+      "failed_by_class": {},
+      "first_failure": null,
+      "slowest_ms": 41,
+      "lag_ms": 6
+    },
+    {
+      "name": "deploy",
+      "start": "2026-11-13T10:00:02.000Z",
+      "end": "2026-11-13T10:00:35.400Z",
+      "result": "pass",
+      "checks": 6680,
+      "failed": 0,
+      "failed_after_finish": 0,
+      "crossed_start": 0,
+      "failed_by_class": {},
+      "first_failure": null,
+      "slowest_ms": 212,
+      "lag_ms": 38
+    },
+    {
+      "name": "rollback",
+      "start": "2026-11-13T10:00:35.400Z",
+      "end": "2026-11-13T10:01:09.300Z",
+      "result": "pass",
+      "checks": 6780,
+      "failed": 0,
+      "failed_after_finish": 0,
+      "crossed_start": 0,
+      "failed_by_class": {},
+      "first_failure": null,
+      "slowest_ms": 187,
+      "lag_ms": 35
+    }
+  ],
+  "transitions": [
+    {
+      "name": "deploy",
+      "stalled": false,
+      "command": "ok",
+      "settle_restarted_by": [],
+      "workloads": [
+        {
+          "workload": "deployment/orders",
+          "pods_at_start": 2,
+          "pods_replaced": 2,
+          "pods_created": 2,
+          "added": false,
+          "removed": false,
+          "probed": "yes",
+          "quickest_stop_ms": 5300
+        }
+      ]
+    },
+    {
+      "name": "rollback",
+      "stalled": false,
+      "command": "ok",
+      "settle_restarted_by": [],
+      "workloads": [
+        {
+          "workload": "deployment/orders",
+          "pods_at_start": 2,
+          "pods_replaced": 2,
+          "pods_created": 2,
+          "added": false,
+          "removed": false,
+          "probed": "yes",
+          "quickest_stop_ms": 5200
+        }
+      ]
+    }
+  ],
+  "probes": [
+    {
+      "kind": "http",
+      "target": "GET http://orders.orders.svc/api/orders/latest",
+      "settings": [
+        {
+          "key": "probe.http.rate",
+          "value": "200",
+          "default": "200"
+        },
+        {
+          "key": "probe.http.timeout",
+          "value": "2s",
+          "default": "2s"
+        },
+        {
+          "key": "probe.http.expect-status",
+          "value": "200-299",
+          "default": "200-299"
+        }
+      ],
+      "headers": [],
+      "env_names": [],
+      "command_count": 0,
+      "args_count": 0,
+      "lines": 78,
+      "json_lines_without_ok": 0,
+      "certificate_checked": true,
+      "stopped_when_asked": true,
+      "notes": []
+    }
+  ],
+  "releases": [
+    {
+      "role": "previous",
+      "chart": "orders",
+      "version": "1.4.2",
+      "source": "oci://registry.example/charts/orders",
+      "values_files": [],
+      "inline_keys": []
+    },
+    {
+      "role": "candidate",
+      "chart": "orders",
+      "version": "1.5.0",
+      "source": "./chart",
+      "values_files": [],
+      "inline_keys": [
+        "image"
+      ]
+    }
+  ],
+  "settings": [
+    {
+      "key": "cluster.node-image",
+      "value": "the linked kind release's",
+      "default": "the linked kind release's"
+    },
+    {
+      "key": "cluster.registry-image",
+      "value": "the tool's pinned registry image",
+      "default": "the tool's pinned registry image"
+    },
+    {
+      "key": "cluster.workers",
+      "value": "3",
+      "default": "3"
+    },
+    {
+      "key": "limits.steady",
+      "value": "10s",
+      "default": "10s"
+    },
+    {
+      "key": "limits.settle",
+      "value": "15s",
+      "default": "15s"
+    },
+    {
+      "key": "limits.timeout",
+      "value": "5m",
+      "default": "5m"
+    },
+    {
+      "key": "limits.silence",
+      "value": "5s",
+      "default": "5s"
+    }
+  ],
+  "images": [
+    {
+      "name": "orders",
+      "digest": "sha256:4f0ddb145f76c84c30f552c4e642ff87f49aaa01f83b09f89e34144d2af22d52",
+      "run_by": [
+        {
+          "workload": "deployment/orders",
+          "transition": "deploy"
+        }
+      ]
+    }
+  ],
+  "removed_variables": [],
+  "warnings": [],
+  "tool": {
+    "version": "dev"
+  },
+  "cluster": {
+    "provider": "kind",
+    "provider_version": "v0.33.0",
+    "kubernetes": "v1.37.0",
+    "node_image": "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5",
+    "workers": 3
+  }
+}
