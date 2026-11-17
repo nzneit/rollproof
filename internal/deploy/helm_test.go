@@ -106,7 +106,7 @@ func TestHelmCommandLines(t *testing.T) {
 		{Name: "show-candidate", Args: []string{"helm", "show", "chart", "/work/app/chart"}, Timeout: timeout},
 		{Name: "install", Args: slices.Concat([]string{"helm", "upgrade", "--install", "orders", archive}, cl,
 			[]string{"--timeout", "5m0s", "--values", filepath.Join(runDir, "values", "previous-1.yaml")}), Timeout: timeout},
-		{Name: "status-install", Args: slices.Concat([]string{"helm", "status", "orders"}, cl, []string{"-o", "json"}), Timeout: timeout},
+		{Name: "status-install", Args: slices.Concat([]string{"helm", "status", "orders"}, cl, []string{"-o", "json"}), Timeout: timeout, MaxStdout: 64 << 20},
 		{Name: "deploy", Args: slices.Concat([]string{"helm", "upgrade", "orders", "/work/app/chart", "--reset-values"}, cl,
 			[]string{"--timeout", "5m0s", "--values", "/work/app/test/values-kind.yaml", "--values", filepath.Join(runDir, "values", "candidate-2.yaml")}), Timeout: timeout},
 		{Name: "rollback", Args: slices.Concat([]string{"helm", "rollback", "orders", "1"}, cl, []string{"--timeout", "5m0s"}), Timeout: timeout},
@@ -401,6 +401,125 @@ func TestHelmWrittenFilesArePrivate(t *testing.T) {
 		}
 		if got := info.Mode().Perm(); got != want {
 			t.Errorf("%s has mode %o, want %o", path, got, want)
+		}
+	}
+}
+
+// writeArchives is what a pull does that leaves more than one archive.
+func writeArchives(names ...string) func(c Command) error {
+	return func(c Command) error {
+		for _, n := range names {
+			if err := os.WriteFile(filepath.Join(argAfter(c.Args, "--destination"), n), []byte("archive"), 0o644); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+func wantChartFetchFailed(t *testing.T, err error, role string) {
+	t.Helper()
+	var c verdict.Condition
+	if !errors.As(err, &c) || c.Code != verdict.ChartFetchFailed {
+		t.Fatalf("got %v, want a chart-fetch-failed condition", err)
+	}
+	if !strings.Contains(c.Text, role) {
+		t.Errorf("text %q does not name the role %q", c.Text, role)
+	}
+}
+
+// TestHelmFetchFailsClosed: each way a good-looking fetch is wrong gives
+// chart-fetch-failed, one check at a time.
+func TestHelmFetchFailsClosed(t *testing.T) {
+	t.Run("two archives", func(t *testing.T) {
+		f := scripted()
+		f.effects["pull-previous"] = writeArchives("orders-1.4.2.tgz", "other-1.0.0.tgz")
+		drv, _ := newDriver(t, helmConfig(), f)
+		wantChartFetchFailed(t, drv.Fetch(context.Background()), "previous")
+	})
+	t.Run("a pull that failed but left an archive", func(t *testing.T) {
+		f := scripted()
+		f.results["pull-previous"] = Result{Ending: ExitedNonZero, ExitCode: 1}
+		drv, _ := newDriver(t, helmConfig(), f)
+		wantChartFetchFailed(t, drv.Fetch(context.Background()), "previous")
+	})
+	t.Run("a show that failed but gave a good answer", func(t *testing.T) {
+		f := scripted()
+		f.results["show-candidate"] = Result{Ending: ExitedNonZero, ExitCode: 1, Stdout: "name: orders\nversion: 1.5.0\n"}
+		drv, _ := newDriver(t, helmConfig(), f)
+		wantChartFetchFailed(t, drv.Fetch(context.Background()), "candidate")
+	})
+	t.Run("a context that ends during show", func(t *testing.T) {
+		f := scripted()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		f.effects["show-candidate"] = func(Command) error { cancel(); return nil }
+		f.results["show-candidate"] = Result{Ending: Succeeded, Stdout: "name: orders\nversion: 1.5.0\n"}
+		drv, _ := newDriver(t, helmConfig(), f)
+		var c verdict.Condition
+		if err := drv.Fetch(ctx); !errors.Is(err, context.Canceled) || errors.As(err, &c) {
+			t.Errorf("got %v, want the context's error and no condition", err)
+		}
+	})
+}
+
+func TestHelmStatusVersionZero(t *testing.T) {
+	f := scripted()
+	f.results["status-install"] = Result{Ending: Succeeded, Stdout: `{"version":0}`}
+	drv, _ := newDriver(t, helmConfig(), f)
+	if err := drv.Fetch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if r := drv.Install(context.Background()); r.Name != "status-install" || r.Ending != ExitedNonZero || r.ExitCode != 0 {
+		t.Errorf("got %+v, want the status as exit-nonzero with code 0", r)
+	}
+}
+
+func TestHelmSourceOfAPathChart(t *testing.T) {
+	for chart, want := range map[string]string{
+		"/work/app":         ".",
+		"/work/app/chart":   "./chart",
+		"/work":             "/work",
+		"/work/x":           "/work/x",
+		"/work/application": "/work/application",
+	} {
+		h := helmConfig()
+		h.Candidate.Chart = chart
+		drv, _ := newDriver(t, h, scripted())
+		if err := drv.Fetch(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := drv.Releases()[1].Source; got != want {
+			t.Errorf("Source of %q is %q, want %q", chart, got, want)
+		}
+	}
+}
+
+func TestHelmRunFolderWithAPatternCharacter(t *testing.T) {
+	f := scripted()
+	runDir := filepath.Join(t.TempDir(), "run[1]")
+	drv := NewHelm(HelmOptions{Helm: helmConfig(), Namespace: "orders", Kubeconfig: kubeconfig, Context: kubeContext,
+		RunDir: runDir, Dir: "/work/app", Timeout: timeout, Runner: f})
+	if err := drv.Fetch(context.Background()); err != nil {
+		t.Fatalf("a good pull into a folder with a [ in its path: %v", err)
+	}
+}
+
+func TestHelmSecondFetch(t *testing.T) {
+	f := scripted()
+	drv, runDir := newDriver(t, helmConfig(), f)
+	if err := drv.Fetch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.effects["pull-previous"] = writeArchive("orders", "1.4.3")
+	if err := drv.Fetch(context.Background()); err != nil {
+		t.Fatalf("second Fetch: %v", err)
+	}
+	drv.Install(context.Background())
+	want := filepath.Join(runDir, "charts", "previous", "orders-1.4.3.tgz")
+	for _, c := range f.calls {
+		if c.Name == "install" && c.Args[4] != want {
+			t.Errorf("install names %q, want the second pull's archive %q", c.Args[4], want)
 		}
 	}
 }

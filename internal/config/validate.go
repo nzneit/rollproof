@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"k8s.io/apimachinery/pkg/labels"
 )
@@ -181,6 +182,12 @@ func validateRelease(path string, r *Release, x *index) error {
 	if r.Chart == "" {
 		return x.reject(path+".chart", "required")
 	}
+	if strings.IndexFunc(r.Chart, unicode.IsControl) >= 0 {
+		return x.reject(path+".chart", "must not hold a control character")
+	}
+	if chartHoldsUserInfo(r.Chart) {
+		return x.reject(path+".chart", "must not hold a user name or password")
+	}
 	switch {
 	case r.IsPath && r.Version != "":
 		return x.reject(path+".version", "not allowed beside a chart that is a path")
@@ -197,6 +204,20 @@ func validateRelease(path string, r *Release, x *index) error {
 		}
 	}
 	return nil
+}
+
+// chartHoldsUserInfo says whether a chart reference in URL form has a user part. A form that
+// does not parse is judged by an at sign before the first slash after "://".
+func chartHoldsUserInfo(chart string) bool {
+	_, rest, ok := strings.Cut(chart, "://")
+	if !ok {
+		return false
+	}
+	if u, err := url.Parse(chart); err == nil {
+		return u.User != nil
+	}
+	authority, _, _ := strings.Cut(rest, "/")
+	return strings.Contains(authority, "@")
 }
 
 func validateHTTP(h *HTTP, silence time.Duration, x *index) error {

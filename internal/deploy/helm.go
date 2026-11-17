@@ -41,18 +41,18 @@ type HelmOptions struct {
 
 // HelmDriver is the Helm driver. It implements Deployer.
 type HelmDriver struct {
-	o        HelmOptions
-	previous *fetched
-	cand     *fetched
-	fetched  bool
-	revision int
+	o         HelmOptions
+	previous  *fetchedRelease
+	candidate *fetchedRelease
+	ready     bool
+	revision  int
 	// installed is true once Install has read the revision.
 	installed bool
 }
 
-// fetched is a release after Fetch: the chart reference for Helm, the
+// fetchedRelease is a release after Fetch: the chart reference for Helm, the
 // --values arguments, and what the report says.
-type fetched struct {
+type fetchedRelease struct {
 	ref     string
 	values  []string
 	release Release
@@ -76,7 +76,7 @@ func (d *HelmDriver) run(ctx context.Context, name string, args ...string) Resul
 
 // Fetch pulls and reads both charts and writes the inline values. It stops at the first error.
 func (d *HelmDriver) Fetch(ctx context.Context) error {
-	d.fetched = false
+	d.ready = false
 	prev, err := d.fetch(ctx, "previous", d.o.Helm.Previous)
 	if err != nil {
 		return err
@@ -85,7 +85,7 @@ func (d *HelmDriver) Fetch(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	d.previous, d.cand, d.fetched = prev, cand, true
+	d.previous, d.candidate, d.ready = prev, cand, true
 	return nil
 }
 
@@ -94,10 +94,13 @@ func chartFailure(verb, role, chart string) error {
 		"could not %s the %s release's chart %s; the command's output is in the evidence", verb, role, chart)}
 }
 
-func (d *HelmDriver) fetch(ctx context.Context, role string, r *config.Release) (*fetched, error) {
+func (d *HelmDriver) fetch(ctx context.Context, role string, r *config.Release) (*fetchedRelease, error) {
 	ref := r.Chart
 	if !r.IsPath {
 		dest := filepath.Join(d.o.RunDir, "charts", role)
+		if err := os.RemoveAll(dest); err != nil {
+			return nil, fmt.Errorf("fetch the %s chart: empty its folder: %w", role, err)
+		}
 		if err := os.MkdirAll(dest, 0o700); err != nil {
 			return nil, fmt.Errorf("fetch the %s chart: make its folder: %w", role, err)
 		}
@@ -108,11 +111,11 @@ func (d *HelmDriver) fetch(ctx context.Context, role string, r *config.Release) 
 		if res.Ending != Succeeded {
 			return nil, chartFailure("pull", role, r.Chart)
 		}
-		archives, err := filepath.Glob(filepath.Join(dest, "*.tgz"))
-		if err != nil || len(archives) != 1 {
+		entries, err := os.ReadDir(dest)
+		if err != nil || len(entries) != 1 || entries[0].IsDir() || !strings.HasSuffix(entries[0].Name(), ".tgz") {
 			return nil, chartFailure("pull", role, r.Chart)
 		}
-		ref = archives[0]
+		ref = filepath.Join(dest, entries[0].Name())
 	}
 	res := d.run(ctx, "show-"+role, "show", "chart", ref)
 	if err := ctx.Err(); err != nil {
@@ -123,7 +126,7 @@ func (d *HelmDriver) fetch(ctx context.Context, role string, r *config.Release) 
 		return nil, chartFailure("read", role, r.Chart)
 	}
 
-	f := &fetched{ref: ref, release: Release{Role: role, Chart: meta.Name, Version: meta.Version, Source: d.source(r)}}
+	f := &fetchedRelease{ref: ref, release: Release{Role: role, Chart: meta.Name, Version: meta.Version, Source: d.source(r)}}
 	keys := map[string]bool{}
 	for i, v := range r.Values {
 		if v.File != "" {
@@ -173,12 +176,19 @@ func (d *HelmDriver) source(r *config.Release) string {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return r.Chart
 	}
+	if rel == "." {
+		return "."
+	}
 	return "./" + rel
 }
 
+// statusStdoutCap is how much of the status's JSON is kept: the JSON holds the release's
+// values and manifest, which can be large.
+const statusStdoutCap = 64 << 20
+
 // Install installs the previous release, then reads the revision it made.
 func (d *HelmDriver) Install(ctx context.Context) Result {
-	if !d.fetched {
+	if !d.ready {
 		panic("deploy: Install called before a successful Fetch")
 	}
 	args := slices.Concat([]string{"upgrade", "--install", d.o.Helm.Release, d.previous.ref}, d.cl(),
@@ -187,7 +197,8 @@ func (d *HelmDriver) Install(ctx context.Context) Result {
 	if res.Ending != Succeeded {
 		return res
 	}
-	st := d.run(ctx, "status-install", slices.Concat([]string{"status", d.o.Helm.Release}, d.cl(), []string{"-o", "json"})...)
+	st := d.o.Runner.Run(ctx, Command{Name: "status-install", Timeout: d.o.Timeout, MaxStdout: statusStdoutCap,
+		Args: slices.Concat([]string{"helm", "status", d.o.Helm.Release}, d.cl(), []string{"-o", "json"})})
 	if st.Ending != Succeeded {
 		return st
 	}
@@ -207,8 +218,8 @@ func (d *HelmDriver) Deploy(ctx context.Context) Result {
 	if !d.installed {
 		panic("deploy: Deploy called before a successful Install")
 	}
-	args := slices.Concat([]string{"upgrade", d.o.Helm.Release, d.cand.ref, "--reset-values"}, d.cl(),
-		[]string{"--timeout", d.o.Timeout.String()}, d.cand.values)
+	args := slices.Concat([]string{"upgrade", d.o.Helm.Release, d.candidate.ref, "--reset-values"}, d.cl(),
+		[]string{"--timeout", d.o.Timeout.String()}, d.candidate.values)
 	return d.run(ctx, "deploy", args...)
 }
 
@@ -229,8 +240,8 @@ func (d *HelmDriver) Transitions() []verdict.WindowName {
 
 // Releases are the previous and then the candidate release, as Fetch kept them.
 func (d *HelmDriver) Releases() []Release {
-	if !d.fetched {
+	if !d.ready {
 		return nil
 	}
-	return []Release{d.previous.release, d.cand.release}
+	return []Release{d.previous.release, d.candidate.release}
 }

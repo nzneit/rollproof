@@ -36,17 +36,19 @@ const (
 
 // Command is one command to start. Name labels it in the evidence, such as
 // install or deploy. Args are the program and its arguments, used with no
-// shell.
+// shell. MaxStdout is the most bytes of standard output that Result.Stdout
+// keeps; zero means the runner's default of 1 MiB.
 type Command struct {
-	Name    string
-	Args    []string
-	Timeout time.Duration
+	Name      string
+	Args      []string
+	Timeout   time.Duration
+	MaxStdout int
 }
 
 // Result is how one command went. Name is the Name of the command it is the
 // result of. ExitCode is -1 unless the command exited by itself. Stdout is
-// what it wrote to standard output, at most 1 MiB of it, for commands whose
-// answer the tool reads.
+// what it wrote to standard output, at most Command.MaxStdout bytes of it, or 1 MiB
+// when that is zero, for commands whose answer the tool reads.
 type Result struct {
 	Name         string
 	Ending       Ending
@@ -83,7 +85,7 @@ var killAfter = 10 * time.Second
 // exited: a process the child left behind may hold it open.
 var waitDelay = time.Second
 
-// stdoutCap is how much of a command's standard output Result keeps.
+// stdoutCap is how much standard output Result keeps when a command sets no MaxStdout.
 const stdoutCap = 1 << 20
 
 // helmActingVariables are the variables by which Helm would act on another cluster.
@@ -194,16 +196,17 @@ func (s *sink) finish(e Ending, code int) {
 	s.closed = true
 }
 
-// capture keeps the first stdoutCap bytes written to it.
+// capture keeps the first limit bytes written to it.
 type capture struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu    sync.Mutex
+	limit int
+	buf   bytes.Buffer
 }
 
 func (c *capture) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if room := stdoutCap - c.buf.Len(); room > 0 {
+	if room := c.limit - c.buf.Len(); room > 0 {
 		c.buf.Write(p[:min(room, len(p))])
 	}
 	return len(p), nil
@@ -380,7 +383,10 @@ func (r *OSRunner) Run(ctx context.Context, c Command) Result {
 		return res
 	}
 
-	out := &capture{}
+	out := &capture{limit: stdoutCap}
+	if c.MaxStdout > 0 {
+		out.limit = c.MaxStdout
+	}
 	cmd := exec.Command(c.Args[0], c.Args[1:]...)
 	cmd.Dir = r.dir
 	cmd.Env = r.env

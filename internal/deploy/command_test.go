@@ -599,3 +599,15 @@ func TestCloseWaitsForEvidenceHeldOutsideTheGroup(t *testing.T) {
 		t.Error("the evidence was not closed when Close returned")
 	}
 }
+
+func TestRunMaxStdout(t *testing.T) {
+	h := newHarness(t, os.Environ())
+	r := h.runner.Run(context.Background(), Command{Name: "max", MaxStdout: 2 << 20,
+		Args: []string{"sh", "-c", "head -c 3145728 /dev/zero"}})
+	if r.Ending != Succeeded {
+		t.Fatalf("ending %s", r.Ending)
+	}
+	if len(r.Stdout) != 2<<20 {
+		t.Errorf("Stdout holds %d bytes, want exactly 2 MiB", len(r.Stdout))
+	}
+}
