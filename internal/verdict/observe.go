@@ -34,7 +34,7 @@ func holder(t Timeline, p *placement, m time.Time) int {
 	return -1
 }
 
-// countObservations fills the counts of p.results (rules 1 to 5).
+// countObservations fills the counts of p.results (steps 1 to 5 of the observation rules).
 func countObservations(t Timeline, p *placement) {
 	for _, o := range t.Observations {
 		i := holder(t, p, o.T)
@@ -73,7 +73,7 @@ func countObservations(t Timeline, p *placement) {
 	}
 }
 
-// addFailures places a condition in each begun window that counted a failure (rule 6).
+// addFailures places a condition in each begun window that counted a failure (step 6 of the observation rules).
 func addFailures(t Timeline, p *placement) {
 	for i, w := range t.Windows {
 		r := p.results[i]
@@ -143,7 +143,7 @@ func silenceEnd(t Timeline, p *placement) time.Time {
 }
 
 // addSilence places a ProbeSilent condition in every begun window that a stretch without an
-// observation, longer than Silence, overlaps (rule 7).
+// observation, longer than Silence, overlaps (step 7 of the observation rules).
 func addSilence(t Timeline, p *placement, end time.Time) {
 	start := t.Windows[0].Start
 	var written []time.Time

@@ -192,6 +192,46 @@ func TestObserve(t *testing.T) {
 			Deploy: {Checks: 6003, Failed: 1, ByClass: map[string]int{"timeout": 1}, FirstFailure: at(14500 * msec), SlowestMs: 212, LagMs: 38},
 		},
 	}, {
+		name: "silence is measured on Written, not on T",
+		tl: timeline(70*sec, allThree(), passes(0, 21*sec),
+			func() []Observation {
+				var obs []Observation
+				for d := 21 * sec; d < 31*sec; d += sec {
+					obs = append(obs, Observation{Written: at(31 * sec), T: at(d), OK: true, N: 200, Ms: 30, Lag: 5})
+				}
+				return obs
+			}(), passes(31*sec, 70*sec)),
+		want:  summary{Verdict: NotVerified, Results: []Result{ResultPass, ResultNotVerified, NotJudged}, Reasons: []string{"deploy:probe-silent"}, Decided: ProbeSilent},
+		texts: map[string]string{"deploy:probe-silent": "no observation for 11.0 s, from 10:00:20.00"},
+	}, {
+		name: "after-finish is judged on T, not on Written",
+		tl:   timeline(70*sec, allThree(), passes(0, 70*sec), []Observation{failure(24*sec, 26*sec, "refused")}),
+		want: summary{Verdict: Fail, Results: []Result{ResultPass, ResultFail, NotJudged}, Reasons: []string{"deploy:probe-failures"}, Decided: ProbeFailures},
+		tallies: map[WindowName]tally{Deploy: {Checks: 6001, Failed: 1, AfterFinish: 0, ByClass: map[string]int{"refused": 1},
+			FirstFailure: at(24 * sec), SlowestMs: 30, LagMs: 5}},
+	}, {
+		name: "a failure written in the deploy crosses no later window",
+		tl:   timeline(70*sec, allThree(), passes(0, 70*sec), []Observation{failure(30*sec, 31*sec, "refused")}),
+		want: summary{Verdict: Fail, Results: []Result{ResultPass, ResultFail, NotJudged}, Reasons: []string{"deploy:probe-failures"}, Decided: ProbeFailures},
+		tallies: map[WindowName]tally{
+			Deploy:   {Checks: 6001, Failed: 1, AfterFinish: 1, ByClass: map[string]int{"refused": 1}, FirstFailure: at(30 * sec), SlowestMs: 30, LagMs: 5},
+			Rollback: {Checks: 6000, Crossed: 0, SlowestMs: 30, LagMs: 5},
+		},
+	}, {
+		name: "first failure is the earliest, whatever the order of the lines",
+		tl: timeline(70*sec, allThree(), passes(0, 70*sec),
+			[]Observation{failure(30*sec, 30*sec, "refused"), failure(20*sec, 20*sec, "refused")}),
+		want: summary{Verdict: Fail, Results: []Result{ResultPass, ResultFail, NotJudged}, Reasons: []string{"deploy:probe-failures"}, Decided: ProbeFailures},
+		tallies: map[WindowName]tally{Deploy: {Checks: 6002, Failed: 2, AfterFinish: 1, ByClass: map[string]int{"refused": 2},
+			FirstFailure: at(20 * sec), SlowestMs: 30, LagMs: 5}},
+	}, {
+		name: "an open deploy judged at a zero Now",
+		tl: Timeline{Windows: []Window{steady(), inProgress(deploy()), notBegun(Rollback)}, Silence: 5 * sec,
+			Observations: []Observation{failure(12*sec, 12*sec, "refused")}},
+		want:      summary{Verdict: NotVerified, Results: []Result{NotJudged, NotJudged, NotRun}, Reasons: []string{":internal-error"}, Decided: InternalError},
+		texts:     map[string]string{":internal-error": "the run was judged at a moment before the deploy window began"},
+		uncounted: 1,
+	}, {
 		name: "classes with equal counts, and a failure with no class, in a deploy that stalled",
 		tl: timeline(40*sec, []Window{steady(), stalled(deploy()), notBegun(Rollback)}, passes(0, 40*sec),
 			[]Observation{failure(26*sec, 26*sec, "503"), failure(27*sec, 27*sec, "")}),

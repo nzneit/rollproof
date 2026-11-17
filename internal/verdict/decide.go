@@ -172,6 +172,24 @@ func judge(t Timeline, p placement) Decision {
 		d.notJudgeBegun(t)
 		return d
 	}
+	// Judged at a moment before the open window began, the window has no span to hold the probe's
+	// lines, so nothing could be counted. That is the caller's mistake, and the run is not verified.
+	for i := len(t.Windows) - 1; i >= 0; i-- {
+		w := t.Windows[i]
+		if w.Start.IsZero() {
+			continue
+		}
+		if w.End.IsZero() && t.Now.Before(w.Start) {
+			d.Verdict = NotVerified
+			d.Reasons = []Reason{{
+				Code: InternalError, Verdict: NotVerified, Decided: true,
+				Text: "the run was judged at a moment before the " + string(w.Name) + " window began",
+			}}
+			d.notJudgeBegun(t)
+			return d
+		}
+		break
+	}
 	if len(p.before) > 0 {
 		d.Verdict = NotVerified
 		d.Reasons = reasonsOf("", p.before, NotVerified)
