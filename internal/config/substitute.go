@@ -60,7 +60,7 @@ func expand(s, path string, keep bool, images map[string]fileImage, env func(str
 			case v == "":
 				return "", "the variable " + name + " is empty"
 			}
-			if strings.HasSuffix(v, "$") && strings.HasPrefix(rest[end+1:], "{") {
+			if strings.HasSuffix(v, "$") && (strings.HasPrefix(rest[end+1:], "{") || strings.HasPrefix(rest[end+1:], "${")) {
 				return "", "the variable " + name + " ends in $ before {"
 			}
 			if keep {

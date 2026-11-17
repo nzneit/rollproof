@@ -297,6 +297,8 @@ func TestSubstituteRejectsAliasesAndTheRest(t *testing.T) {
 			"  namespace: orders\n", "  namespace: orders\n  *lit : x\n"), nil, "deploy."},
 		{"a variable that ends in $ before {", variant(t, base, "deploy:\n", "setup:\n  - [\"a${env.A}{b\"]\ndeploy:\n"),
 			map[string]string{"A": planted + "$"}, "the variable A ends in $ before {"},
+		{"a variable that ends in $ before an images form", withImage(t, variant(t, base, "deploy:\n", "setup:\n  - [\"${env.X}${images.orders.digest}\"]\ndeploy:\n")),
+			map[string]string{"X": "a$"}, "the variable X ends in $ before {"},
 		{"an image name that is not a name", withImage(t, withInline(t, base, `{ note: "${images.S3CRET-VALUE.digest}" }`)), nil, "values[0].note"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
