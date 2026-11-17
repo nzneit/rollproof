@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -194,8 +195,15 @@ func (c *fakeCluster) Facts() report.Cluster {
 // Kept gives the sentence for a kept cluster, and records nothing.
 func (c *fakeCluster) Kept() string { return c.kept }
 
-// EndCommands records "end-commands".
-func (c *fakeCluster) EndCommands() { c.w.calls.add("end-commands") }
+// EndCommands records "end-commands", runs its hook, and fails the test when a
+// command goroutine is still inside a command: the run must join them first.
+func (c *fakeCluster) EndCommands() {
+	c.w.calls.add("end-commands")
+	if n := c.w.deployer.busy(); n > 0 {
+		c.w.t.Errorf("EndCommands was called while %d command goroutines were still running", n)
+	}
+	c.w.hook("end-commands")
+}
 
 // Delete records "delete", runs its hook and returns the scripted error.
 func (c *fakeCluster) Delete(ctx context.Context) error {
@@ -210,7 +218,12 @@ type fakeDeployer struct {
 	fetchErr error
 	results  map[string]deploy.Result
 	releases []deploy.Release
+	block    map[string]chan struct{} // commands that wait before they return
+	busyN    atomic.Int32             // command goroutines inside a command now
 }
+
+// busy is the number of command goroutines that are inside a command now.
+func (d *fakeDeployer) busy() int { return int(d.busyN.Load()) }
 
 // Fetch records "fetch" and returns the scripted error.
 func (d *fakeDeployer) Fetch(ctx context.Context) error {
@@ -219,11 +232,17 @@ func (d *fakeDeployer) Fetch(ctx context.Context) error {
 	return d.fetchErr
 }
 
-// command records name, runs its hook and returns the scripted result, or a
-// success when it has none, with the times of the clock.
+// command records name, runs its hook, waits for the command's block when it has
+// one, and returns the scripted result, or a success when it has none, with the
+// times of the clock.
 func (d *fakeDeployer) command(ctx context.Context, name string) deploy.Result {
+	d.busyN.Add(1)
+	defer d.busyN.Add(-1)
 	d.w.calls.add(name)
 	d.w.hook(name)
+	if hold := d.block[name]; hold != nil {
+		<-hold
+	}
 	res, ok := d.results[name]
 	if !ok {
 		res = deploy.Result{Ending: deploy.Succeeded}
@@ -258,6 +277,9 @@ type fakeWatcher struct {
 	transitions        map[verdict.WindowName]watch.Transition
 	stopping, starting []watch.PodNote
 	podsAt             []time.Time // every moment PodsAt was asked about
+	// before, when set, runs at the start of Transition, before it waits for the
+	// command: a test's way to fail while the command is still running.
+	before func(verdict.WindowName)
 }
 
 // InstallReady waits until the install's command has exited or ctx ends, then
@@ -279,6 +301,9 @@ func (f *fakeWatcher) InstallReady(ctx context.Context, began time.Time, exited 
 // records "transition-" and the window's name and runs its hook. It gives the
 // scripted transition with its times filled.
 func (f *fakeWatcher) Transition(ctx context.Context, name verdict.WindowName, began time.Time, exited <-chan struct{}) watch.Transition {
+	if f.before != nil {
+		f.before(name)
+	}
 	f.wait(ctx, exited)
 	f.w.calls.add("transition-" + string(name))
 	f.w.hook("transition-" + string(name))

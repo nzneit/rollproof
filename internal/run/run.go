@@ -675,6 +675,10 @@ func (s *runState) cleanUp() {
 			s.signalAfterTheVerdict()
 		}
 	case s.cluster == nil:
+		// A run that never made a cluster still ends with the signal that came.
+		if s.parent.Err() != nil {
+			s.signalAfterTheVerdict()
+		}
 	case s.parent.Err() != nil:
 		s.signalAfterTheVerdict()
 	default:
@@ -918,6 +922,7 @@ func (s *runState) endCommands() {
 type reader struct {
 	events <-chan probe.Event
 	add    func(probe.Event)  // the step that puts one event into the timeline
+	onAsk  func()             // after a request is taken, before its drain: a test's seam
 	ask    chan chan struct{} // a reply channel: the reader drains, then closes it
 	stop   chan struct{}      // closed when the run ends
 	done   chan struct{}      // closed when the reader has returned
@@ -959,6 +964,9 @@ func (s *runState) read(r *reader) {
 			}
 			r.add(ev)
 		case reply := <-r.ask:
+			if r.onAsk != nil {
+				r.onAsk()
+			}
 			open := s.takeReady(r)
 			close(reply)
 			if !open {

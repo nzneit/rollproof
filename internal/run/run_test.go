@@ -522,6 +522,58 @@ func TestPanicInAUnit(t *testing.T) {
 	}
 }
 
+func TestEndCommandsRunsAfterTheCommandsAreJoined(t *testing.T) {
+	w := newWorld(t)
+	hold := make(chan struct{})
+	w.deployer.block = map[string]chan struct{}{"deploy": hold}
+	started := make(chan struct{})
+	w.hooks["deploy"] = func() { close(started) } // the command's goroutine is inside the command
+	w.watcher.before = func(name verdict.WindowName) {
+		if name == verdict.Deploy {
+			<-started // the command still runs when the watcher's panic begins
+			panic("the watcher broke")
+		}
+	}
+	// The panic leaves the deploy command's goroutine outstanding. The join must end it before
+	// EndCommands runs, so EndCommands is reached only once the test lets the command go; the
+	// fake fails the test when it is reached while a command still runs.
+	reached := make(chan struct{})
+	w.hooks["end-commands"] = func() { close(reached) }
+	ended := make(chan int, 1)
+	go func() { ended <- w.run(context.Background()) }()
+	select {
+	case <-reached:
+		// The calls are in the wrong order: EndCommands ran before the join.
+	case <-time.After(100 * time.Millisecond):
+		// The right order: the run is still waiting for the command.
+	}
+	close(hold)
+	select {
+	case <-ended:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the run did not finish after the command was let go")
+	}
+}
+
+func TestAPanicInEndCommandsIsAWarning(t *testing.T) {
+	w := newWorld(t)
+	w.hooks["end-commands"] = func() { panic("the runner broke") }
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0: a panic after the verdict changes nothing", code)
+	}
+	r := w.result()
+	if !r.Final || r.Verdict != "pass" {
+		t.Errorf("final %v, verdict %q; want a final pass", r.Final, r.Verdict)
+	}
+	want := []string{"the tool failed after the verdict was decided: the runner broke"}
+	if diff := cmp.Diff(want, r.Warnings); diff != "" {
+		t.Errorf("warnings (-want +got):\n%s", diff)
+	}
+	if n := w.calls.count("delete"); n != 1 {
+		t.Errorf("Delete called %d times, want 1", n)
+	}
+}
+
 func TestNoGoroutineOutlivesTheRun(t *testing.T) {
 	rows := []struct {
 		name   string
@@ -637,6 +689,13 @@ func TestResolveIsCalledOnce(t *testing.T) {
 	// fill it with the image's reference.
 	w.cfg.Probe.HTTP.URL = "http://orders.orders.svc/$${images.orders.digest}"
 	resolved := "http://orders.orders.svc/${images.orders.digest}"
+	w.hooks["deployer"] = func() {
+		// The deploy driver takes its settings from the configuration it is handed, so Resolve
+		// must have run before it is built.
+		if w.cfg.Probe.HTTP.URL != resolved {
+			t.Errorf("the URL is %q when the deployer is built, want %q", w.cfg.Probe.HTTP.URL, resolved)
+		}
+	}
 	w.hooks["fetch"] = func() {
 		// The deploy driver reads the configuration after Resolve, and never before it.
 		if w.cfg.Probe.HTTP.URL != resolved {
@@ -727,7 +786,16 @@ func TestSignalEndsTheSteadyWait(t *testing.T) {
 		done <- Run(ctx, Options{ConfigPath: filepath.Join(w.cfg.Dir, "rollproof.yaml"), Out: w.out,
 			Stdout: &w.stdout, Stderr: &w.stderr, Version: "test", Getenv: func(string) string { return "" }}, u)
 	}()
-	<-clk.at // the run is in the steady window's wait
+	select {
+	case <-clk.at: // the run is in the steady window's wait
+	case <-time.After(2 * time.Second):
+		clk.release <- t0
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		t.Fatal("the run never reached the steady window's wait")
+	}
 	cancel()
 	select {
 	case code := <-done:
@@ -817,10 +885,12 @@ func TestTheEventReaderHandsAPanicToTheMainFlow(t *testing.T) {
 		events := make(chan probe.Event, 1)
 		r := &reader{events: events, ask: make(chan chan struct{}),
 			stop: make(chan struct{}), done: make(chan struct{}),
-			add: func(probe.Event) { panic("the timeline broke") }}
+			add: func(probe.Event) { panic("the timeline broke") },
+			// The reader takes the request first, and only then meets the event that panics:
+			// it never closes the reply.
+			onAsk: func() { events <- probe.Event{} }}
 		s.reader = r
 		go s.read(r)
-		events <- probe.Event{} // waiting when the request arrives
 		caught := make(chan any, 1)
 		go func() {
 			defer func() { caught <- recover() }()
@@ -997,10 +1067,11 @@ func TestARefusedFinalKeepsTheVerdictsClass(t *testing.T) {
 				w.probe.events = append(w.probe.events, failureAt(20*time.Second, 20*time.Second))
 			}
 			w.hooks["probe-stop"] = func() {
-				if err := os.Chmod(w.out, 0o500); err != nil {
+				// Removing the folder after the first result.json refuses the final write for
+				// root as well, which a read-only folder does not.
+				if err := os.RemoveAll(w.out); err != nil {
 					t.Fatal(err)
 				}
-				t.Cleanup(func() { _ = os.Chmod(w.out, 0o700) })
 			}
 			if code := w.run(context.Background()); code != row.want {
 				t.Errorf("exit %d, want %d", code, row.want)
