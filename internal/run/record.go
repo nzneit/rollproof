@@ -2,6 +2,7 @@ package run
 
 import (
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -204,10 +205,18 @@ func probeRecord(f facts, h *config.HTTP, settings []report.Setting) report.Prob
 		Kind: "http", Target: "GET " + h.URL, Settings: settings, Headers: names,
 		Lines: f.probe.Lines, JSONLinesWithoutOK: f.probe.JSONTextLines,
 		// On http there is no certificate to check, so none is left unchecked.
-		CertificateChecked: !strings.HasPrefix(h.URL, "https:"),
+		CertificateChecked: certificateChecked(h.URL),
 		StoppedWhenAsked:   f.probe.StoppedWhenAsked || !f.probeStopped,
 		Notes:              f.target.Notes,
 	}
+}
+
+// certificateChecked says whether the probe checks a certificate. The scheme
+// is read as the parser reads it, which lowercases it, so HTTPS:// counts. A
+// URL that cannot be read counts as one whose certificate is not checked.
+func certificateChecked(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	return err == nil && u.Scheme != "https"
 }
 
 func imageRecords(f facts) []report.Image {

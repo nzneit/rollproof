@@ -208,8 +208,8 @@ func TestRecordFailureDetail(t *testing.T) {
 func TestRecordStallDetail(t *testing.T) {
 	f := sampleFacts(t)
 	incomplete := []string{
-		"deployment/orders: Waiting for deployment \"orders\" rollout to finish: 1 of 3 updated replicas are available...",
-		"orders-7f8e9d-k3m2p: Pending; not scheduled: Unschedulable, 0/4 nodes are available",
+		"deployment/orders: Waiting for deployment \"orders\" rollout to finish: 1 out of 3 new replicas have been updated...",
+		"pod orders-7f8e9d-k3m2p: phase Pending, not scheduled (Unschedulable: 0/4 nodes are available...)",
 	}
 	f.transitions[0].tr.Stalled = true
 	f.transitions[0].tr.Incomplete = incomplete
@@ -218,7 +218,7 @@ func TestRecordStallDetail(t *testing.T) {
 		{Code: verdict.TransitionStalled, Verdict: verdict.Fail, Window: verdict.Deploy,
 			Text: "did not finish within limits.timeout", Decided: true},
 		{Code: verdict.PodUnschedulable, Verdict: verdict.Fail, Window: verdict.Deploy,
-			Text: "orders-7f8e9d-k3m2p could not be scheduled"},
+			Text: "pod orders-7f8e9d-k3m2p could not be scheduled on the test cluster's 3 worker nodes (cluster.workers): 0/4 nodes are available...; a rolling update needs room for one more pod"},
 	}
 	got := record(f)
 	if diff := cmp.Diff(incomplete, got.Reasons[0].Detail); diff != "" {
@@ -249,10 +249,10 @@ func TestRecordReasonTextLines(t *testing.T) {
 			"nothing to watch",
 			[]string{"15 s after the install command returned, namespace orders held no Deployment, StatefulSet or DaemonSet that matches the selector app=order"}},
 		{"install failed, three lines", verdict.InstallFailed,
-			"the install was not ready within limits.timeout\ndeployment/orders: 0 of 2 updated replicas are available\norders-6d5f9c-x2k4q: Running; container orders waiting: CrashLoopBackOff, last ended with exit code 1",
+			"the install was not ready within limits.timeout\ndeployment/orders: Waiting for deployment \"orders\" rollout to finish: 0 out of 2 new replicas have been updated...\npod orders-6d5f9c-x2k4q: phase Running, container orders waiting (CrashLoopBackOff) and last ended (Error, exit code 1)",
 			"the install was not ready within limits.timeout",
-			[]string{"deployment/orders: 0 of 2 updated replicas are available",
-				"orders-6d5f9c-x2k4q: Running; container orders waiting: CrashLoopBackOff, last ended with exit code 1"}},
+			[]string{"deployment/orders: Waiting for deployment \"orders\" rollout to finish: 0 out of 2 new replicas have been updated...",
+				"pod orders-6d5f9c-x2k4q: phase Running, container orders waiting (CrashLoopBackOff) and last ended (Error, exit code 1)"}},
 		{"one line", verdict.ClusterFailed, "create the cluster: a node did not start",
 			"create the cluster: a node did not start", nil},
 	}
@@ -277,19 +277,21 @@ func TestRecordReasonTextLines(t *testing.T) {
 
 func TestRecordTransitions(t *testing.T) {
 	f := sampleFacts(t)
-	f.transitions[0].tr.SettleRestarts = []string{"pod orders-7f8e9d-z9y8x of deployment/orders created"}
+	f.transitions[0].tr.SettleRestarts = []string{"pod orders-7f8e9d-z9y8x of deployment/orders was created 12.3 s after the transition began"}
 	f.transitions[0].tr.Workloads = append(f.transitions[0].tr.Workloads, watch.Count{
 		Workload: watch.Workload{Kind: "deployment", Name: "orders-worker"}, AtStart: 1, Removed: true, Probed: "no"})
 	f.transitions[1].cmd = deploy.Result{Ending: deploy.ExitedNonZero, ExitCode: 1}
+	f.transitions[1].tr.Stalled = true
+	f.transitions[1].tr.Workloads[0].Added = true
 	want := []report.Transition{
-		{Name: "deploy", Command: "ok", SettleRestartedBy: []string{"pod orders-7f8e9d-z9y8x of deployment/orders created"},
+		{Name: "deploy", Command: "ok", SettleRestartedBy: []string{"pod orders-7f8e9d-z9y8x of deployment/orders was created 12.3 s after the transition began"},
 			Workloads: []report.Workload{
 				{Workload: "deployment/orders", PodsAtStart: 2, PodsReplaced: 2, PodsCreated: 2, Probed: "yes", QuickestStopMs: i64(5300)},
 				{Workload: "deployment/orders-worker", PodsAtStart: 1, Removed: true, Probed: "no"},
 			}},
-		{Name: "rollback", Command: "exit-nonzero",
+		{Name: "rollback", Stalled: true, Command: "exit-nonzero",
 			Workloads: []report.Workload{
-				{Workload: "deployment/orders", PodsAtStart: 2, PodsReplaced: 2, PodsCreated: 2, Probed: "yes", QuickestStopMs: i64(5200)},
+				{Workload: "deployment/orders", PodsAtStart: 2, PodsReplaced: 2, PodsCreated: 2, Added: true, Probed: "yes", QuickestStopMs: i64(5200)},
 			}},
 	}
 	if diff := cmp.Diff(want, record(f).Transitions, cmpopts.EquateEmpty()); diff != "" {
@@ -320,6 +322,16 @@ func TestRecordProbe(t *testing.T) {
 	f.cfg.Probe.HTTP.URL = "https://orders.orders.svc/work"
 	if record(f).Probes[0].CertificateChecked {
 		t.Error("certificate_checked is true for an https URL")
+	}
+	for _, u := range []string{"HTTPS://orders.orders.svc/work", "Https://orders.orders.svc/work", "https://orders.orders.svc/work", "ht\ttp://%zz"} {
+		f.cfg.Probe.HTTP.URL = u
+		if record(f).Probes[0].CertificateChecked {
+			t.Errorf("certificate_checked is true for the URL %q", u)
+		}
+	}
+	f.cfg.Probe.HTTP.URL = "HTTP://orders.orders.svc/work"
+	if !record(f).Probes[0].CertificateChecked {
+		t.Error("certificate_checked is false for an http URL")
 	}
 
 	f.decision.Windows = []verdict.WindowResult{
