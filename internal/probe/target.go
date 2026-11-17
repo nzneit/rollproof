@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -89,11 +90,20 @@ func CheckTarget(ctx context.Context, client kubernetes.Interface, rawURL string
 }
 
 // readHost reads a host that is not an address. name is empty when the host names no Service.
-// explicit is true when the host ends in .svc, so that a missing Service is an error.
+// explicit is true when the host ends in .svc or in the cluster's domain, so that a missing
+// Service is an error. A host with an empty label, or one in the cluster's domain of another
+// shape than NAME.NAMESPACE.svc or POD.NAME.NAMESPACE.svc, is an error.
 func readHost(host string) (name, namespace string, explicit bool, err error) {
-	h := strings.TrimSuffix(host, "."+clusterDomain)
-	if strings.HasSuffix(h, ".svc") {
-		labels := strings.Split(strings.TrimSuffix(h, ".svc"), ".")
+	if slices.Contains(strings.Split(host, "."), "") {
+		return "", "", true, unreadableHost()
+	}
+	h, inDomain := strings.CutSuffix(host, "."+clusterDomain)
+	if inDomain || strings.HasSuffix(h, ".svc") {
+		rest, isSvc := strings.CutSuffix(h, ".svc")
+		if !isSvc {
+			return "", "", true, unreadableHost()
+		}
+		labels := strings.Split(rest, ".")
 		switch len(labels) {
 		case 2:
 			return labels[0], labels[1], true, nil
@@ -101,7 +111,7 @@ func readHost(host string) (name, namespace string, explicit bool, err error) {
 			return "", "", true, unsupported("the host names one pod of a headless Service: pod %s of Service %s/%s; "+
 				"the probe would go on dialling the address of a pod that has been replaced", labels[0], labels[2], labels[1])
 		default:
-			return "", "", true, unsupported("the host ends in .svc but is not NAME.NAMESPACE.svc")
+			return "", "", true, unreadableHost()
 		}
 	}
 	switch labels := strings.Split(host, "."); len(labels) {
@@ -111,6 +121,13 @@ func readHost(host string) (name, namespace string, explicit bool, err error) {
 		return labels[0], labels[1], false, nil
 	}
 	return "", "", false, nil
+}
+
+// unreadableHost is the error of a host that ends in .svc or in the cluster's domain, or has an
+// empty label, and that is not NAME.NAMESPACE.svc or POD.NAME.NAMESPACE.svc.
+func unreadableHost() error {
+	return unsupported("the host cannot be read as a Service: it has an empty label, or it is in the cluster's domain " +
+		"and is not NAME.NAMESPACE.svc")
 }
 
 // unsupported returns a TargetUnsupported condition that ends with the ways out.

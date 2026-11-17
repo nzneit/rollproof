@@ -36,6 +36,8 @@ func TestCheckTarget(t *testing.T) {
 	const missing = "the host ends in .svc and no such Service exists: orders/orders; " + waysOut
 	const onePod = "the host names one pod of a headless Service: pod orders-0 of Service orders/orders; " +
 		"the probe would go on dialling the address of a pod that has been replaced; " + waysOut
+	const headlessText = "Service orders/orders is headless: a headless Service has no cluster address, and its name resolves to the addresses of pods, which change; " + waysOut
+	const unreadable = "the host cannot be read as a Service: it has an empty label, or it is in the cluster's domain and is not NAME.NAMESPACE.svc; " + waysOut
 	orders := &types.NamespacedName{Namespace: "orders", Name: "orders"}
 	withAddress := []runtime.Object{service("orders", "orders")}
 	headless := []runtime.Object{service("orders", "orders", func(s *corev1.Service) {
@@ -90,6 +92,32 @@ func TestCheckTarget(t *testing.T) {
 		{name: "an IPv6 address with a port", objs: withAddress, url: "http://[fd00::1]:8080"},
 		{name: "an outside name", objs: withAddress, url: "http://api.example.com"},
 		{name: "two labels that name no Service", url: "http://example.com"},
+		{name: "upper case, found", objs: withAddress, url: "http://ORDERS.Orders.SVC", service: orders},
+		{name: "upper case, no such Service", url: "http://ORDERS.Orders.SVC",
+			code: verdict.TargetUnsupported, text: missing},
+		{name: "upper case, headless", objs: headless, url: "http://ORDERS.Orders.SVC",
+			code: verdict.TargetUnsupported, text: headlessText},
+		{name: "trailing dot, found", objs: withAddress, url: "http://orders.orders.svc.", service: orders},
+		{name: "trailing dot, no such Service", url: "http://orders.orders.svc.",
+			code: verdict.TargetUnsupported, text: missing},
+		{name: "trailing dot, headless", objs: headless, url: "http://orders.orders.svc.",
+			code: verdict.TargetUnsupported, text: headlessText},
+		{name: "domain and trailing dot, found", objs: withAddress, url: "http://orders.orders.svc.cluster.local.", service: orders},
+		{name: "domain and trailing dot, no such Service", url: "http://orders.orders.svc.cluster.local.",
+			code: verdict.TargetUnsupported, text: missing},
+		{name: "domain and trailing dot, headless", objs: headless, url: "http://orders.orders.svc.cluster.local.",
+			code: verdict.TargetUnsupported, text: headlessText},
+		{name: "domain without .svc", objs: withAddress, url: "http://orders.orders.cluster.local",
+			code: verdict.TargetUnsupported, text: unreadable},
+		{name: "svc.cluster.local alone", objs: withAddress, url: "http://svc.cluster.local",
+			code: verdict.TargetUnsupported, text: unreadable},
+		{name: "empty label before svc", objs: withAddress, url: "http://orders..svc",
+			code: verdict.TargetUnsupported, text: unreadable},
+		{name: "empty first label", objs: withAddress, url: "http://.orders.orders.svc",
+			code: verdict.TargetUnsupported, text: unreadable},
+		{name: "empty middle label", objs: withAddress, url: "http://orders..orders.svc",
+			code: verdict.TargetUnsupported, text: unreadable},
+		{name: "a user part that looks like a host", objs: withAddress, url: "http://orders.orders.svc@evil.example/"},
 		{name: "https adds no note", objs: withAddress, url: "https://orders.orders.svc", service: orders},
 		{name: "affinity by client address", objs: affinity, url: "http://orders.orders.svc", service: orders,
 			notes: []string{oneClient}},
