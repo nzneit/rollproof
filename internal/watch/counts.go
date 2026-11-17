@@ -17,10 +17,14 @@ import (
 
 // Conditions returns what the transition gives the verdict: a stall, with a second condition when
 // a pod could not be scheduled; a workload the tool cannot judge; and, only when it finished and
-// its command succeeded, that it replaced no pod.
+// its command succeeded, that it replaced no pod. A Transition whose window has not ended, or
+// that ended without finishing (read while open, or cut short by its caller), is judged as a
+// stall: it gives TransitionStalled, PodUnschedulable when a pod could not be scheduled, and never
+// NoPodReplaced, so that such a Transition never passes.
 func (tr Transition) Conditions(commandSucceeded bool) []verdict.Condition {
+	stalled := tr.Stalled || tr.Finished.IsZero() || tr.Ended.IsZero()
 	var cs []verdict.Condition
-	if tr.Stalled {
+	if stalled {
 		text := "did not finish within limits.timeout"
 		if len(tr.SettleRestarts) > 0 {
 			text += "; the settle time started again: " + strings.Join(tr.SettleRestarts, "; ")
@@ -39,7 +43,7 @@ func (tr Transition) Conditions(commandSucceeded bool) []verdict.Condition {
 			return string(appsv1.OnDeleteStatefulSetStrategyType)
 		}))
 	}
-	if !tr.Finished.IsZero() && !tr.Stalled && commandSucceeded && !tr.Replaced {
+	if !stalled && commandSucceeded && !tr.Replaced {
 		cs = append(cs, verdict.Condition{Code: verdict.NoPodReplaced,
 			Text: "the transition finished and replaced no pod: it changed nothing the test can judge"})
 	}
@@ -153,6 +157,14 @@ func (t *Tracker) takingPart() []Workload {
 		}
 	}
 	return ws
+}
+
+// details fills s's Incomplete and Unschedulable from the records as they are now, for the
+// workloads that take part in the open transition, with the stopping times counted to at.
+func (t *Tracker) details(s *Transition, at time.Time) {
+	part := t.takingPart()
+	s.Incomplete = t.incomplete(part, at)
+	s.Unschedulable = t.unschedulable(part)
 }
 
 // incomplete returns, at the moment at, a sentence for each thing that keeps the workloads ws from

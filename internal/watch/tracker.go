@@ -232,8 +232,9 @@ func (t *Tracker) windowOpen() bool {
 // State returns the transition so far, and whether its window has ended: it finished and the
 // settle time then passed with no change, or it stalled. The Transition also has its counts for
 // every watched workload, whether it replaced pods, what is not complete at a stall, which pods
-// could not be scheduled, and which workloads update in a way the tool cannot judge. Every list
-// in it is a copy.
+// could not be scheduled, and which workloads update in a way the tool cannot judge. While the
+// window is open, what is not complete and which pods could not be scheduled are taken at now,
+// so that a caller that cuts the window short has them. Every list in it is a copy.
 func (t *Tracker) State(now time.Time) (Transition, bool) {
 	t.endIfDue(now)
 	tr := t.current()
@@ -243,12 +244,15 @@ func (t *Tracker) State(now time.Time) (Transition, bool) {
 	s := tr.t
 	if s.Ended.IsZero() {
 		s = t.summary(tr, now)
+		t.details(&s, now)
 	}
 	return s.copied(), !s.Ended.IsZero()
 }
 
 // endIfDue ends the open transition's window when its time has come by at: Settle after it
-// finished, or, when it has not finished, Timeout after it began, as a stall.
+// finished, or, when it has not finished, Timeout after it began, as a stall. It runs before the
+// change told at at is applied, so a change at the window's end or later belongs to no
+// transition.
 func (t *Tracker) endIfDue(at time.Time) {
 	if !t.windowOpen() {
 		return
@@ -265,18 +269,21 @@ func (t *Tracker) endIfDue(at time.Time) {
 	}
 }
 
-// endWindow ends the open transition's window at end, as a stall when stalled holds. It keeps
-// the transition's counts at end, which later changes of the records cannot alter, and, for a
-// stall, the details of what is not complete, from the records as they are now.
+// endWindow ends the open transition's window at end, as a stall when stalled holds. It keeps the
+// transition's counts and, for a stall, the details of what is not complete, from the records as
+// they are now; later changes of the records cannot alter them. When endIfDue ends the window,
+// the records hold every change told before end and none told at end, because the window is half
+// open. A pod created or gone exactly at end is then left out, although "at or before the bound"
+// would count it. That fails closed: it can only lower the counts, so no-pod-replaced is given
+// more often, not less. When a change in the settle time stalls the window, the records include
+// that change.
 func (t *Tracker) endWindow(end time.Time, stalled bool) {
 	tr := t.current()
 	tr.t.Ended = end
 	tr.t.Stalled = stalled
 	tr.t = t.summary(tr, end)
 	if stalled {
-		part := t.takingPart()
-		tr.t.Incomplete = t.incomplete(part, end)
-		tr.t.Unschedulable = t.unschedulable(part)
+		t.details(&tr.t, end)
 	}
 }
 

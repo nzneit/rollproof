@@ -953,14 +953,118 @@ func TestNoStallDetailsForAFinish(t *testing.T) {
 	}
 }
 
-// An open window that has not finished gives the verdict nothing yet.
-func TestConditionsOfAnOpenWindow(t *testing.T) {
-	s, ended := feed(options(), base(), []ev{set(1, inc), exited(2)}).State(at(3))
-	if ended {
-		t.Fatal("State(+3 s) has ended")
+// A Transition whose window has not ended, or that ended without finishing,
+// is judged as a stall (ruling T26-2): read while open, before it finishes or
+// in its settle time, or cut short by its caller before the timeout. Its
+// details are those of the moment State was asked.
+func TestConditionsOfAWindowThatDidNotEnd(t *testing.T) {
+	const notObserved = "deployment/orders: Waiting for deployment spec update to be observed..."
+	stalled := verdict.Condition{Code: verdict.TransitionStalled, Text: "did not finish within limits.timeout"}
+	pending := pod("orders-b-1", "b1", "ReplicaSet", "orders-b", false, false)
+	pending.Status.Phase = corev1.PodPending
+	pending.Status.Conditions = append(pending.Status.Conditions, corev1.PodCondition{Type: corev1.PodScheduled,
+		Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable, Message: "no room"})
+	oldA1 := pod("orders-a-1", "a1", "ReplicaSet", "orders-a", true, true)
+	for _, r := range []struct {
+		name          string
+		events        []ev
+		now           float64
+		cutShort      bool // the caller sets Ended to now, as a context that ended does
+		finished      bool // whether Finished is set at now
+		incomplete    []string
+		unschedulable []string
+		conditions    []verdict.Condition
+	}{
+		{name: "read while open, before it finishes",
+			events: []ev{set(1, inc), exited(2)}, now: 3,
+			incomplete: []string{notObserved},
+			conditions: []verdict.Condition{stalled}},
+		{name: "read while open, in its settle time, which gives no no-pod-replaced",
+			events: []ev{exited(2)}, now: 10, finished: true,
+			conditions: []verdict.Condition{stalled}},
+		{name: "cut short before the timeout",
+			events: []ev{set(1, inc), exited(2), set(10, oldA1), set(11, replicaSet("orders-b", "orders")),
+				set(12, pending)},
+			now: 50, cutShort: true,
+			incomplete: []string{notObserved,
+				"pod orders-b-1: phase Pending, not scheduled (Unschedulable: no room)",
+				"pod orders-a-1 has been stopping for 40.0 s and is not gone"},
+			unschedulable: []string{"pod orders-b-1 could not be scheduled on the test cluster's 3 worker nodes (cluster.workers): no room"},
+			conditions: []verdict.Condition{stalled, {Code: verdict.PodUnschedulable,
+				Text: "pod orders-b-1 could not be scheduled on the test cluster's 3 worker nodes (cluster.workers): no room" +
+					"; a rolling update needs room for one more pod"}}},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			s, ended := feed(options(), base(), r.events).State(at(r.now))
+			if ended || s.Stalled || s.Finished.IsZero() == r.finished {
+				t.Fatalf("State(+%v s): ended %v, stalled %v, finished %v; want open, not stalled, finished %v",
+					r.now, ended, s.Stalled, s.Finished, r.finished)
+			}
+			if r.cutShort {
+				s.Ended = at(r.now)
+			}
+			if diff := cmp.Diff(r.incomplete, s.Incomplete, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("Incomplete (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(r.unschedulable, s.Unschedulable, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("Unschedulable (-want +got):\n%s", diff)
+			}
+			for _, ok := range []bool{true, false} {
+				if diff := cmp.Diff(r.conditions, s.Conditions(ok)); diff != "" {
+					t.Errorf("Conditions(%v) (-want +got):\n%s", ok, diff)
+				}
+			}
+		})
 	}
-	if got := s.Conditions(true); len(got) != 0 {
-		t.Errorf("Conditions(true) of an open window = %v, want none", got)
+}
+
+// Pods of a workload the selector leaves out are not counted, so a deploy that
+// replaces only that workload's pods replaced no pod (review row for R1 and
+// R1b).
+func TestCountsLeaveOutUnwatchedPods(t *testing.T) {
+	o := options()
+	o.Selector = labels.SelectorFromSet(labels.Set{"app": "orders"})
+	redis := deployment("redis", 1, 1, 1, 1, 1, 1)
+	redis.Labels = map[string]string{"app": "redis"}
+	r1 := pod("redis-a-1", "r1", "ReplicaSet", "redis-a", true, false)
+	r1Stopping := pod("redis-a-1", "r1", "ReplicaSet", "redis-a", true, true)
+	before := append(base(), redis, replicaSet("redis-a", "redis"), r1)
+	s, ended := feed(o, before, []ev{
+		exited(1),
+		set(2, pod("redis-a-2", "r2", "ReplicaSet", "redis-a", true, false)),
+		set(3, r1Stopping),
+		gone(4, r1Stopping),
+	}).State(at(30))
+	if !ended || s.Stalled {
+		t.Fatalf("State(+30 s): ended %v, stalled %v; want ended and not stalled", ended, s.Stalled)
+	}
+	want := []Count{{Workload: orders, AtStart: 2}}
+	if diff := cmp.Diff(want, s.Workloads, cmpopts.EquateEmpty()); diff != "" {
+		t.Errorf("counts (-want +got):\n%s", diff)
+	}
+	noPod := []verdict.Condition{{Code: verdict.NoPodReplaced,
+		Text: "the transition finished and replaced no pod: it changed nothing the test can judge"}}
+	if diff := cmp.Diff(noPod, s.Conditions(true)); diff != "" {
+		t.Errorf("Conditions(true) (-want +got):\n%s", diff)
+	}
+}
+
+// A workload watched at the start that stops matching and then updates with
+// OnDelete is still listed: it stays watched (T25-2) (review row for R2).
+func TestUnsupportedAfterItStopsMatching(t *testing.T) {
+	o := options()
+	o.Selector = labels.SelectorFromSet(labels.Set{"app": "orders"})
+	web := statefulSet("web", 1, 1, 1, 1, 1, appsv1.RollingUpdateStatefulSetStrategyType)
+	web.Labels = map[string]string{"app": "orders"}
+	webOnDelete := statefulSet("web", 2, 2, 1, 1, 1, appsv1.OnDeleteStatefulSetStrategyType)
+	webOnDelete.Labels = map[string]string{"app": "other"}
+	s, ended := feed(o, append(base(), web), append([]ev{set(0.1, webOnDelete)}, rollingUpdate()...)).State(at(27.1))
+	if !ended || s.Stalled {
+		t.Fatalf("State(+27.1 s): ended %v, stalled %v; want ended and not stalled", ended, s.Stalled)
+	}
+	want := []Workload{{Kind: "statefulset", Name: "web"}}
+	if diff := cmp.Diff(want, s.Unsupported); diff != "" {
+		t.Errorf("Unsupported (-want +got):\n%s", diff)
 	}
 }
 
