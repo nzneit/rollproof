@@ -11,6 +11,8 @@ import (
 	"rollproof/internal/verdict"
 )
 
+const unknownEnding = "ended in a way the tool does not know"
+
 // ending says in words how a command that failed ended, for the end of a
 // sentence about it. ok is false for an ending that is no failure: success,
 // and a stop that a signal caused, which the run reports as interrupted.
@@ -29,8 +31,9 @@ func ending(r deploy.Result) (text string, ok bool) {
 	case deploy.StoppedAtLimit:
 		return "was still running at limits.timeout and the tool stopped it", true
 	}
-	// An ending that this build does not know is a failure, never a success.
-	return "ended in a way the tool does not know", true
+	// An ending that this build does not know is never a success; the callers
+	// give it internal-error, because it is the tool's own fault, not a fail.
+	return unknownEnding, true
 }
 
 // installCondition returns the condition an install's command gives, if any:
@@ -47,7 +50,11 @@ func installCondition(r deploy.Result) (verdict.Condition, bool) {
 	if r.Name != "" && r.Name != "install" {
 		subject = "the command " + r.Name + ", which follows the install,"
 	}
-	return verdict.Condition{Code: verdict.InstallFailed, Text: subject + " " + end}, true
+	code := verdict.InstallFailed
+	if end == unknownEnding {
+		code = verdict.InternalError
+	}
+	return verdict.Condition{Code: code, Text: subject + " " + end}, true
 }
 
 // commandCondition returns the condition a transition's command gives, if any:
@@ -60,8 +67,11 @@ func commandCondition(r deploy.Result) (verdict.Condition, bool) {
 		return verdict.Condition{}, false
 	}
 	code := verdict.CommandFailed
-	if r.Ending == deploy.StoppedAtLimit {
+	switch {
+	case r.Ending == deploy.StoppedAtLimit:
 		code = verdict.TransitionStalled
+	case end == unknownEnding:
+		code = verdict.InternalError
 	}
 	return verdict.Condition{Code: code, Text: "the command " + end}, true
 }

@@ -35,7 +35,7 @@ func TestInstallCondition(t *testing.T) {
 		{"a named command at the limit", deploy.Result{Name: "status-install", Ending: deploy.StoppedAtLimit, ExitCode: -1},
 			verdict.Condition{Code: verdict.InstallFailed, Text: "the command status-install, which follows the install, was still running at limits.timeout and the tool stopped it"}, true},
 		{"an ending the tool does not know", deploy.Result{Ending: deploy.Ending("vanished"), ExitCode: -1},
-			verdict.Condition{Code: verdict.InstallFailed, Text: "the install command ended in a way the tool does not know"}, true},
+			verdict.Condition{Code: verdict.InternalError, Text: "the install command ended in a way the tool does not know"}, true},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -63,7 +63,7 @@ func TestCommandCondition(t *testing.T) {
 		{"an answer the tool could not read", deploy.Result{Ending: deploy.ExitedNonZero, ExitCode: 0},
 			verdict.Condition{Code: verdict.CommandFailed, Text: "the command gave an answer the tool could not read"}, true},
 		{"an ending the tool does not know", deploy.Result{Ending: deploy.Ending("vanished"), ExitCode: -1},
-			verdict.Condition{Code: verdict.CommandFailed, Text: "the command ended in a way the tool does not know"}, true},
+			verdict.Condition{Code: verdict.InternalError, Text: "the command ended in a way the tool does not know"}, true},
 		{"not started", deploy.Result{Ending: deploy.NotStarted, ExitCode: -1},
 			verdict.Condition{Code: verdict.CommandFailed, Text: "the command could not be started"}, true},
 		{"stopped at the limit", deploy.Result{Ending: deploy.StoppedAtLimit, ExitCode: -1},
