@@ -115,6 +115,7 @@ func newProbe(t *testing.T, l *fakeLog, status corev1.PodStatus, drain, startTim
 		Drain: drain, StartTimeout: startTimeout, Raw: s.raw, Now: s.clock.Now,
 	})
 	s.pod.open = l.open
+	t.Cleanup(func() { s.pod.Stop(context.Background()) }) // a test that fails leaves no probe running
 	return s
 }
 
@@ -451,6 +452,24 @@ func TestStopBeforeStartAndTwice(t *testing.T) {
 	}
 }
 
+// untilFault reads events up to the first fault, for at most 2 s.
+func untilFault(t *testing.T, events <-chan Event) []Event {
+	t.Helper()
+	var read []Event
+	timeout := time.After(2 * time.Second)
+	for {
+		select {
+		case e := <-events:
+			read = append(read, e)
+			if e.Fault != nil {
+				return read
+			}
+		case <-timeout:
+			t.Fatalf("no fault in 2 s; read %+v", read)
+		}
+	}
+}
+
 // exits counts the probe-exited faults among events.
 func exits(events []Event) int {
 	n := 0
@@ -494,12 +513,7 @@ func TestStopReportsAnExitOnce(t *testing.T) {
 			s.setStatus(t, terminatedStatus(1, "Error", logAt(5000)))
 			var events []Event
 			if c.watcherSaw {
-				for e := range st.Events {
-					events = append(events, e)
-					if e.Fault != nil {
-						break
-					}
-				}
+				events = untilFault(t, st.Events)
 			}
 			if _, err := s.pod.Stop(context.Background()); err != nil {
 				t.Fatal(err)
@@ -646,13 +660,7 @@ func TestStopWhenThePodIsGone(t *testing.T) {
 	if err := s.client.CoreV1().Pods(cluster.ProbeNamespace).Delete(context.Background(), "probe", metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	var events []Event
-	for e := range st.Events {
-		events = append(events, e)
-		if e.Fault != nil {
-			break
-		}
-	}
+	events := untilFault(t, st.Events)
 	if _, err := s.pod.Stop(context.Background()); err != nil {
 		t.Errorf("Stop = %v, want no error", err)
 	}

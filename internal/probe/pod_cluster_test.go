@@ -136,7 +136,10 @@ read:
 	if err != nil {
 		t.Fatal(err)
 	}
-	for range st.Events {
+	for e := range st.Events {
+		if e.Fault != nil {
+			t.Errorf("fault in the drain: %v", *e.Fault)
+		}
 	}
 	if took := time.Since(began); took > o.Timeout+5*time.Second {
 		t.Errorf("Stop took %v, longer than the drain", took)
