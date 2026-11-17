@@ -39,7 +39,7 @@ Each row is filled from its record. A row whose record has several assumptions h
 
 ## The rule
 
-Part 3 starts when every row that names a task says `yes`. Two rows may say `not measured here` instead: point 12 on a machine that is not rootless, and point 8 with Docker, which waits for a hosted runner. Row 8 with nerdctl says `no`, and row 11 says `not measured here` for a reason that is not either of those two. Their consequences are in the next section.
+Part 3 starts when every row that names a task says `yes`. Three exceptions may say `not measured here` instead: point 12 on a machine that is not rootless; point 8 with Docker, which waits for a hosted runner; and row 11's second assumption, which Task 29's `TestFollowReopensWithoutLossOrRepeat` pins (ruling T9-2). Row 8 with nerdctl says `no`. Their consequences are in the next section.
 
 ## What changes
 
@@ -53,7 +53,7 @@ Part 3 starts on these decisions. This section waits for the maintainer's review
 
 ## What the proofs leave on the machine
 
-The proofs removed every cluster and container they made. Volumes were not checked by a listing. The records give a reason for none: `p08-kind-library` says that kind gives each node an anonymous volume at `/var`, deletes the nodes with `nerdctl rm -f -v`, and that no volume was created during its runs; and the proofs' registries run with `--tmpfs /var/lib/registry` (`proofs/internal/lab/lab.go`), so the engine makes no anonymous volume for the image's `VOLUME`. After the last proof, this command printed no name that starts with `rollproof-proof-`:
+The proofs removed every cluster and container they made. Where a record counted the volumes, the count was the same before and after: `nerdctl volume ls -q` listed 57 in `p01-registry-order`, in `p01b-mirror`, in `p05-helm-cli` and in `p11-log-rotation`, and `p01b-mirror` also records that its named volume existed during each run and was gone after it. `p12-keys` did not count them: its record states only that `nerdctl ps -a` listed no container before and after each run. `p08-kind-library` lists no count either, and records that no volume was created during its runs: kind gives each node an anonymous volume at `/var` and deletes the nodes with `nerdctl rm -f -v`; the proofs' registries also run with `--tmpfs /var/lib/registry` (`proofs/internal/lab/lab.go`), so the engine makes no anonymous volume for the image's `VOLUME`. After the last proof, this command printed no name that starts with `rollproof-proof-`:
 
     nerdctl ps -a --format "{{.Names}}"
 
