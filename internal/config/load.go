@@ -259,6 +259,7 @@ type entry struct {
 	path         string
 	line, column int
 	tag          string
+	value        string
 	keyLine      int
 	keyText      string
 	hasKey       bool
@@ -273,7 +274,7 @@ type index struct {
 func newIndex(root *yaml.Node) *index {
 	x := &index{byPath: map[string]int{}}
 	walk(root, "", func(path string, key, value *yaml.Node) {
-		e := entry{path: path, line: value.Line, column: value.Column, tag: value.ShortTag()}
+		e := entry{path: path, line: value.Line, column: value.Column, tag: value.ShortTag(), value: value.Value}
 		if key != nil {
 			e.hasKey, e.keyLine, e.keyText = true, key.Line, key.Value
 		}
@@ -353,11 +354,21 @@ func (x *index) decodeError(err error) error {
 		case goType == "string":
 			problem = "must be a single value"
 		}
-		best := -1
+		quoted, hasQuote := quotedText(rest, t[1])
+		best, bestAny := -1, -1
 		for i, e := range x.entries {
-			if e.line == line && e.tag == t[1] && (best < 0 || e.column < x.entries[best].column) {
+			if e.line != line || e.tag != t[1] {
+				continue
+			}
+			if bestAny < 0 || e.column < x.entries[bestAny].column {
+				bestAny = i
+			}
+			if hasQuote && matchesQuoted(e.value, quoted) && (best < 0 || e.column < x.entries[best].column) {
 				best = i
 			}
+		}
+		if best < 0 {
+			best = bestAny
 		}
 		if best >= 0 {
 			return x.reject(x.entries[best].path, problem)
@@ -519,4 +530,29 @@ func orDefault(d *duration, def time.Duration) time.Duration {
 		return def
 	}
 	return time.Duration(*d)
+}
+
+// quotedText returns the text that the decoder quoted between backticks after the tag in a
+// "cannot unmarshal" entry, and false when it quoted none (a map or a sequence). It is used only
+// to find the node, never written to a text.
+func quotedText(rest, tag string) (string, bool) {
+	start := strings.Index(rest, tag+" `")
+	end := strings.LastIndex(rest, "` into ")
+	if start < 0 || end < 0 {
+		return "", false
+	}
+	start += len(tag) + len(" `")
+	if end < start {
+		return "", false
+	}
+	return rest[start:end], true
+}
+
+// matchesQuoted says whether a node's value is what the decoder quoted: the whole value when it
+// has 10 bytes or fewer, otherwise its first 7 bytes and "...".
+func matchesQuoted(value, quoted string) bool {
+	if len(value) > 10 {
+		return quoted == value[:7]+"..."
+	}
+	return quoted == value
 }
