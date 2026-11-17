@@ -1,0 +1,15 @@
+# image.repository and image.digest are required; the schema rejects them empty.
+image:
+  repository: ""
+  digest: ""
+replicas: 2
+# readiness adds the readiness probe on /readyz.
+readiness: true
+startDelay: "0s"
+# shutdown is exit, drain-now or helper.
+shutdown: helper
+serveAfterTerm: "5s"
+drainDeadline: "10s"
+# spread forbids two pods on one node.
+spread: true
+gracePeriod: 30

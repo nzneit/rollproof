@@ -1,0 +1,178 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// client opens a new connection for every request, as the built-in probe does.
+var client = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: 5 * time.Second}
+
+func get(addr, path string) (int, string, error) {
+	resp, err := client.Get("http://" + addr + path)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body), err
+}
+
+// launch starts serve with env in a goroutine. stop stands for SIGTERM.
+func launch(t *testing.T, env map[string]string) (ready <-chan string, stop context.CancelFunc, done <-chan error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	r := make(chan string, 1)
+	errc := make(chan error, 1)
+	go func() { errc <- serve(ctx, func(k string) string { return env[k] }, r) }()
+	return r, cancel, errc
+}
+
+// listening waits until serve listens and returns its address.
+func listening(t *testing.T, ready <-chan string, done <-chan error) string {
+	t.Helper()
+	select {
+	case addr := <-ready:
+		return addr
+	case err := <-done:
+		t.Fatalf("serve returned before it listened: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not listen within 5 s")
+	}
+	return ""
+}
+
+func refused(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, time.Second)
+	if err == nil {
+		conn.Close()
+	}
+	return errors.Is(err, syscall.ECONNREFUSED)
+}
+
+func TestWorkAndReadyz(t *testing.T) {
+	version = "v-test"
+	ready, _, done := launch(t, map[string]string{"ADDR": "127.0.0.1:0", "SHUTDOWN": "drain-now"})
+	addr := listening(t, ready, done)
+	began := time.Now()
+	code, body, err := get(addr, "/work?ms=20")
+	if err != nil || code != 200 {
+		t.Fatalf("/work?ms=20: %d, %v; want 200", code, err)
+	}
+	if d := time.Since(began); d < 20*time.Millisecond {
+		t.Errorf("/work?ms=20 answered in %v, want 20 ms or more", d)
+	}
+	if !strings.Contains(body, "v-test") {
+		t.Errorf("the body %q does not hold the version", body)
+	}
+	if code, _, err := get(addr, "/readyz"); err != nil || code != 200 {
+		t.Errorf("/readyz: %d, %v; want 200", code, err)
+	}
+}
+
+func TestStartDelay(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	began := time.Now()
+	ready, _, done := launch(t, map[string]string{"ADDR": addr, "START_DELAY": "300ms", "SHUTDOWN": "drain-now"})
+	time.Sleep(100 * time.Millisecond)
+	if !refused(addr) {
+		t.Error("a dial 100 ms after the start was not refused")
+	}
+	listening(t, ready, done)
+	if d := time.Since(began); d < 300*time.Millisecond {
+		t.Errorf("it listened after %v, want 300 ms or more", d)
+	}
+	if code, _, err := get(addr, "/readyz"); err != nil || code != 200 {
+		t.Errorf("/readyz: %d, %v; want 200", code, err)
+	}
+}
+
+func TestHelperServesOnThenDrains(t *testing.T) {
+	ready, stop, done := launch(t, map[string]string{"ADDR": "127.0.0.1:0", "SHUTDOWN": "helper",
+		"SERVE_AFTER_TERM": "300ms", "DRAIN_DEADLINE": "2s"})
+	addr := listening(t, ready, done)
+	stop()
+	time.Sleep(100 * time.Millisecond)
+	if code, _, err := get(addr, "/work?ms=0"); err != nil || code != 200 {
+		t.Fatalf("a new request 100 ms after the stop: %d, %v; want 200", code, err)
+	}
+	inFlight := make(chan int, 1)
+	go func() {
+		code, _, _ := get(addr, "/work?ms=200") // still running when the 300 ms are over
+		inFlight <- code
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve did not return within 3 s of the stop")
+	}
+	if code := <-inFlight; code != 200 {
+		t.Errorf("the request in flight ended with %d, want 200", code)
+	}
+	if !refused(addr) {
+		t.Error("a dial after serve returned was not refused")
+	}
+}
+
+func TestDrainNow(t *testing.T) {
+	ready, stop, done := launch(t, map[string]string{"ADDR": "127.0.0.1:0", "SHUTDOWN": "drain-now",
+		"DRAIN_DEADLINE": "2s"})
+	addr := listening(t, ready, done)
+	inFlight := make(chan int, 1)
+	go func() {
+		code, _, _ := get(addr, "/work?ms=200")
+		inFlight <- code
+	}()
+	time.Sleep(50 * time.Millisecond)
+	stop()
+	time.Sleep(50 * time.Millisecond)
+	if !refused(addr) {
+		t.Error("a new connection right after the stop was not refused")
+	}
+	if code := <-inFlight; code != 200 {
+		t.Errorf("the request in flight ended with %d, want 200", code)
+	}
+	if err := <-done; err != nil {
+		t.Errorf("serve: %v", err)
+	}
+}
+
+func TestExitModeRegistersNoHandler(t *testing.T) {
+	if handlesTerm("exit") {
+		t.Error("handlesTerm(exit) is true")
+	}
+	if !handlesTerm("drain-now") || !handlesTerm("helper") {
+		t.Error("handlesTerm is false for drain-now or helper")
+	}
+}
+
+func TestBadSettings(t *testing.T) {
+	for _, env := range []map[string]string{
+		{"ADDR": "127.0.0.1:0", "SHUTDOWN": "linger"},
+		{"ADDR": "127.0.0.1:0", "SHUTDOWN": "helper", "START_DELAY": "soon"},
+		{"ADDR": "127.0.0.1:0", "SHUTDOWN": "helper", "DRAIN_DEADLINE": "10"},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := serve(ctx, func(k string) string { return env[k] }, nil)
+		cancel()
+		if err == nil {
+			t.Errorf("%v: serve returned nil, want an error", env)
+		}
+	}
+}

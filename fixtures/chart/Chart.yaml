@@ -1,0 +1,5 @@
+apiVersion: v2
+name: orders
+description: The fixture service of rollproof's own tests.
+type: application
+version: 0.1.0
