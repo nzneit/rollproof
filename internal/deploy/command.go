@@ -56,7 +56,8 @@ type Result struct {
 }
 
 // Runner starts one command and waits for it. When ctx ends, the command is
-// stopped and Run returns at once with StoppedBySignal.
+// stopped and Run returns at once, with StoppedAtLimit if the command's limit
+// had already fired and StoppedBySignal otherwise.
 type Runner interface {
 	Run(ctx context.Context, c Command) Result
 }
@@ -64,7 +65,8 @@ type Runner interface {
 // RunnerOptions is how every command of a run is started: its folder, the
 // test cluster's kubeconfig, the environment to start from, and where each
 // command's output is kept. Kubeconfig must be an absolute path: a command is
-// not started without one. When Dir is set, the command's PWD is Dir. Run
+// not started without one. When Dir is set, the command's PWD is the absolute
+// path of Dir, and a Dir that has none keeps the command from starting. Run
 // ignores the errors of the evidence: a failed Evidence call, nil writer or
 // failed write or close do not stop the command. A caller who needs them wraps
 // the writer that Evidence returns.
@@ -103,6 +105,7 @@ var helmActingVariables = map[string]bool{
 type OSRunner struct {
 	dir        string
 	kubeconfig string
+	dirErr     error
 	env        []string
 	removed    []string
 	evidence   func(name string) (io.WriteCloser, error)
@@ -116,12 +119,16 @@ type OSRunner struct {
 // gets KUBECONFIG set to o.Kubeconfig and none of the variables by which Helm
 // would act on another cluster.
 func NewRunner(o RunnerOptions) *OSRunner {
-	r := &OSRunner{dir: o.Dir, kubeconfig: o.Kubeconfig, evidence: o.Evidence, uses: map[string]int{}, pending: map[*pendingStop]struct{}{}}
+	abs, dirErr := o.Dir, error(nil)
+	if o.Dir != "" {
+		abs, dirErr = filepath.Abs(o.Dir)
+	}
+	r := &OSRunner{dirErr: dirErr, dir: o.Dir, kubeconfig: o.Kubeconfig, evidence: o.Evidence, uses: map[string]int{}, pending: map[*pendingStop]struct{}{}}
 	seen := map[string]bool{}
 	for _, entry := range o.Environ {
 		name, _, _ := strings.Cut(entry, "=")
 		switch {
-		case name == "KUBECONFIG", name == "PWD" && filepath.IsAbs(o.Dir):
+		case name == "KUBECONFIG", name == "PWD" && o.Dir != "" && dirErr == nil:
 		case helmActingVariables[name]:
 			if !seen[name] {
 				seen[name] = true
@@ -133,8 +140,8 @@ func NewRunner(o RunnerOptions) *OSRunner {
 	}
 	sort.Strings(r.removed)
 	r.env = append(r.env, "KUBECONFIG="+o.Kubeconfig)
-	if filepath.IsAbs(o.Dir) {
-		r.env = append(r.env, "PWD="+o.Dir)
+	if o.Dir != "" && dirErr == nil {
+		r.env = append(r.env, "PWD="+abs)
 	}
 	return r
 }
@@ -314,8 +321,10 @@ func (r *OSRunner) stop(pid int, kill, delay time.Duration, done <-chan struct{}
 
 // Close stops at once every command whose stop is still pending: it sends
 // SIGKILL to the command's group, waits until the group is gone and the
-// command's evidence is closed, then returns. Each wait is bounded by the wait
-// delay. A group whose command exited by itself is not touched. Call it once,
+// command's evidence is closed, then returns. Each wait is bounded by twice the
+// wait delay: the time for the SIGKILL to end the group, and then the time Go
+// waits for the output to close, which a process outside the group (one that
+// called setsid) may hold open. A group whose command exited by itself is not touched. Call it once,
 // after the last Run.
 func (r *OSRunner) Close() {
 	r.mu.Lock()
@@ -331,7 +340,7 @@ func (r *OSRunner) Close() {
 	for _, p := range ps {
 		select {
 		case <-p.gone:
-		case <-time.After(p.delay):
+		case <-time.After(2 * p.delay): // SIGKILL to the group gone, then Go's own WaitDelay
 		}
 	}
 }
@@ -360,6 +369,8 @@ func (r *OSRunner) Run(ctx context.Context, c Command) Result {
 		return notStarted(errors.New("no kubeconfig was given"))
 	case !filepath.IsAbs(r.kubeconfig):
 		return notStarted(errors.New("the kubeconfig path is not absolute"))
+	case r.dirErr != nil:
+		return notStarted(r.dirErr)
 	case len(c.Args) == 0:
 		return notStarted(errors.New("no program"))
 	}
