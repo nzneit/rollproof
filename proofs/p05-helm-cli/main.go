@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/kind/pkg/apis/config/v1alpha4"
+	"sigs.k8s.io/yaml"
 
 	"rollproof-proofs/internal/lab"
 )
@@ -247,14 +248,14 @@ func run() int {
 	}
 
 	// The run's folder: Helm's three homes, the values file, the packaged
-	// chart and the pulled one.
+	// chart, the pulled one, and the chart with a dependency.
 	tmp, err := os.MkdirTemp("", "rollproof-proof-p05-helm-")
 	if err != nil {
 		c.fail("a temporary folder for the run: %v", err)
 		return summary(ctx, c, version)
 	}
 	defer os.RemoveAll(tmp)
-	for _, d := range []string{"cache", "config", "data", "package", "pull"} {
+	for _, d := range []string{"cache", "config", "data", "package", "pull", "dependency"} {
 		if err := os.Mkdir(filepath.Join(tmp, d), 0o700); err != nil {
 			c.fail("creating %s: %v", filepath.Join(tmp, d), err)
 			return summary(ctx, c, version)
@@ -456,13 +457,61 @@ func checkPull(ctx context.Context, c *checks, h *helm, tmp, push string) {
 		"helm pull oci://PUSH/charts/p05 --version 0.1.0 --destination DIR --plain-http exits %d; DIR holds %q (want %s; read error: %v)", r.code, names, archive, err)
 
 	r = h.run(ctx, nil, "show", "chart", filepath.Join(dir, archive))
-	var lines []string
-	for line := range strings.Lines(r.stdout) {
-		lines = append(lines, strings.TrimSpace(line))
+	name, version, err := chartMeta(r.stdout)
+	c.expect(r.exited() && r.code == 0 && err == nil && name == "p05" && version == "0.1.0",
+		"helm show chart DIR/%s exits %d; its top-level name is %q and version %q (want p05 and 0.1.0; YAML error: %v)", archive, r.code, name, version, err)
+
+	// A chart with a dependency: its own version, not the dependency's.
+	// helm show chart reads Chart.yaml alone, so the dependency need not exist.
+	depDir := filepath.Join(tmp, "dependency")
+	if err := os.WriteFile(filepath.Join(depDir, "Chart.yaml"), []byte(depChart), 0o600); err != nil {
+		c.fail("writing TMP/dependency/Chart.yaml: %v", err)
+		return
 	}
-	hasName, hasVersion := slices.Contains(lines, "name: p05"), slices.Contains(lines, "version: 0.1.0")
-	c.expect(r.exited() && r.code == 0 && hasName && hasVersion,
-		"helm show chart DIR/%s exits %d; a line name: p05: %s; a line version: 0.1.0: %s", archive, r.code, yesNo(hasName), yesNo(hasVersion))
+	r = h.run(ctx, nil, "show", "chart", depDir)
+	name, version, err = chartMeta(r.stdout)
+	c.expect(r.exited() && r.code == 0 && err == nil && name == "p05dep" && version == "1.4.0",
+		"helm show chart TMP/dependency (one dependency, one maintainer) exits %d; its top-level name is %q and version %q (want p05dep and 1.4.0, not the dependency's 2.31.0; YAML error: %v)", r.code, name, version, err)
+	info("helm show chart TMP/dependency: the first line that starts with version: once its spaces are taken off is %q", firstTrimmed(r.stdout, "version:"))
+}
+
+// depChart is the Chart.yaml of a chart with one dependency and one
+// maintainer. helm show chart prints their nested name and version keys
+// before the chart's own.
+const depChart = `apiVersion: v2
+name: p05dep
+version: 1.4.0
+dependencies:
+  - name: common
+    version: 2.31.0
+    repository: oci://example.invalid/charts
+maintainers:
+  - name: someone
+`
+
+// chartMeta reads the top-level keys name and version of what helm show
+// chart printed, parsed as YAML. The nested keys of dependencies and
+// maintainers are not read.
+func chartMeta(out string) (name, version string, err error) {
+	var m struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if err := yaml.Unmarshal([]byte(out), &m); err != nil {
+		return "", "", err
+	}
+	return m.Name, m.Version, nil
+}
+
+// firstTrimmed returns the first line of out that starts with prefix once
+// its leading spaces are taken off, or "" when there is none.
+func firstTrimmed(out, prefix string) string {
+	for line := range strings.Lines(out) {
+		if t := strings.TrimSpace(line); strings.HasPrefix(t, prefix) {
+			return t
+		}
+	}
+	return ""
 }
 
 // checkFailure is check 6.
@@ -485,8 +534,10 @@ func checkOverrides(ctx context.Context, c *checks, h *helm) {
 		c.fail("with HELM_NAMESPACE=elsewhere, helm status did not run: %v", r.err)
 	case err == nil && s.Namespace == namespace:
 		info("with HELM_NAMESPACE=elsewhere, helm status exits %d and finds the release in namespace %s: the command line's --namespace wins", r.code, s.Namespace)
+	case r.code != 0 && strings.Contains(r.stderr, "release: not found"):
+		info("with HELM_NAMESPACE=elsewhere, helm status exits %d and says %s: HELM_NAMESPACE wins", r.code, firstLine(r.stderr))
 	default:
-		info("with HELM_NAMESPACE=elsewhere, helm status exits %d and does not find the release in %s (%v): HELM_NAMESPACE wins", r.code, namespace, err)
+		c.fail("with HELM_NAMESPACE=elsewhere, helm status neither finds the release in %s nor says release: not found (%v); not measured", namespace, err)
 	}
 
 	r = h.run(ctx, []string{"HELM_KUBEAPISERVER=https://127.0.0.1:1"}, append(h.with("status", release), "-o", "json")...)
