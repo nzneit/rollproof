@@ -45,14 +45,14 @@ func (t *Tracker) podWorkloadByUID(uid types.UID) (Workload, bool) {
 	return t.podWorkload(p)
 }
 
-// reading is one reading of the workloads behind the Service: nil when there is no Service or the
-// reading failed, which counts as no reading.
+// reading is one reading of the workloads behind the Service: nil when there is no Service, the
+// reading failed, or ctx had ended when it returned, which counts as no reading.
 func (w *Watcher) reading(ctx context.Context) map[Workload]bool {
 	if w.o.Service == nil {
 		return nil
 	}
 	found, err := w.behind(ctx)
-	if err != nil {
+	if err != nil || ctx.Err() != nil {
 		return nil
 	}
 	return found

@@ -80,9 +80,19 @@ type Tracker struct {
 	// transitions holds every transition so far, in the order they began, so that PodsAt can
 	// answer for a moment of any of them. The last is the open or last transition.
 	transitions []*transition
-	// missedOutside holds, in order, the moments Missed was told while no window was open, since
-	// the last Begin. Begin carries the first of them at or after its start into its transition.
-	missedOutside []time.Time
+	// missedOutside holds, in the order told, each stretch in which the watch may have missed
+	// changes that was told while no window was open, since the last Begin. Begin carries into its
+	// transition the first moment of them at or after its start.
+	missedOutside []blindStretch
+	// down holds, for each of the Watcher's watches of the cluster that is down, the moment it
+	// went down. A window whose end comes due while one is down may have missed changes.
+	down map[string]time.Time
+}
+
+// blindStretch is a stretch of time, from and until included, in which the watch of the cluster
+// may have missed changes.
+type blindStretch struct {
+	from, until time.Time
 }
 
 // workloadRecord is what the Tracker keeps of one Deployment, StatefulSet or DaemonSet.
@@ -142,6 +152,7 @@ func NewTracker(o TrackerOptions) *Tracker {
 		workloads: map[Workload]*workloadRecord{},
 		owners:    map[string]string{},
 		pods:      map[types.UID]*podRecord{},
+		down:      map[string]time.Time{},
 	}
 }
 
@@ -179,8 +190,8 @@ func (t *Tracker) Gone(obj runtime.Object, at time.Time) {
 }
 
 // Begin starts a transition at the given moment. The pods that exist then are the ones it may
-// replace. A moment that Missed was told, at or after the start and before Begin, is the
-// transition's Missed. One transition at a time.
+// replace. When the watch may have missed changes at or after the start, as told before Begin,
+// the first such moment is the transition's Missed. One transition at a time.
 func (t *Tracker) Begin(name verdict.WindowName, at time.Time) {
 	t.endIfDue(at)
 	if t.windowOpen() {
@@ -206,10 +217,12 @@ func (t *Tracker) Begin(name verdict.WindowName, at time.Time) {
 		}
 	}
 	var missed time.Time
-	for _, m := range t.missedOutside {
-		if !m.Before(at) {
+	for _, b := range t.missedOutside {
+		if b.until.Before(at) {
+			continue // the view was whole again before the start
+		}
+		if m := later(b.from, at); missed.IsZero() || m.Before(missed) {
 			missed = m
-			break
 		}
 	}
 	t.missedOutside = nil
@@ -238,15 +251,65 @@ func (t *Tracker) CommandExited(at time.Time) {
 // never changes.
 func (t *Tracker) Missed(at time.Time) {
 	t.endIfDue(at)
-	switch {
-	case t.windowOpen():
-		if t.current().t.Missed.IsZero() {
-			t.current().t.Missed = at
-		}
-	case len(t.missedOutside) == 0 || at.After(t.missedOutside[len(t.missedOutside)-1]):
-		// A list again tells one moment for each object it lists; equal moments add nothing.
-		t.missedOutside = append(t.missedOutside, at)
+	t.blind(at, at)
+}
+
+// watchDown tells the Tracker that the watch named source went down at the given moment: its
+// stream ended, or a call to list or watch failed. A window whose end comes due while it is down
+// may have missed changes from that moment on.
+func (t *Tracker) watchDown(source string, at time.Time) {
+	t.endIfDue(at)
+	if _, down := t.down[source]; !down {
+		t.down[source] = at
 	}
+}
+
+// watchBroke tells the Tracker that the watch named source broke: a change may have been missed
+// from the moment it went down, or from now when it was not down, until now. It stays down.
+func (t *Tracker) watchBroke(source string, at time.Time) {
+	t.endIfDue(at)
+	from, down := t.down[source]
+	if !down {
+		from = at
+		t.down[source] = at
+	}
+	t.blind(from, at)
+}
+
+// watchUp tells the Tracker that the watch named source is up again.
+func (t *Tracker) watchUp(source string, at time.Time) {
+	t.endIfDue(at)
+	delete(t.down, source)
+}
+
+// blind records that the watch may have missed changes from from to until, told at until: in the
+// open window from its first moment in the window, or, while no window is open, for the next
+// Begin.
+func (t *Tracker) blind(from, until time.Time) {
+	if t.windowOpen() {
+		t.noteMissed(later(from, t.current().t.Began))
+		return
+	}
+	b := blindStretch{from, until}
+	if n := len(t.missedOutside); n == 0 || t.missedOutside[n-1] != b {
+		// A list again tells one moment for each object it lists; equal stretches add nothing.
+		t.missedOutside = append(t.missedOutside, b)
+	}
+}
+
+// noteMissed makes m the open window's Missed when it is the first moment so far.
+func (t *Tracker) noteMissed(m time.Time) {
+	if tr := t.current(); tr.t.Missed.IsZero() || m.Before(tr.t.Missed) {
+		tr.t.Missed = m
+	}
+}
+
+// later returns the later of two moments.
+func later(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return b
+	}
+	return a
 }
 
 // current is the open or last transition, nil before the first Begin.
@@ -313,6 +376,13 @@ func (t *Tracker) endIfDue(at time.Time) {
 // that change.
 func (t *Tracker) endWindow(end time.Time, stalled bool) {
 	tr := t.current()
+	// A window whose end comes due while a watch is down may have missed changes from the moment
+	// it went down, or from the window's start.
+	for _, d := range t.down {
+		if !d.After(end) {
+			t.noteMissed(later(d, tr.t.Began))
+		}
+	}
 	tr.t.Ended = end
 	tr.t.Stalled = stalled
 	tr.t = t.summary(tr, end)

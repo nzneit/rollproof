@@ -23,13 +23,16 @@ import (
 // gives InternalError, "the transition was judged before its window ended", in place of the
 // stall, and never NoPodReplaced: such a Transition is not verified and never passes, and a
 // signal that cut the window short still decides it, because interrupted comes before
-// internal-error. A window in which the watch of the cluster missed changes gives an InternalError
-// of its own, with or without a stall, so that it is not verified and never passes.
+// internal-error. A window in which the watch of the cluster missed changes, at or before its end,
+// gives an InternalError of its own, so that it is not verified and never passes. A stall then
+// gives neither TransitionStalled nor PodUnschedulable: the view at the limit may have been stale,
+// and a change told late may have decided it.
 func (tr Transition) Conditions(commandSucceeded bool) []verdict.Condition {
 	finished := !tr.Stalled && !tr.Finished.IsZero() && !tr.Ended.IsZero()
+	missed := !tr.Missed.IsZero() && (tr.Ended.IsZero() || !tr.Missed.After(tr.Ended))
 	var cs []verdict.Condition
 	switch {
-	case tr.Stalled:
+	case tr.Stalled && !missed:
 		text := "did not finish within limits.timeout"
 		if len(tr.SettleRestarts) > 0 {
 			text += "; the settle time started again: " + strings.Join(tr.SettleRestarts, "; ")
@@ -39,11 +42,11 @@ func (tr Transition) Conditions(commandSucceeded bool) []verdict.Condition {
 			cs = append(cs, verdict.Condition{Code: verdict.PodUnschedulable,
 				Text: strings.Join(tr.Unschedulable, "; ") + "; a rolling update needs room for one more pod"})
 		}
-	case !finished:
+	case !tr.Stalled && !finished:
 		cs = append(cs, verdict.Condition{Code: verdict.InternalError,
 			Text: "the transition was judged before its window ended"})
 	}
-	if !tr.Missed.IsZero() {
+	if missed {
 		cs = append(cs, verdict.Condition{Code: verdict.InternalError,
 			Text: fmt.Sprintf("the watch of the cluster missed changes %.1f s after the transition began",
 				tr.Missed.Sub(tr.Began).Seconds())})

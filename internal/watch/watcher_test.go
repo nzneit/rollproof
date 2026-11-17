@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8swatch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
+	discoveryv1client "k8s.io/client-go/kubernetes/typed/discovery/v1"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 
@@ -769,4 +770,209 @@ func TestAListAgainIsMissed(t *testing.T) {
 	expiring.Error(&metav1.Status{Status: metav1.StatusFailure, Code: 410, Reason: metav1.StatusReasonExpired,
 		Message: "too old resource version"})
 	until(t, w, clock, func(s Transition) bool { return s.Missed.Equal(at(2)) })
+}
+
+// A first Probed reading that hangs does not hold the command's exit back
+// (T27-3): the command exits at +1 s while the reading hangs, and the
+// transition finishes at +1 s, not as a stall at the limit. The reading
+// returns only after the window ended, so it counts as not made: orders, behind
+// the Service then, is not probed by the second reading, which finds no
+// endpoint.
+func TestAHeldReadingHoldsNothing(t *testing.T) {
+	service := &types.NamespacedName{Namespace: "orders", Name: "orders"}
+	w, client, clock := startWatcher(t, service, base()...)
+	release := make(chan struct{})
+	var once sync.Once
+	free := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(free)
+	behind := discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders-x7k2p", Namespace: "orders",
+			Labels: map[string]string{discoveryv1.LabelServiceName: "orders"}},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"10.244.1.5"},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "orders", Name: "orders-a-1", UID: "a1"}}},
+	}
+	var lists atomic.Int32
+	client.PrependReactor("list", "endpointslices", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if lists.Add(1) == 1 {
+			<-release
+			return true, &discoveryv1.EndpointSliceList{Items: []discoveryv1.EndpointSlice{behind}}, nil
+		}
+		return true, &discoveryv1.EndpointSliceList{}, nil
+	})
+	exited := make(chan struct{})
+	res := make(chan Transition, 1)
+	go func() { res <- w.Transition(t.Context(), verdict.Deploy, clock.Now(), exited) }()
+	for deadline := time.Now().Add(5 * time.Second); lists.Load() < 1; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("no reading")
+		}
+	}
+	clock.Advance(time.Second)
+	close(exited) // the command exits at +1 s
+	until(t, w, clock, func(s Transition) bool { return s.Finished.Equal(at(1)) })
+	clock.Advance(300 * time.Second)
+	free()
+	tr := receive(t, res)
+	if tr.Stalled || !tr.Finished.Equal(at(1)) || !tr.Ended.Equal(at(16)) {
+		t.Errorf("stalled %v, finished %v, ended %v; want finished at +1 s and ended at +16 s",
+			tr.Stalled, tr.Finished, tr.Ended)
+	}
+	if len(tr.Workloads) != 1 || tr.Workloads[0].Probed != "no" {
+		t.Errorf("counts %+v; want orders probed no, from the second reading alone", tr.Workloads)
+	}
+}
+
+// hangingClient is the fake client whose EndpointSlice lists return only when
+// their ctx ends, as a real client's do when the API server does not answer.
+type hangingClient struct{ *fake.Clientset }
+
+func (c hangingClient) DiscoveryV1() discoveryv1client.DiscoveryV1Interface {
+	return hangingDiscovery{c.Clientset.DiscoveryV1()}
+}
+
+type hangingDiscovery struct {
+	discoveryv1client.DiscoveryV1Interface
+}
+
+func (d hangingDiscovery) EndpointSlices(namespace string) discoveryv1client.EndpointSliceInterface {
+	return hangingSlices{d.DiscoveryV1Interface.EndpointSlices(namespace)}
+}
+
+type hangingSlices struct {
+	discoveryv1client.EndpointSliceInterface
+}
+
+func (hangingSlices) List(ctx context.Context, _ metav1.ListOptions) (*discoveryv1.EndpointSliceList, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// Readings that hang end with the window (T27-3): the first when the window
+// ends, the last one settle time after it. Transition returns, and neither
+// counts.
+func TestReadingsEndWithTheWindow(t *testing.T) {
+	client := fake.NewClientset(base()...)
+	var watches atomic.Int32
+	client.PrependWatchReactor("*", func(k8stesting.Action) (bool, k8swatch.Interface, error) {
+		watches.Add(1)
+		return false, nil, nil
+	})
+	clock := &fakeClock{now: t0}
+	w, err := Start(t.Context(), hangingClient{client}, Options{Namespace: "orders", Settle: 300 * time.Millisecond,
+		Timeout: 300 * time.Second, Workers: 3, Service: &types.NamespacedName{Namespace: "orders", Name: "orders"},
+		Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(w.Stop)
+	waitFor(t, &watches, 5, "watches")
+	res := make(chan Transition, 1)
+	go func() { res <- w.Transition(t.Context(), verdict.Deploy, clock.Now(), closed()) }()
+	tr := drive(t, clock, res)
+	if len(tr.Workloads) != 1 || tr.Workloads[0].Probed != "not known" {
+		t.Errorf("counts %+v; want orders probed not known", tr.Workloads)
+	}
+}
+
+// CommandExited is told when exited closes, at the clock's time then: a
+// rollout complete at +1 s whose command exits at +40 s finishes at +40 s,
+// and its window ends at +55 s, one settle time later.
+func TestTheExitIsToldWhenItComes(t *testing.T) {
+	w, client, clock := startWatcher(t, nil, base()...)
+	exited := make(chan struct{})
+	res := make(chan Transition, 1)
+	go func() { res <- w.Transition(t.Context(), verdict.Deploy, clock.Now(), exited) }()
+	until(t, w, clock, func(s Transition) bool { return s.Name == verdict.Deploy })
+	clock.Advance(time.Second)
+	update(t, client, deployment("orders", 2, 2, 2, 2, 2, 2)) // complete at +1 s
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		w.mu.Lock()
+		generation := w.tr.workloads[orders].generation
+		w.mu.Unlock()
+		if generation == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the Deployment's new generation was not told")
+		}
+	}
+	clock.Advance(39 * time.Second)
+	close(exited) // the command exits at +40 s
+	until(t, w, clock, func(s Transition) bool { return !s.Finished.IsZero() })
+	tr := drive(t, clock, res)
+	if !tr.Finished.Equal(at(40)) || !tr.Ended.Equal(at(55)) {
+		t.Errorf("finished %v, ended %v; want finished at +40 s and ended at +55 s", tr.Finished, tr.Ended)
+	}
+}
+
+// Only the watched namespace is watched: a complete Deployment with its pods
+// in kube-system is not.
+func TestOnlyTheNamespaceIsWatched(t *testing.T) {
+	others := []runtime.Object{deployment("coredns", 1, 1, 1, 1, 1, 1), replicaSet("coredns-a", "coredns"),
+		pod("coredns-a-1", "c1", "ReplicaSet", "coredns-a", true, false)}
+	for _, o := range others {
+		o.(metav1.Object).SetNamespace("kube-system")
+	}
+	t.Run("a transition lists deployment/orders alone", func(t *testing.T) {
+		w, _, clock := startWatcher(t, nil, append(base(), others...)...)
+		res := make(chan Transition, 1)
+		go func() { res <- w.Transition(t.Context(), verdict.Deploy, clock.Now(), closed()) }()
+		tr := drive(t, clock, res)
+		if len(tr.Workloads) != 1 || tr.Workloads[0].Workload != orders {
+			t.Errorf("workloads %+v; want deployment/orders alone", tr.Workloads)
+		}
+	})
+	t.Run("nothing in the namespace is nothing to watch", func(t *testing.T) {
+		w, _, clock := startWatcher(t, nil, others...)
+		res := make(chan error, 1)
+		go func() {
+			_, err := w.InstallReady(t.Context(), t0, closed())
+			res <- err
+		}()
+		var c verdict.Condition
+		if err := drive(t, clock, res); !errors.As(err, &c) || c.Code != verdict.NothingWatched {
+			t.Errorf("err = %v, want nothing-watched", err)
+		}
+	})
+}
+
+// A last reading that returns after its bound, settle time after the window,
+// counts for nothing, even from a client that returns then with no error.
+func TestALateLastReadingCountsForNothing(t *testing.T) {
+	behind := discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders-x7k2p", Namespace: "orders",
+			Labels: map[string]string{discoveryv1.LabelServiceName: "orders"}},
+		AddressType: discoveryv1.AddressTypeIPv4,
+		Endpoints: []discoveryv1.Endpoint{{Addresses: []string{"10.244.1.5"},
+			TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "orders", Name: "orders-a-1", UID: "a1"}}},
+	}
+	client := fake.NewClientset(base()...)
+	var watches, lists atomic.Int32
+	client.PrependWatchReactor("*", func(k8stesting.Action) (bool, k8swatch.Interface, error) {
+		watches.Add(1)
+		return false, nil, nil
+	})
+	client.PrependReactor("list", "endpointslices", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if lists.Add(1) == 1 {
+			return true, &discoveryv1.EndpointSliceList{}, nil
+		}
+		time.Sleep(600 * time.Millisecond) // past the bound of 300 ms
+		return true, &discoveryv1.EndpointSliceList{Items: []discoveryv1.EndpointSlice{behind}}, nil
+	})
+	clock := &fakeClock{now: t0}
+	w, err := Start(t.Context(), client, Options{Namespace: "orders", Settle: 300 * time.Millisecond,
+		Timeout: 300 * time.Second, Workers: 3, Service: &types.NamespacedName{Namespace: "orders", Name: "orders"},
+		Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(w.Stop)
+	waitFor(t, &watches, 5, "watches")
+	res := make(chan Transition, 1)
+	go func() { res <- w.Transition(t.Context(), verdict.Deploy, clock.Now(), closed()) }()
+	tr := drive(t, clock, res)
+	if len(tr.Workloads) != 1 || tr.Workloads[0].Probed != "no" {
+		t.Errorf("counts %+v; want orders probed no, from the first reading alone", tr.Workloads)
+	}
 }

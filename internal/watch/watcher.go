@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -48,6 +49,11 @@ type Watcher struct {
 	// gone, so that a deletion whose final state the informer does not know is still told.
 	last map[objectKey]runtime.Object
 
+	// conns holds each informer's connection, by kind.
+	conns map[string]*connection
+	// streams counts the watch streams whose events are still passed on.
+	streams atomic.Int32
+
 	// wake holds a signal when tr has been told a change since InstallReady or Transition last
 	// looked; one signal stands for any number of changes.
 	wake     chan struct{}
@@ -72,35 +78,34 @@ func Start(ctx context.Context, client kubernetes.Interface, o Options) (*Watche
 	w := &Watcher{
 		o:      o,
 		client: client,
-		factory: informers.NewSharedInformerFactoryWithOptions(client, 0,
-			informers.WithNamespace(o.Namespace)),
+		// The factory starts and stops the informers. Each informer lists and watches the
+		// namespace through a connection of the Watcher, which sees when its watch breaks.
+		factory: informers.NewSharedInformerFactoryWithOptions(client, 0),
 		tr: NewTracker(TrackerOptions{Namespace: o.Namespace, Selector: selector,
 			Settle: o.Settle, Timeout: o.Timeout, Workers: o.Workers}),
-		last: map[objectKey]runtime.Object{},
-		wake: make(chan struct{}, 1),
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
+		last:  map[objectKey]runtime.Object{},
+		conns: map[string]*connection{},
+		wake:  make(chan struct{}, 1),
+		stop:  make(chan struct{}),
+		done:  make(chan struct{}),
 	}
-	f := w.factory
 	var synced []cache.InformerSynced
-	for _, i := range []struct {
-		kind     string
-		informer cache.SharedIndexInformer
-	}{
-		{"Deployment", f.Apps().V1().Deployments().Informer()},
-		{"StatefulSet", f.Apps().V1().StatefulSets().Informer()},
-		{"DaemonSet", f.Apps().V1().DaemonSets().Informer()},
-		{"ReplicaSet", f.Apps().V1().ReplicaSets().Informer()},
-		{"Pod", f.Core().V1().Pods().Informer()},
-	} {
-		reg, err := i.informer.AddEventHandler(handler{w: w, kind: i.kind})
+	for _, c := range w.connections() {
+		w.conns[c.kind] = c
+		informer := w.factory.InformerFor(c.example, func(client kubernetes.Interface, resync time.Duration) cache.SharedIndexInformer {
+			lw := cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
+				ListWithContextFunc: c.List, WatchFuncWithContext: c.Watch}, client)
+			return cache.NewSharedIndexInformerWithOptions(lw, c.example,
+				cache.SharedIndexInformerOptions{ResyncPeriod: resync})
+		})
+		reg, err := informer.AddEventHandler(handler{w: w, kind: c.kind})
 		if err != nil {
 			w.Stop()
-			return nil, fmt.Errorf("follow the %ss: %w", i.kind, err)
+			return nil, fmt.Errorf("follow the %ss: %w", c.kind, err)
 		}
 		synced = append(synced, reg.HasSynced)
 	}
-	f.Start(w.stop)
+	w.factory.Start(w.stop)
 
 	// A registration has synced when its handler has been told every object of the first list.
 	ended := make(chan struct{})
@@ -159,12 +164,33 @@ func (w *Watcher) Transition(ctx context.Context, name verdict.WindowName, began
 	w.mu.Lock()
 	w.tr.Begin(name, began)
 	w.mu.Unlock()
-	first := w.reading(ctx)
+
+	// The readings of the Service's endpoints stay off the path that tells the Tracker anything,
+	// so that a slow one cannot delay the command's exit. The first runs beside follow until the
+	// window ends; one that has not returned by then counts as not made.
+	firstCtx, endFirst := context.WithCancel(ctx)
+	defer endFirst()
+	firstRead := make(chan map[Workload]bool, 1)
+	go func() {
+		r := w.reading(firstCtx)
+		w.mu.Lock()
+		if w.tr.windowEnded(w.o.Now()) {
+			r = nil // it returned after the window's end, before follow saw the end
+		}
+		w.mu.Unlock()
+		firstRead <- r
+	}()
 	s, ended := w.follow(ctx, exited)
+	endFirst()
+	first := <-firstRead
 	if !ended || ctx.Err() != nil {
 		return withProbed(s, first)
 	}
-	return withProbed(s, first, w.reading(ctx))
+	// The last reading is bounded by the settle time; one that has not returned by then counts as
+	// not made.
+	lastCtx, endLast := context.WithTimeout(ctx, w.o.Settle)
+	defer endLast()
+	return withProbed(s, first, w.reading(lastCtx))
 }
 
 // follow waits until the open transition's window has ended, and tells the Tracker when the

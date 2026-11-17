@@ -1333,15 +1333,14 @@ func decided(s Transition) (verdict.Verdict, verdict.Code) {
 // The watch of the cluster missed changes (T27-1, widened). The first moment
 // at or after the transition's start is its Missed, also when it is told
 // before Begin; a moment before the start, after the window ended, or at its
-// end, is not. Conditions gives an InternalError of its own for it, beside a
-// stall's fail codes, so a stall still fails and a finished window is not
-// verified.
+// end, is not. Conditions gives an InternalError of its own for it, in place
+// of a stall's fail codes (T27-1 amended), so neither a stall nor a finished
+// window with a break in it fails or passes: it is not verified.
 func TestMissed(t *testing.T) {
 	missed := func(s float64) verdict.Condition {
 		return verdict.Condition{Code: verdict.InternalError,
 			Text: fmt.Sprintf("the watch of the cluster missed changes %.1f s after the transition began", s)}
 	}
-	stall := verdict.Condition{Code: verdict.TransitionStalled, Text: "did not finish within limits.timeout"}
 	for _, r := range []struct {
 		name    string
 		tr      func() *Tracker
@@ -1399,11 +1398,28 @@ func TestMissed(t *testing.T) {
 			tr.Missed(at(27.1))
 			return tr
 		}, time.Time{}, nil, verdict.Pass, ""},
+		// Ruling T27-1 amended: with a break in the window, the view at the
+		// limit may be stale, so a stall gives no fail code. The value before
+		// the amendment was [transition-stalled, the missed InternalError], fail.
 		{"in a stall", func() *Tracker {
 			tr := feed(options(), base(), []ev{set(1, inc), exited(2)})
 			tr.Missed(at(3))
 			return tr
-		}, at(3), []verdict.Condition{stall, missed(3)}, verdict.Fail, verdict.TransitionStalled},
+		}, at(3), []verdict.Condition{missed(3)}, verdict.NotVerified, verdict.InternalError},
+		// The review's case: the settle time runs past the limit, and the list
+		// after a break tells a pod deleted, and its replacement, after it.
+		{"a stall decided by a change that a list again told past the limit", func() *Tracker {
+			var events []ev
+			for _, e := range rollingUpdate() {
+				e.s += 278
+				events = append(events, e)
+			}
+			tr := feed(options(), base(), events)
+			tr.Missed(at(301))
+			tr.Gone(pod("orders-b-1", "b1", "ReplicaSet", "orders-b", true, false), at(301))
+			tr.Set(pod("orders-b-3", "b3", "ReplicaSet", "orders-b", true, false), at(301))
+			return tr
+		}, at(301), []verdict.Condition{missed(301)}, verdict.NotVerified, verdict.InternalError},
 	} {
 		t.Run(r.name, func(t *testing.T) {
 			s, ended := r.tr().State(at(400))
@@ -1451,6 +1467,99 @@ func TestMissedAfterAWindowEnded(t *testing.T) {
 			rollback, ended := tr.State(at(60))
 			if !ended || !rollback.Missed.Equal(r.want) {
 				t.Errorf("rollback: ended %v, Missed %v; want ended, Missed %v", ended, rollback.Missed, r.want)
+			}
+		})
+	}
+}
+
+// What the Tracker makes of the Watcher's watches going down, breaking and
+// coming up again (T27-2). A window whose end comes due while a watch is down
+// missed changes from the moment it went down, or from the window's start. A
+// break missed changes from the moment its watch went down until it was told:
+// in the open window, or, told before Begin, in the next window when the
+// stretch reaches its start. A watch down and up again with no break is a
+// renewal.
+func TestWatchDown(t *testing.T) {
+	before := func() *Tracker {
+		tr := NewTracker(options())
+		for _, obj := range base() {
+			tr.Set(obj, at(-3))
+		}
+		return tr
+	}
+	for _, r := range []struct {
+		name   string
+		tr     func() *Tracker
+		missed time.Time
+	}{
+		{"down in the settle time, at the window's end", func() *Tracker {
+			tr := feed(options(), base(), rollingUpdate())
+			tr.watchDown("Pod", at(20))
+			return tr
+		}, at(20)},
+		{"down and up again before the window's end", func() *Tracker {
+			tr := feed(options(), base(), rollingUpdate())
+			tr.watchDown("Pod", at(20))
+			tr.watchUp("Pod", at(21))
+			return tr
+		}, time.Time{}},
+		{"down at the window's end, which belongs to no window", func() *Tracker {
+			tr := feed(options(), base(), rollingUpdate())
+			tr.watchDown("Pod", at(27.1))
+			return tr
+		}, time.Time{}},
+		{"down from before the start to the end", func() *Tracker {
+			tr := before()
+			tr.watchDown("Pod", at(-1))
+			tr.Begin(verdict.Deploy, t0)
+			play(tr, rollingUpdate())
+			return tr
+		}, t0},
+		{"a break from before the start, told in the window", func() *Tracker {
+			tr := before()
+			tr.watchDown("Pod", at(-1))
+			tr.Begin(verdict.Deploy, t0)
+			tr.watchBroke("Pod", at(0.1))
+			tr.watchUp("Pod", at(0.15))
+			play(tr, rollingUpdate())
+			return tr
+		}, t0},
+		{"a break that reaches the start, told before Begin", func() *Tracker {
+			tr := before()
+			tr.watchDown("Pod", at(-1))
+			tr.watchBroke("Pod", at(0.1))
+			tr.watchUp("Pod", at(0.15))
+			tr.Begin(verdict.Deploy, t0)
+			play(tr, rollingUpdate())
+			return tr
+		}, t0},
+		{"a break over before the start", func() *Tracker {
+			tr := before()
+			tr.watchDown("Pod", at(-2))
+			tr.watchBroke("Pod", at(-1.5))
+			tr.watchUp("Pod", at(-1))
+			tr.Begin(verdict.Deploy, t0)
+			play(tr, rollingUpdate())
+			return tr
+		}, time.Time{}},
+		{"a break in the window, timed when its watch went down", func() *Tracker {
+			tr := feed(options(), base(), rollingUpdate())
+			tr.watchDown("Pod", at(13))
+			tr.watchBroke("Pod", at(14))
+			tr.watchUp("Pod", at(15))
+			return tr
+		}, at(13)},
+		{"a break of a watch that was up, timed when it was told", func() *Tracker {
+			tr := feed(options(), base(), rollingUpdate())
+			tr.watchBroke("Pod", at(14))
+			tr.watchUp("Pod", at(15))
+			return tr
+		}, at(14)},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			s, ended := r.tr().State(at(400))
+			if !ended || !s.Missed.Equal(r.missed) {
+				t.Errorf("ended %v, Missed %v; want ended, Missed %v", ended, s.Missed, r.missed)
 			}
 		})
 	}
