@@ -236,15 +236,24 @@ func (h handler) OnUpdate(old, obj any) { h.w.set(h.kind, old.(runtime.Object), 
 
 func (h handler) OnDelete(obj any) { h.w.gone(h.kind, obj) }
 
-// set tells the Tracker that obj was created or changed. An update whose UID differs from old's is
-// a new object under the old name: the informer missed a deletion and a creation between the two,
-// so old is told gone first.
+// set tells the Tracker that obj was created or changed. An update whose resource version is old's
+// comes only from a list again, because the informers run with no resync: the Tracker is told
+// that the watch may have missed changes. An empty version is no sign of one; the API server
+// gives every object a version, and only a fake client gives none. An update whose UID differs
+// from old's is a new object under the old name: the informer missed a deletion and a creation
+// between the two, so old is told gone first.
 func (w *Watcher) set(kind string, old, obj runtime.Object) {
 	key := objectKey{kind, cache.MetaObjectToName(obj.(metav1.Object)).String()}
 	w.mu.Lock()
 	now := w.o.Now()
-	if old != nil && old.(metav1.Object).GetUID() != obj.(metav1.Object).GetUID() {
-		w.tr.Gone(old, now)
+	if old != nil {
+		was, is := old.(metav1.Object), obj.(metav1.Object)
+		if v := was.GetResourceVersion(); v != "" && v == is.GetResourceVersion() {
+			w.tr.Missed(now)
+		}
+		if was.GetUID() != is.GetUID() {
+			w.tr.Gone(old, now)
+		}
 	}
 	w.tr.Set(obj, now)
 	w.last[key] = obj
@@ -253,26 +262,32 @@ func (w *Watcher) set(kind string, old, obj runtime.Object) {
 }
 
 // gone tells the Tracker that an object no longer exists. When the informer missed the deletion
-// and found it at a later list, obj is a DeletedFinalStateUnknown, and the object it holds is told
-// gone; when it holds none, the object last told under its key is. No object was told under the
-// key only when no add of it was told, and the informer delivers every object's add before its
-// deletion, so then nothing is left to tell.
+// and found it at a later list, obj is a DeletedFinalStateUnknown: the Tracker is told that the
+// watch may have missed changes, and the object the tombstone holds is told gone; when it holds
+// none, the object last told under its key is. No object was told under the key only when no add
+// of it was told, and the informer delivers every object's add before its deletion, so then
+// nothing is left to tell.
 func (w *Watcher) gone(kind string, obj any) {
 	var key string
-	if d, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+	d, tombstone := obj.(cache.DeletedFinalStateUnknown)
+	if tombstone {
 		key, obj = d.Key, d.Obj
 	} else {
 		key = cache.MetaObjectToName(obj.(metav1.Object)).String()
 	}
 	k := objectKey{kind, key}
 	w.mu.Lock()
+	now := w.o.Now()
+	if tombstone {
+		w.tr.Missed(now)
+	}
 	o, ok := obj.(runtime.Object)
 	if !ok {
 		o = w.last[k]
 	}
 	delete(w.last, k)
 	if o != nil {
-		w.tr.Gone(o, w.o.Now())
+		w.tr.Gone(o, now)
 	}
 	w.mu.Unlock()
 	w.signal()

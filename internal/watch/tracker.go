@@ -40,11 +40,13 @@ type TrackerOptions struct {
 }
 
 // Transition is what happened in one transition. Finished is when it last came to be finished,
-// zero for a stall. Ended is when its window ended. The string lists are sentences for the report:
-// what started the settle time again, what is not complete, which pods could not be scheduled.
+// zero for a stall. Ended is when its window ended. Missed is when the watch of the cluster first
+// missed changes in the window, zero when it missed none. The string lists are sentences for the
+// report: what started the settle time again, what is not complete, which pods could not be
+// scheduled.
 type Transition struct {
 	Name                                      verdict.WindowName
-	Began, Finished, Ended                    time.Time
+	Began, Finished, Ended, Missed            time.Time
 	Stalled                                   bool
 	SettleRestarts, Incomplete, Unschedulable []string
 	Unsupported                               []Workload
@@ -213,6 +215,17 @@ func (t *Tracker) CommandExited(at time.Time) {
 		t.current().exited = at
 	}
 	t.afterChange(change{}, at)
+}
+
+// Missed tells the Tracker that the watch of the cluster may have missed changes at the given
+// moment: it listed again, so a change between its last event and that list is seen only by its
+// sum, or not at all. While a transition's window is open, the first such moment is its Missed;
+// outside a window it does nothing.
+func (t *Tracker) Missed(at time.Time) {
+	t.endIfDue(at)
+	if t.windowOpen() && t.current().t.Missed.IsZero() {
+		t.current().t.Missed = at
+	}
 }
 
 // current is the open or last transition, nil before the first Begin.

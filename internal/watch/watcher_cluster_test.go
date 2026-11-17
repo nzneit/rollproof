@@ -88,6 +88,10 @@ func TestWatcherOnACluster(t *testing.T) {
 	if tr.Stalled || !tr.Replaced || len(tr.Workloads) != 1 {
 		t.Fatalf("transition: %+v", tr)
 	}
+	// A rollout on a live API server is no sign of missed changes (T27-1).
+	if !tr.Missed.IsZero() {
+		t.Errorf("Missed = %v; want zero, as the watch missed nothing", tr.Missed)
+	}
 	got := tr.Workloads[0]
 	t.Logf("quickest stop %v, digests %v", got.QuickestStop, got.Digests)
 	if got.Workload.String() != "deployment/w" || got.AtStart != 2 || got.Replaced != 2 || got.Created != 2 ||

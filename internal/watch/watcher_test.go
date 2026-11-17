@@ -3,6 +3,7 @@ package watch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -641,4 +642,115 @@ func TestStartStopsWhenCtxEnds(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Start did not return after ctx ended")
 	}
+}
+
+// withVersion returns a copy of the pod p with the resource version v.
+func withVersion(p *corev1.Pod, v string) *corev1.Pod {
+	p = p.DeepCopy()
+	p.ResourceVersion = v
+	return p
+}
+
+// What the handlers tell the Tracker as a sign that the watch missed changes
+// (T27-1): an update whose resource version did not change, or a tombstone,
+// while a window is open. A real update tells nothing, and neither does a
+// sign while no window is open.
+func TestMissedChanges(t *testing.T) {
+	a1 := pod("orders-a-1", "a1", "ReplicaSet", "orders-a", true, false)
+	text := "the watch of the cluster missed changes 2.0 s after the transition began"
+	for _, r := range []struct {
+		name   string
+		open   bool // the sign comes while the window is open, 2 s after it began
+		tell   func(h handler)
+		missed bool
+	}{
+		{"an update with the same resource version", true, func(h handler) {
+			h.OnUpdate(withVersion(a1, "7"), withVersion(a1, "7"))
+		}, true},
+		{"a tombstone", true, func(h handler) {
+			h.OnDelete(cache.DeletedFinalStateUnknown{Key: "orders/orders-a-1", Obj: a1})
+		}, true},
+		{"an update with the same resource version and no window open", false, func(h handler) {
+			h.OnUpdate(withVersion(a1, "7"), withVersion(a1, "7"))
+		}, false},
+		{"an update whose resource version changed", true, func(h handler) {
+			h.OnUpdate(withVersion(a1, "7"), withVersion(a1, "8"))
+		}, false},
+		// The fake client gives no object a resource version; the API server
+		// gives every object one.
+		{"an update with no resource version", true, func(h handler) {
+			h.OnUpdate(a1, a1)
+		}, false},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			w, _, clock := startWatcher(t, nil, base()...)
+			h := handler{w: w, kind: "Pod"}
+			if !r.open {
+				r.tell(h)
+				clock.Advance(time.Second)
+			}
+			exited := make(chan struct{})
+			res := make(chan Transition, 1)
+			go func() { res <- w.Transition(t.Context(), verdict.Deploy, clock.Now(), exited) }()
+			until(t, w, clock, func(s Transition) bool { return s.Name == verdict.Deploy })
+			began := clock.Now()
+			if r.open {
+				clock.Advance(2 * time.Second)
+				r.tell(h)
+			}
+			close(exited)
+			tr := drive(t, clock, res)
+			var want time.Time
+			if r.missed {
+				want = began.Add(2 * time.Second)
+			}
+			if !tr.Missed.Equal(want) {
+				t.Errorf("Missed = %v, want %v", tr.Missed, want)
+			}
+			has := slices.ContainsFunc(tr.Conditions(true), func(c verdict.Condition) bool {
+				return c.Code == verdict.InternalError && c.Text == text
+			})
+			if has != r.missed {
+				t.Errorf("conditions %v; the condition for missed changes is there: %v, want %v",
+					tr.Conditions(true), has, r.missed)
+			}
+		})
+	}
+}
+
+// A list again reaches the handlers through client-go's informer (T27-1): the
+// API server ends the pods' watch as expired, the informer lists again, and
+// each pod it already holds comes as an update with the same resource version.
+func TestAListAgainIsMissed(t *testing.T) {
+	objs := base()
+	for i, o := range objs {
+		o.(metav1.Object).SetResourceVersion(fmt.Sprint(10 + i))
+	}
+	client := fake.NewClientset(objs...)
+	expiring := k8swatch.NewRaceFreeFake()
+	var podWatches atomic.Int32
+	client.PrependWatchReactor("pods", func(k8stesting.Action) (bool, k8swatch.Interface, error) {
+		if podWatches.Add(1) == 1 {
+			return true, expiring, nil
+		}
+		return false, nil, nil
+	})
+	clock := &fakeClock{now: t0}
+	w, err := Start(t.Context(), client, Options{Namespace: "orders", Settle: 15 * time.Second,
+		Timeout: 300 * time.Second, Workers: 3, Now: clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(w.Stop)
+	for deadline := time.Now().Add(5 * time.Second); podWatches.Load() < 1; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the informer of pods did not watch")
+		}
+	}
+	go w.Transition(t.Context(), verdict.Deploy, clock.Now(), make(chan struct{}))
+	until(t, w, clock, func(s Transition) bool { return s.Name == verdict.Deploy })
+	clock.Advance(2 * time.Second)
+	expiring.Error(&metav1.Status{Status: metav1.StatusFailure, Code: 410, Reason: metav1.StatusReasonExpired,
+		Message: "too old resource version"})
+	until(t, w, clock, func(s Transition) bool { return s.Missed.Equal(at(2)) })
 }

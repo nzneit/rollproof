@@ -2,6 +2,7 @@ package watch
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -1302,5 +1303,99 @@ func TestCountsAtTheMomentAsked(t *testing.T) {
 	want := []Count{{Workload: orders, AtStart: 2}, {Workload: Workload{Kind: "deployment", Name: "orders-v2"}, Added: true}}
 	if diff := cmp.Diff(want, s.Workloads, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("counts of the rename at +2.5 s (-want +got):\n%s", diff)
+	}
+}
+
+// decided is the verdict that verdict.Decide gives a run whose deploy window
+// is s, with a clean steady window and a probe that passed every half second,
+// and the code that decided it.
+func decided(s Transition) (verdict.Verdict, verdict.Code) {
+	var obs []verdict.Observation
+	for x := -10.0; at(x).Before(s.Ended); x += 0.5 {
+		obs = append(obs, verdict.Observation{Written: at(x), T: at(x), OK: true, N: 1})
+	}
+	d := verdict.Decide(verdict.Timeline{
+		Windows: []verdict.Window{
+			{Name: verdict.Steady, Start: at(-10), End: t0},
+			{Name: verdict.Deploy, Start: t0, Finished: s.Finished, End: s.Ended, Conditions: s.Conditions(true)},
+			{Name: verdict.Rollback},
+		},
+		Observations: obs, Silence: 5 * time.Second, Now: s.Ended,
+	})
+	for _, r := range d.Reasons {
+		if r.Decided {
+			return d.Verdict, r.Code
+		}
+	}
+	return d.Verdict, ""
+}
+
+// The watch of the cluster missed changes (T27-1). The first moment told while
+// the window is open is the transition's Missed; outside the window, or at its
+// end, Missed does nothing. Conditions gives an InternalError of its own for
+// it, beside a stall's fail codes, so a stall still fails and a finished
+// window is not verified.
+func TestMissed(t *testing.T) {
+	missed := func(s float64) verdict.Condition {
+		return verdict.Condition{Code: verdict.InternalError,
+			Text: fmt.Sprintf("the watch of the cluster missed changes %.1f s after the transition began", s)}
+	}
+	stall := verdict.Condition{Code: verdict.TransitionStalled, Text: "did not finish within limits.timeout"}
+	for _, r := range []struct {
+		name    string
+		tr      func() *Tracker
+		missed  time.Time
+		cs      []verdict.Condition
+		verdict verdict.Verdict
+		code    verdict.Code
+	}{
+		{"the first of two moments in the window", func() *Tracker {
+			tr := feed(options(), base(), rollingUpdate())
+			tr.Missed(at(13))
+			tr.Missed(at(20))
+			return tr
+		}, at(13), []verdict.Condition{missed(13)}, verdict.NotVerified, verdict.InternalError},
+		{"before the transition began", func() *Tracker {
+			tr := NewTracker(options())
+			for _, obj := range base() {
+				tr.Set(obj, t0)
+			}
+			tr.Missed(t0)
+			tr.Begin(verdict.Deploy, t0)
+			play(tr, rollingUpdate())
+			return tr
+		}, time.Time{}, nil, verdict.Pass, ""},
+		{"after the window ended", func() *Tracker {
+			tr := feed(options(), base(), rollingUpdate())
+			tr.State(at(30))
+			tr.Missed(at(31))
+			return tr
+		}, time.Time{}, nil, verdict.Pass, ""},
+		{"at the end of the window, which belongs to no window", func() *Tracker {
+			tr := feed(options(), base(), rollingUpdate())
+			tr.Missed(at(27.1))
+			return tr
+		}, time.Time{}, nil, verdict.Pass, ""},
+		{"in a stall", func() *Tracker {
+			tr := feed(options(), base(), []ev{set(1, inc), exited(2)})
+			tr.Missed(at(3))
+			return tr
+		}, at(3), []verdict.Condition{stall, missed(3)}, verdict.Fail, verdict.TransitionStalled},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			s, ended := r.tr().State(at(400))
+			if !ended {
+				t.Fatal("the window has not ended at +400 s")
+			}
+			if !s.Missed.Equal(r.missed) {
+				t.Errorf("Missed = %v, want %v", s.Missed, r.missed)
+			}
+			if diff := cmp.Diff(r.cs, s.Conditions(true), cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("conditions (-want +got):\n%s", diff)
+			}
+			if v, c := decided(s); v != r.verdict || c != r.code {
+				t.Errorf("verdict %s decided by %q; want %s decided by %q", v, c, r.verdict, r.code)
+			}
+		})
 	}
 }

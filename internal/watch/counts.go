@@ -23,7 +23,8 @@ import (
 // gives InternalError, "the transition was judged before its window ended", in place of the
 // stall, and never NoPodReplaced: such a Transition is not verified and never passes, and a
 // signal that cut the window short still decides it, because interrupted comes before
-// internal-error.
+// internal-error. A window in which the watch of the cluster missed changes gives an InternalError
+// of its own, with or without a stall, so that it is not verified and never passes.
 func (tr Transition) Conditions(commandSucceeded bool) []verdict.Condition {
 	finished := !tr.Stalled && !tr.Finished.IsZero() && !tr.Ended.IsZero()
 	var cs []verdict.Condition
@@ -41,6 +42,11 @@ func (tr Transition) Conditions(commandSucceeded bool) []verdict.Condition {
 	case !finished:
 		cs = append(cs, verdict.Condition{Code: verdict.InternalError,
 			Text: "the transition was judged before its window ended"})
+	}
+	if !tr.Missed.IsZero() {
+		cs = append(cs, verdict.Condition{Code: verdict.InternalError,
+			Text: fmt.Sprintf("the watch of the cluster missed changes %.1f s after the transition began",
+				tr.Missed.Sub(tr.Began).Seconds())})
 	}
 	if len(tr.Unsupported) > 0 {
 		// A Transition holds no object. The API server admits only RollingUpdate and OnDelete as a
