@@ -28,6 +28,9 @@ func classify(r deploy.Result) (string, kind) {
 	case deploy.Succeeded, deploy.StoppedBySignal:
 		return "", noFailure
 	case deploy.ExitedNonZero:
+		if r.ExitCode < 0 {
+			return "was killed by a signal", failed
+		}
 		if r.ExitCode == 0 {
 			return "gave an answer the tool could not read", unreadable
 		}

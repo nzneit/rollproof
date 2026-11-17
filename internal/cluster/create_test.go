@@ -123,6 +123,26 @@ func TestEnsureNamespaces(t *testing.T) {
 	}
 }
 
+// Kept names what a kept cluster holds: its kubeconfig file and that file's context, kind's context
+// name before Create set one, and no path when kind wrote no file.
+func TestKept(t *testing.T) {
+	dir := t.TempDir()
+	c := &Cluster{Name: "rollproof-test-kept", RunDir: dir, Kubeconfig: filepath.Join(dir, "kubeconfig")}
+	if got, want := c.Kept(), "the cluster is kept, and kind wrote no kubeconfig file"; got != want {
+		t.Errorf("Kept() = %q, want %q", got, want)
+	}
+	if err := os.WriteFile(c.Kubeconfig, []byte("apiVersion: v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := c.Kept(), "the cluster is kept: kubeconfig "+c.Kubeconfig+", context kind-rollproof-test-kept"; got != want {
+		t.Errorf("Kept() = %q, want %q", got, want)
+	}
+	c.Context = "kind-rollproof-test-kept-app"
+	if got, want := c.Kept(), "the cluster is kept: kubeconfig "+c.Kubeconfig+", context kind-rollproof-test-kept-app"; got != want {
+		t.Errorf("Kept() = %q, want %q", got, want)
+	}
+}
+
 // Create's failure texts, with kind's Create and Delete replaced and an engine command that does
 // not exist (which remove reads as a registry container that is gone): each reason stays on one
 // line, and a clean-up that fails says that parts of the run may be left behind.
@@ -130,21 +150,34 @@ func TestCreateFailureTexts(t *testing.T) {
 	const name = "rollproof-test-unit"
 	gone := errors.New("the engine is gone")
 	for _, tc := range []struct {
-		name    string
-		setup   func(t *testing.T, runDir string)
-		creates []error // what each attempt of kind's Create returns, in order
-		deletes []error // what each call of kind's Delete returns, in order: step 1's first
-		want    func(runDir string) string
-		joined  error // an error that the returned error holds beside the Condition, for the log
+		name            string
+		setup           func(t *testing.T, runDir string)
+		keep            bool    // Spec.Keep
+		writeKubeconfig bool    // what kind's Create writes before it fails
+		creates         []error // what each attempt of kind's Create returns, in order
+		deletes         []error // what each call of kind's Delete returns, in order: step 1's first
+		want            func(runDir string) string
+		joined          error // an error that the returned error holds beside the Condition, for the log
 	}{
 		{
 			name:    "the clean-up after a failed step fails",
 			creates: []error{errors.New("exit status 125")},
 			deletes: []error{nil, gone},
 			want: func(string) string {
-				return "create the kind cluster: exit status 125" + inotifyHint + leftBehind
+				return "create the kind cluster: exit status 125" + inotifyHint + LeftBehind
 			},
 			joined: gone,
+		},
+		{
+			name:            "a kept failure after kind's creation began",
+			keep:            true,
+			writeKubeconfig: true,
+			creates:         []error{errors.New("exit status 125")},
+			deletes:         []error{nil}, // step 1's removal of leftovers
+			want: func(runDir string) string {
+				return "create the kind cluster: exit status 125" + inotifyHint + ". The cluster is kept: kubeconfig " +
+					filepath.Join(runDir, "kubeconfig") + ", context kind-" + name
+			},
 		},
 		{
 			name:    "the delete of a failed attempt fails",
@@ -171,11 +204,17 @@ func TestCreateFailureTexts(t *testing.T) {
 			oldCreate, oldDelete := kindCreate, kindDelete
 			t.Cleanup(func() { kindCreate, kindDelete = oldCreate, oldDelete })
 			var creates, deletes int
+			runDir := filepath.Join(t.TempDir(), name)
 			kindCreate = func(*kindcluster.Provider, string, ...kindcluster.CreateOption) error {
 				if creates == len(tc.creates) {
 					t.Fatalf("attempt %d of kind's Create, want %d", creates+1, len(tc.creates))
 				}
 				creates++
+				if tc.writeKubeconfig {
+					if err := os.WriteFile(filepath.Join(runDir, "kubeconfig"), []byte("apiVersion: v1\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
 				return tc.creates[creates-1]
 			}
 			kindDelete = func(*kindcluster.Provider, string, string) error {
@@ -185,11 +224,10 @@ func TestCreateFailureTexts(t *testing.T) {
 				deletes++
 				return tc.deletes[deletes-1]
 			}
-			runDir := filepath.Join(t.TempDir(), name)
 			if tc.setup != nil {
 				tc.setup(t, runDir)
 			}
-			s := Spec{Name: name, RunDir: runDir, Workers: 1, Namespace: "app", Timeout: time.Minute}
+			s := Spec{Name: name, RunDir: runDir, Workers: 1, Namespace: "app", Timeout: time.Minute, Keep: tc.keep}
 
 			_, err := Create(context.Background(), s, Engine{Binary: "rollproof-test-no-such-engine"})
 			if err == nil {

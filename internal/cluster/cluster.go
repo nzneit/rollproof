@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -47,8 +48,9 @@ const (
 	logLineMissed  = "could not find a log line that matches"
 )
 
-// leftBehind ends the failure text of Create when the clean-up after a failed step failed too.
-const leftBehind = ". Parts of the run may be left behind; the next run with this name removes them."
+// LeftBehind ends the failure text of Create when the clean-up after a failed step failed too. It
+// is exported for the command's own failure text, which must not drift from this one.
+const LeftBehind = ". Parts of the run may be left behind; the next run with this name removes them."
 
 // kindCreate and kindDelete are the kind provider's Create and Delete, as step 3 of Create and
 // remove call them. A test replaces them.
@@ -83,6 +85,16 @@ func join(errs ...error) error {
 		return nil
 	}
 	return j
+}
+
+// capitalised returns s with its first letter upper-cased, for a sentence that follows a full stop.
+func capitalised(s string) string {
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
 }
 
 // DefaultNodeImage returns the node image of the linked kind release, with its digest.
@@ -131,21 +143,8 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 		return nil, verdict.Condition{Code: verdict.ClusterFailed, Text: "remove leftovers: " + err.Error()}
 	}
 
-	// fail is the failure of a step after the first: it removes what the run made, unless s.Keep
-	// is set or ctx has ended. When that removal fails, the text says that parts may be left, and
-	// the removal's error is joined to the Condition for the log.
-	fail := func(step string, err error) (*Cluster, error) {
-		failure := verdict.Condition{Code: verdict.ClusterFailed, Text: step + ": " + err.Error()}
-		if s.Keep || ctx.Err() != nil {
-			return nil, failure
-		}
-		if rerr := remove(ctx, e, s.Name, s.RunDir); rerr != nil {
-			failure.Text += leftBehind
-			return nil, errors.Join(failure, fmt.Errorf("the clean-up after it failed: %w", rerr))
-		}
-		return nil, failure
-	}
-
+	// c is the cluster as much as the run knows it so far, so that a failure can name what a kept
+	// cluster holds.
 	c := &Cluster{
 		Name:       s.Name,
 		RunDir:     s.RunDir,
@@ -154,11 +153,38 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 		Workers:    s.Workers,
 		provider:   e.provider(),
 	}
+	// kindBegun says that kind's own creation of the cluster has begun: from then on a kept
+	// cluster has a kubeconfig file and a context to name.
+	kindBegun := false
+
+	// fail is the failure of a step: it removes what the run made, unless s.Keep is set or ctx has
+	// ended. A kept cluster whose kind creation began ends the text with the sentence Kept gives,
+	// so that the console names its kubeconfig and context (section 9). When the removal fails, the
+	// text says that parts may be left, and the removal's error is joined to the Condition for the
+	// log.
+	fail := func(step string, err error) (*Cluster, error) {
+		failure := verdict.Condition{Code: verdict.ClusterFailed, Text: step + ": " + err.Error()}
+		if ctx.Err() != nil {
+			return nil, failure
+		}
+		if s.Keep {
+			if kindBegun {
+				failure.Text += ". " + capitalised(c.Kept())
+			}
+			return nil, failure
+		}
+		if rerr := remove(ctx, e, s.Name, s.RunDir); rerr != nil {
+			failure.Text += LeftBehind
+			return nil, errors.Join(failure, fmt.Errorf("the clean-up after it failed: %w", rerr))
+		}
+		return nil, failure
+	}
 
 	if err := os.Mkdir(s.RunDir, 0o700); err != nil {
 		return fail("make the run's folder", err)
 	}
 
+	kindBegun = true
 	err := createKind(ctx, c.provider, s.Name, c.Kubeconfig,
 		kindcluster.CreateWithV1Alpha4Config(KindConfig(s, e.Rootless)),
 		kindcluster.CreateWithKubeconfigPath(c.Kubeconfig),
@@ -404,6 +430,21 @@ func (c *Cluster) Exec(ctx context.Context, node string, args ...string) ([]byte
 		return out.Bytes(), fmt.Errorf("%s in node %s: %w\n%s", strings.Join(args, " "), node, err, out.Bytes())
 	}
 	return out.Bytes(), nil
+}
+
+// Kept is the sentence for a kept cluster: its kubeconfig file and the name of that file's
+// context. The context is the one Create set, or, before Create set it, the one kind writes for a
+// cluster of this name. A cluster whose kubeconfig file kind never wrote says that, and names no
+// path.
+func (c *Cluster) Kept() string {
+	if _, err := os.Stat(c.Kubeconfig); err != nil {
+		return "the cluster is kept, and kind wrote no kubeconfig file"
+	}
+	context := c.Context
+	if context == "" {
+		context = "kind-" + c.Name
+	}
+	return "the cluster is kept: kubeconfig " + c.Kubeconfig + ", context " + context
 }
 
 // Delete deletes the cluster, the registry with its volumes, and the run's folder. Deleting what

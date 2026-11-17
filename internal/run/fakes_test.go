@@ -356,6 +356,7 @@ func (f *fakeWatcher) Stop() {
 type fakeProbe struct {
 	w        *world
 	startErr error
+	stopErr  error
 	events   []probe.Event
 	ch       chan probe.Event
 	once     sync.Once
@@ -385,7 +386,7 @@ func (p *fakeProbe) send(ev probe.Event) {
 }
 
 // Stop records "probe-stop", runs its hook, closes the channel once and gives
-// the scripted facts.
+// the scripted facts and error.
 func (p *fakeProbe) Stop(ctx context.Context) (probe.Facts, error) {
 	p.w.calls.add("probe-stop")
 	p.w.hook("probe-stop")
@@ -394,7 +395,7 @@ func (p *fakeProbe) Stop(ctx context.Context) (probe.Facts, error) {
 			close(p.ch)
 		}
 	})
-	return p.facts, nil
+	return p.facts, p.stopErr
 }
 
 // newWorld scripts a run that passes: the probe reports 200 passed checks

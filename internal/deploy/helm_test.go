@@ -65,7 +65,10 @@ func scripted() *fakeRunner {
 
 func newDriver(t *testing.T, h config.Helm, f *fakeRunner) (*HelmDriver, string) {
 	t.Helper()
-	runDir := t.TempDir()
+	runDir := filepath.Join(t.TempDir(), "rollproof-test")
+	if err := os.Mkdir(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	return NewHelm(HelmOptions{
 		Helm: h, Namespace: "orders", Kubeconfig: kubeconfig, Context: kubeContext,
 		RunDir: runDir, Dir: "/work/app", Timeout: timeout, Runner: f,
@@ -498,11 +501,35 @@ func TestHelmSourceOfAPathChart(t *testing.T) {
 
 func TestHelmRunFolderWithAPatternCharacter(t *testing.T) {
 	f := scripted()
-	runDir := filepath.Join(t.TempDir(), "run[1]")
+	runDir := filepath.Join(t.TempDir(), "rollproof-run[1]")
 	drv := NewHelm(HelmOptions{Helm: helmConfig(), Namespace: "orders", Kubeconfig: kubeconfig, Context: kubeContext,
 		RunDir: runDir, Dir: "/work/app", Timeout: timeout, Runner: f})
 	if err := drv.Fetch(context.Background()); err != nil {
 		t.Fatalf("a good pull into a folder with a [ in its path: %v", err)
+	}
+}
+
+// TestHelmFetchNeedsItsOwnRunFolder: Fetch removes <RunDir>/charts/<role>, so it refuses a folder
+// whose name is not the run's own, before it removes or writes anything.
+func TestHelmFetchNeedsItsOwnRunFolder(t *testing.T) {
+	dir := t.TempDir()
+	keep := filepath.Join(dir, "charts", "previous")
+	if err := os.MkdirAll(keep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f := scripted()
+	drv := NewHelm(HelmOptions{Helm: helmConfig(), Namespace: "orders", Kubeconfig: kubeconfig, Context: kubeContext,
+		RunDir: dir, Dir: "/work/app", Timeout: timeout, Runner: f})
+	var c verdict.Condition
+	if err := drv.Fetch(context.Background()); !errors.As(err, &c) || c.Code != verdict.InternalError ||
+		c.Text != "the run folder's name must begin with rollproof-" {
+		t.Fatalf("got %v, want an internal-error condition with the run folder's name", err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("%d commands ran, want none", len(f.calls))
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("the folder %s was removed: %v", keep, err)
 	}
 }
 

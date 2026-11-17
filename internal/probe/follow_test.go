@@ -393,7 +393,7 @@ func TestFollowGapAtTheEnd(t *testing.T) {
 			logAt(60_000), []time.Time{logAt(1700), logAt(60_000)}, logLine(logAt(1700), ok), 1},
 		{"a stream ends with io.EOF and the log cannot be opened again",
 			[]io.Reader{strings.NewReader(logLine(logAt(100), ok)), nil},
-			logAt(60_000), nil, logLine(logAt(100), ok), 1},
+			logAt(60_000), []time.Time{logAt(100), logAt(60_000)}, logLine(logAt(100), ok), 1},
 		{"a stream opened again gives back every line of the last timestamp",
 			[]io.Reader{strings.NewReader(logLine(logAt(1700), ok)), strings.NewReader(logLine(logAt(1700), ok))},
 			logAt(60_000), nil, logLine(logAt(1700), ok), 1},
@@ -409,6 +409,61 @@ func TestFollowGapAtTheEnd(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A stream that broke while the container still ran owes a reopen. When the context ends during
+// the retry wait, the lines between the break and the end may be lost, so the gap is emitted.
+func TestFollowGapWhenTheContextEndsBeforeAReopen(t *testing.T) {
+	quickPolling(t)
+	ok := `{"ok":true}`
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	opens := 0
+	open := func(context.Context, *time.Time) (io.ReadCloser, error) {
+		opens++
+		if opens == 1 {
+			return io.NopCloser(breaks(logLine(logAt(100), ok))), nil
+		}
+		return nil, errors.New("the API is sick")
+	}
+	checks := 0
+	running := func(context.Context) bool {
+		checks++
+		if checks == 2 {
+			cancel() // the retry wait begins with the context ended
+		}
+		return true
+	}
+	var events []Event
+	f := newFollower(open, running, io.Discard, func() time.Time { return logAt(60_000) },
+		func(e Event) { events = append(events, e) })
+	f.run(ctx)
+	if ctx.Err() == nil {
+		t.Fatal("the follower did not end on the context that ended")
+	}
+	checkGap(t, events, 1, []time.Time{logAt(100), logAt(60_000)}, 0)
+}
+
+// A stream that ended cleanly while the container ran is a rotation, so a reopen is owed too.
+// When the reopen fails and the container has ended, the gap is emitted.
+func TestFollowGapWhenACleanStreamCannotBeOpenedAgain(t *testing.T) {
+	quickPolling(t)
+	ok := `{"ok":true}`
+	runs := true
+	opens := 0
+	open := func(context.Context, *time.Time) (io.ReadCloser, error) {
+		opens++
+		if opens == 1 {
+			return io.NopCloser(strings.NewReader(logLine(logAt(100), ok))), nil
+		}
+		runs = false
+		return nil, errors.New("the container has gone")
+	}
+	var events []Event
+	f := newFollower(open, func(context.Context) bool { return runs }, io.Discard,
+		func() time.Time { return logAt(60_000) }, func(e Event) { events = append(events, e) })
+	f.run(context.Background())
+	checkGap(t, events, 1, []time.Time{logAt(100), logAt(60_000)}, 0)
 }
 
 // failingWriter refuses every write.

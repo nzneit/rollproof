@@ -205,6 +205,7 @@ probe:
 func TestFailedClientError(t *testing.T) {
 	clientErr := errors.New("no route to the API server")
 	reached := "the cluster's API server cannot be reached: no route to the API server"
+	kept := "the cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x"
 	left := reached + ". Parts of the run may be left behind; the next run with this name removes them."
 	cleanUp := errors.New("the engine is gone")
 	for _, tc := range []struct {
@@ -216,7 +217,7 @@ func TestFailedClientError(t *testing.T) {
 		wantText   string
 		wantJoined string
 	}{
-		{"kept", true, false, cleanUp, 0, reached, ""},
+		{"kept", true, false, cleanUp, 0, reached + ". The cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x", ""},
 		{"the run's context has ended", false, true, cleanUp, 0, reached, ""},
 		{"the delete succeeds", false, false, nil, 1, reached, ""},
 		{"the delete fails", false, false, cleanUp, 1, left,
@@ -234,7 +235,7 @@ func TestFailedClientError(t *testing.T) {
 				calls++
 				return tc.deleteErr
 			}
-			err := failedClientError(ctx, tc.keep, del, clientErr)
+			err := failedClientError(ctx, tc.keep, kept, del, clientErr)
 			if calls != tc.wantCalls {
 				t.Errorf("the delete was called %d times, want %d", calls, tc.wantCalls)
 			}

@@ -66,6 +66,21 @@ func TestNameFromPath(t *testing.T) {
 	if got == want {
 		t.Errorf("two files gave the same name %q", got)
 	}
+
+	// Review Focus 4: a folder whose name holds a space is no different.
+	spaced := filepath.Join(t.TempDir(), "with space")
+	if err := os.Mkdir(spaced, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spacedFile := writeConfig(t, spaced)
+	spacedReal, err := filepath.EvalSymlinks(spacedFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spacedSum := sha256.Sum256([]byte(spacedReal))
+	if got, err := Name(spacedFile, ""); err != nil || got != "rollproof-"+hex.EncodeToString(spacedSum[:])[:10] {
+		t.Errorf("Name(%q) = %q, %v; want the same name as for any other folder", spacedFile, got, err)
+	}
 }
 
 func TestNameGiven(t *testing.T) {

@@ -1,6 +1,7 @@
 // Package verdict is the verdict of a run as a pure function of what happened in it, and the
-// words every other unit uses for what happened. It holds every rule of section 10 and does no
-// I/O. It knows nothing of Kubernetes, Helm or files.
+// words every other unit uses for what happened. It holds the judging of every rule of section 10
+// and does no I/O; rule 2's window lengths and rule 8's "run the transition to its end" are run's.
+// It knows nothing of Kubernetes, Helm or files.
 package verdict
 
 import (

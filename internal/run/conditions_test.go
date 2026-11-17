@@ -60,6 +60,8 @@ func TestCommandCondition(t *testing.T) {
 		{"succeeded", deploy.Result{Ending: deploy.Succeeded, ExitCode: 0}, verdict.Condition{}, false},
 		{"exited non-zero", deploy.Result{Ending: deploy.ExitedNonZero, ExitCode: 3},
 			verdict.Condition{Code: verdict.CommandFailed, Text: "the command exited with code 3"}, true},
+		{"killed by a signal", deploy.Result{Ending: deploy.ExitedNonZero, ExitCode: -1},
+			verdict.Condition{Code: verdict.CommandFailed, Text: "the command was killed by a signal"}, true},
 		{"an answer the tool could not read", deploy.Result{Ending: deploy.ExitedNonZero, ExitCode: 0},
 			verdict.Condition{Code: verdict.InternalError, Text: "the command gave an answer the tool could not read"}, true},
 		{"an ending the tool does not know", deploy.Result{Ending: deploy.Ending("vanished"), ExitCode: -1},

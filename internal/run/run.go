@@ -119,6 +119,14 @@ func Run(ctx context.Context, o Options, u Units) int {
 	return s.finish()
 }
 
+// writer is what a run asks of the results folder: the final result.json, an evidence file, and
+// the folder's path. report.Writer is the real one, and a test replaces it.
+type writer interface {
+	Final(report.Run) error
+	Evidence(name string) (io.WriteCloser, error)
+	Dir() string
+}
+
 // runState is everything one run knows: the units it has, what each returned,
 // and the timeline of its windows. Only the goroutine that reads the probe's
 // events and the goroutine of a command touch it besides the run itself.
@@ -128,7 +136,7 @@ type runState struct {
 	parent   context.Context // the caller's context: a signal
 	ctx      context.Context // derived from parent and cancelled when the run ends
 	cancel   context.CancelFunc
-	w        *report.Writer
+	w        writer
 	ev       *evidence
 	warnings *warnings
 
@@ -360,6 +368,9 @@ func (s *runState) transitionsStep(ctx context.Context) bool {
 		c := s.command(ctx, fn, nil)
 		tr := s.watcher.Transition(ctx, name, began, c.exited)
 		o := s.await(c)
+		// The command ended before the interrupted check below, so its record carries its ending
+		// even when a signal cut the transition (report.Transition's command set).
+		s.transitions[len(s.transitions)-1].cmd = o.result
 		s.transitions[len(s.transitions)-1].tr = tr
 		if s.interrupted(ctx) {
 			// The transition that a signal cut has none of its own conditions.
@@ -368,7 +379,6 @@ func (s *runState) transitionsStep(ctx context.Context) bool {
 		if o.panicked != nil {
 			panic(o.panicked)
 		}
-		s.transitions[len(s.transitions)-1].cmd = o.result
 		s.placeTransition(i+1, tr, o.result)
 		if !s.decide(false).GoOn {
 			return true
@@ -402,8 +412,13 @@ func (s *runState) placeTransition(i int, tr watch.Transition, res deploy.Result
 // belongs to the last window that began.
 func (s *runState) stopProbe(ctx context.Context) {
 	if s.probe != nil {
-		s.probeFacts, _ = s.probe.Stop(ctx)
+		f, err := s.probe.Stop(ctx)
+		s.probeFacts = f
 		s.stopped = true
+		if err != nil {
+			// Stop's error is the pod delete's, or the context's: the probe's pod may still run.
+			s.warnings.add("the probe could not be stopped: " + err.Error() + "; its pod may still be there")
+		}
 	}
 	if s.reader != nil {
 		<-s.reader.done // the probe has closed its events
@@ -565,6 +580,7 @@ func (s *runState) toolFailed(caught any) {
 // report that cannot be written does not leave a cluster behind.
 func (s *runState) finish() (code int) {
 	refused := false
+	written := false // the final result.json is in place
 	defer func() {
 		s.cleanUpQuietly()
 		if !refused {
@@ -572,8 +588,22 @@ func (s *runState) finish() (code int) {
 		}
 	}()
 	defer func() {
-		if p := recover(); p != nil {
+		p := recover()
+		if p == nil {
+			return
+		}
+		if written {
 			s.warnAfterConsole("the tool failed after the verdict was decided: " + panicText(p))
+			return
+		}
+		// A panic before the final file was written leaves the first file, which says that the run
+		// did not finish. That is the refused write (section 8): exit 1 only for a decided fail.
+		refused = true
+		fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+panicText(p))
+		if s.decision.Verdict == verdict.Fail {
+			code = 1
+		} else {
+			code = 2
 		}
 	}()
 	if err := s.w.Final(s.record()); err != nil {
@@ -588,6 +618,7 @@ func (s *runState) finish() (code int) {
 		}
 		return 2
 	}
+	written = true
 	if err := s.writeMarks(); err != nil {
 		s.warnings.add("the window marks were not written: " + err.Error())
 		if err := s.w.Final(s.record()); err != nil {

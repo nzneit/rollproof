@@ -240,6 +240,28 @@ func TestLoadThroughALink(t *testing.T) {
 	}
 }
 
+// A configuration in a folder whose name holds a space: the folder is the real one, and a chart
+// beside the file comes out as the absolute path it is, as in any other folder.
+func TestLoadInAFolderWithASpace(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "with space")
+	if err := os.MkdirAll(filepath.Join(dir, "chart"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	text := variant(t, base,
+		"      chart: oci://registry.example/charts/orders\n      version: \"1.5.0\"\n",
+		"      chart: ./chart\n")
+	c, err := loadWith(t, dir, text, noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := realPath(t, dir); c.Dir != want {
+		t.Errorf("Dir %q, want %q", c.Dir, want)
+	}
+	if got, want := c.Deploy.Helm.Candidate.Chart, filepath.Join(realPath(t, dir), "chart"); got != want || !c.Deploy.Helm.Candidate.IsPath {
+		t.Errorf("candidate chart %q (path %v), want the absolute path %q", got, c.Deploy.Helm.Candidate.IsPath, want)
+	}
+}
+
 func TestLoadAccepts(t *testing.T) {
 	limitsTimeout := func(c *Config) any { return c.Limits.Timeout }
 	expect := func(c *Config) any { return [2]int{c.Probe.HTTP.ExpectMin, c.Probe.HTTP.ExpectMax} }
@@ -321,6 +343,7 @@ func TestLoadRejects(t *testing.T) {
 		{"a custom env entry with neither", httpProbe, customProbe("    env:\n      - name: TOKEN\n"), "probe.custom.env[0]"},
 		{"a username with no password", "deploy:\n", "registries:\n  - host: registry.example\n    username: S3CRET-VALUE\ndeploy:\n", "registries[0]"},
 		{"a password with no username", "deploy:\n", "registries:\n  - host: registry.example\n    password: S3CRET-VALUE\ndeploy:\n", "registries[0]"},
+		{"a map key that is a list", "version: 1\n", "version: 1\nimages:\n  ? [S3CRET-VALUE]\n  : {}\n", "line 3: must be a single value"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := loadText(t, variant(t, base, tc.old, tc.new))

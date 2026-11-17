@@ -80,6 +80,11 @@ func (d *HelmDriver) Fetch(ctx context.Context) error {
 	if !filepath.IsAbs(d.o.RunDir) {
 		return verdict.Condition{Code: verdict.InternalError, Text: "the run folder must be an absolute path"}
 	}
+	// It removes <RunDir>/charts/<role> below, so the folder must be the run's own, as the
+	// cluster's clean-up requires of the folder it removes.
+	if !strings.HasPrefix(filepath.Base(d.o.RunDir), "rollproof-") {
+		return verdict.Condition{Code: verdict.InternalError, Text: "the run folder's name must begin with rollproof-"}
+	}
 	prev, err := d.fetch(ctx, "previous", d.o.Helm.Previous)
 	if err != nil {
 		return err

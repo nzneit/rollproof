@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"time"
+	"unicode"
 
 	"k8s.io/client-go/kubernetes"
 
@@ -79,29 +80,41 @@ func (w *wiring) create(ctx context.Context, cfg *config.Config, name string, ev
 		// run deletes no cluster whose Create failed, so this one is deleted here,
 		// unless it is kept or the run's context has ended (section 9, "Name and
 		// lifetime").
-		return nil, failedClientError(ctx, keep, c.Delete, err)
+		return nil, failedClientError(ctx, keep, c.Kept(), c.Delete, err)
 	}
 	return &session{c: c, client: client, cfg: cfg, evidence: evidence}, nil
 }
 
-// clusterLeftBehind ends the failure text when the clean-up after it failed too. It must match the
-// sentence that internal/cluster's own failure uses (its unexported leftBehind).
-const clusterLeftBehind = ". Parts of the run may be left behind; the next run with this name removes them."
-
 // failedClientError is the error of a cluster that was made but whose client could not be: the
 // cluster is deleted unless it is kept or ctx has ended, and the text says so when the delete
-// fails too. It follows internal/cluster's own clean-up after a failed step.
-func failedClientError(ctx context.Context, keep bool, del func(context.Context) error, clientErr error) error {
+// fails too. A kept cluster's text ends with kept, the sentence its Kept gives. It follows
+// internal/cluster's own clean-up after a failed step.
+func failedClientError(ctx context.Context, keep bool, kept string, del func(context.Context) error, clientErr error) error {
 	c := verdict.Condition{Code: verdict.ClusterFailed,
 		Text: "the cluster's API server cannot be reached: " + clientErr.Error()}
-	if keep || ctx.Err() != nil {
+	if keep {
+		c.Text += ". " + capitalised(kept)
+		return c
+	}
+	if ctx.Err() != nil {
 		return c
 	}
 	if err := del(ctx); err != nil {
-		c.Text += clusterLeftBehind
+		c.Text += cluster.LeftBehind
 		return errors.Join(c, fmt.Errorf("the clean-up after it failed: %w", err))
 	}
 	return c
+}
+
+// capitalised returns s with its first letter upper-cased, as internal/cluster's sentence is when
+// it follows a full stop.
+func capitalised(s string) string {
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
 }
 
 // session is a created cluster as run.Cluster: each method calls one unit.
@@ -205,7 +218,7 @@ func (s *session) Facts() report.Cluster {
 
 // Kept is the sentence for a kept cluster: its kubeconfig file and context.
 func (s *session) Kept() string {
-	return fmt.Sprintf("the cluster is kept: kubeconfig %s, context %s", s.c.Kubeconfig, s.c.Context)
+	return s.c.Kept()
 }
 
 // EndCommands ends every command that is still being stopped and closes its

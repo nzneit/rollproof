@@ -84,12 +84,13 @@ func (f *follower) counts() (lines, jsonText int) {
 // A stream that ends while the container runs is opened again at once. A last piece with no line
 // end that came with that end is dropped, because the next stream gives the whole line; when the
 // log has ended for good, the piece is a line before stopAsked and is only kept in raw after it.
-// Where run cannot tell that it read the log to its end, it emits the gap: when a stream
-// ended with an error other than io.EOF and the container no longer runs, so that the stream is
-// not opened again or cannot be; and when a stream opened again ended, with the container ended,
-// before as many lines of the last timestamp as were read had come back.
+// Where run cannot tell that it read the log to its end, it emits the gap: when a stream ended
+// while the container ran, with io.EOF or with an error, and no stream opened before the container
+// ended or the context did; when a stream ended with an error other than io.EOF after the container
+// had ended; and when a stream opened again ended, with the container ended, before as many lines
+// of the last timestamp as were read had come back.
 func (f *follower) run(ctx context.Context) {
-	broken := false // a stream ended with an error other than io.EOF, and none has opened since
+	reopen := false // a stream ended while the container ran, and none has opened since
 	for {
 		var since *time.Time
 		if f.read {
@@ -100,18 +101,24 @@ func (f *follower) run(ctx context.Context) {
 		if err != nil {
 			switch {
 			case ctx.Err() != nil:
+				if reopen {
+					f.gap(time.Time{})
+				}
 				return
 			case !f.running(ctx):
-				if broken {
+				if reopen {
 					f.gap(time.Time{})
 				}
 				return
 			case !pause(ctx, pollEvery):
+				if reopen {
+					f.gap(time.Time{})
+				}
 				return
 			}
 			continue
 		}
-		broken = false
+		reopen = false
 		s := &stream{skipping: since != nil}
 		piece, err := f.follow(ctx, rc, s)
 		switch {
@@ -119,7 +126,9 @@ func (f *follower) run(ctx context.Context) {
 			f.keep(s, piece)
 			return
 		case f.running(ctx):
-			broken = !errors.Is(err, io.EOF)
+			// A stream that ended while the container runs, with io.EOF or with an error, may
+			// have left lines unread: a reopen is owed until one opens.
+			reopen = true
 		case !errors.Is(err, io.EOF):
 			f.keep(s, piece)
 			f.gap(time.Time{})

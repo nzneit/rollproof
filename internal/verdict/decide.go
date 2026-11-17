@@ -190,6 +190,27 @@ func judge(t Timeline, p placement) Decision {
 		}
 		break
 	}
+	// A window cannot begin after one before it never did: the observations that fall between
+	// them have no window to be counted in, so the run would pass with them dropped. That is the
+	// caller's mistake, and the run is not verified.
+	var unbegun *Window
+	for i, w := range t.Windows {
+		if w.Start.IsZero() {
+			if unbegun == nil {
+				unbegun = &t.Windows[i]
+			}
+			continue
+		}
+		if unbegun != nil {
+			d.Verdict = NotVerified
+			d.Reasons = []Reason{{
+				Code: InternalError, Verdict: NotVerified, Decided: true,
+				Text: "the " + string(w.Name) + " window began, but the " + string(unbegun.Name) + " window before it never did",
+			}}
+			d.notJudgeBegun(t)
+			return d
+		}
+	}
 	if len(p.before) > 0 {
 		d.Verdict = NotVerified
 		d.Reasons = reasonsOf("", p.before, NotVerified)

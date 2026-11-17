@@ -207,6 +207,15 @@ func placedRows() []placedRow {
 		tl:   Timeline{Windows: []Window{steady(), deploy(), notBegun(Rollback, cond(ProbeFailures))}, Now: at(40 * sec)},
 		want: summary{Verdict: NotVerified, Results: []Result{NotJudged, NotJudged, NotRun}, Reasons: []string{":internal-error", "rollback:probe-failures"}, Decided: InternalError},
 	}, {
+		name: "the deploy window began, but the steady window before it never did",
+		tl: Timeline{Windows: []Window{notBegun(Steady), deploy(), notBegun(Rollback)},
+			Observations: []Observation{{Written: at(11 * sec), T: at(11 * sec), OK: false, N: 1}}, Now: at(40 * sec)},
+		want: summary{Verdict: NotVerified, Results: []Result{NotRun, NotJudged, NotRun}, Reasons: []string{":internal-error"}, Decided: InternalError},
+	}, {
+		name: "the rollback window began, but the deploy window before it never did",
+		tl:   Timeline{Windows: []Window{steady(), notBegun(Deploy), rollback()}, Now: at(70 * sec)},
+		want: summary{Verdict: NotVerified, Results: []Result{NotJudged, NotRun, NotJudged}, Reasons: []string{":internal-error"}, Decided: InternalError},
+	}, {
 		name: "a timed condition between one window's End and the next Start belongs to the earlier",
 		tl: Timeline{Windows: []Window{steady(), deploy(), {Name: Rollback, Start: at(40500 * msec), Finished: at(55 * sec), End: at(70 * sec)}},
 			Timed: []Condition{timed(ProbeLineInvalid, 40200*msec)}, Now: at(70 * sec)},

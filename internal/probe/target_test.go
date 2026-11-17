@@ -37,7 +37,7 @@ func TestCheckTarget(t *testing.T) {
 	const onePod = "the host names one pod of a headless Service: pod orders-0 of Service orders/orders; " +
 		"the probe would go on dialling the address of a pod that has been replaced; " + waysOut
 	const headlessText = "Service orders/orders is headless: a headless Service has no cluster address, and its name resolves to the addresses of pods, which change; " + waysOut
-	const unreadable = "the host cannot be read as a Service: it has an empty label, or it is in the cluster's domain and is not NAME.NAMESPACE.svc; " + waysOut
+	const unreadable = "the host cannot be read as a Service: it has an empty label, or it ends in .svc or in the cluster's domain and is not NAME.NAMESPACE.svc; " + waysOut
 	orders := &types.NamespacedName{Namespace: "orders", Name: "orders"}
 	withAddress := []runtime.Object{service("orders", "orders")}
 	headless := []runtime.Object{service("orders", "orders", func(s *corev1.Service) {

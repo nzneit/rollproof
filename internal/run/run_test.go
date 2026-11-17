@@ -20,6 +20,7 @@ import (
 	"rollproof/internal/config"
 	"rollproof/internal/deploy"
 	"rollproof/internal/probe"
+	"rollproof/internal/report"
 	"rollproof/internal/verdict"
 	"rollproof/internal/watch"
 )
@@ -44,6 +45,10 @@ type resultFile struct {
 	Probes   []struct {
 		Target string `json:"target"`
 	} `json:"probes"`
+	Transitions []struct {
+		Name    string `json:"name"`
+		Command string `json:"command"`
+	} `json:"transitions"`
 }
 
 // codes are the reasons' codes in order.
@@ -411,6 +416,7 @@ func TestSignalDuringDeploy(t *testing.T) {
 	w := newWorld(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	w.deployer.results["deploy"] = deploy.Result{Ending: deploy.StoppedBySignal, ExitCode: -1}
 	w.hooks["transition-deploy"] = func() {
 		w.clock.Advance(5 * time.Second)
 		cancel()
@@ -427,6 +433,10 @@ func TestSignalDuringDeploy(t *testing.T) {
 	}
 	if diff := cmp.Diff([]string{"pass", "not-verified", "not-run"}, r.results()); diff != "" {
 		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+	// The command ended before the interrupted check, so the record keeps its ending.
+	if len(r.Transitions) != 1 || r.Transitions[0].Name != "deploy" || r.Transitions[0].Command != "stopped-by-signal" {
+		t.Errorf("transitions %+v, want deploy with command stopped-by-signal", r.Transitions)
 	}
 	if n := w.calls.count("delete"); n != 0 {
 		t.Errorf("Delete called %d times, want 0", n)
@@ -1149,5 +1159,125 @@ func TestARefusedFinalKeepsTheVerdictsClass(t *testing.T) {
 				t.Errorf("EndCommands called %d times, want 1", n)
 			}
 		})
+	}
+}
+
+// A pass that ends with a window that never ran or never ended is not verified: Decide cannot tell
+// the end of a window from the end of the run (carry-in W1), so the run checks it itself.
+func TestAPassWithAWindowOpenIsNotVerified(t *testing.T) {
+	s := &runState{}
+	for _, tc := range []struct {
+		name string
+		tl   verdict.Timeline
+		text string
+	}{
+		{"a window never ran", verdict.Timeline{
+			Windows: []verdict.Window{
+				{Name: verdict.Steady, Start: t0, End: t0.Add(10 * time.Second)},
+				{Name: verdict.Deploy},
+				{Name: verdict.Rollback},
+			},
+			Silence: time.Hour,
+			Now:     t0.Add(10 * time.Second),
+		}, "the run ended although the deploy window never ran"},
+		{"the last window never ended", verdict.Timeline{
+			Windows: []verdict.Window{
+				{Name: verdict.Steady, Start: t0, End: t0.Add(10 * time.Second)},
+				{Name: verdict.Deploy, Start: t0.Add(10 * time.Second)},
+			},
+			Silence: time.Hour,
+			Now:     t0.Add(20 * time.Second),
+		}, "the run ended while the deploy window was still open"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := s.passedWithAWindowOpen(tc.tl, verdict.Decision{Verdict: verdict.Pass, GoOn: true})
+			if d.Verdict != verdict.NotVerified || d.GoOn {
+				t.Errorf("got %s, GoOn %v; want not-verified and GoOn false", d.Verdict, d.GoOn)
+			}
+			var texts []string
+			for _, r := range d.Reasons {
+				if r.Code != verdict.InternalError {
+					t.Errorf("reason %s, want internal-error only", r.Code)
+				}
+				texts = append(texts, r.Text)
+			}
+			if !slices.Contains(texts, tc.text) {
+				t.Errorf("reasons %q do not hold %q", texts, tc.text)
+			}
+		})
+	}
+}
+
+// panicWriter is a results writer whose final write panics.
+type panicWriter struct{}
+
+func (*panicWriter) Final(report.Run) error { panic("the results writer broke") }
+
+func (*panicWriter) Evidence(string) (io.WriteCloser, error) { return nopWriteCloser{io.Discard}, nil }
+
+func (*panicWriter) Dir() string { return "out" }
+
+// nopWriteCloser is an io.Writer that can be closed.
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
+
+// A panic before the final result.json was written is the refused write: the first file says the
+// run did not finish, so exit 1 only for a decided fail and 2 for any other verdict.
+func TestAPanicInTheFinalWriteIsARefusedWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		verdict verdict.Verdict
+		want    int
+	}{
+		{"a decided fail", verdict.Fail, 1},
+		{"a pass", verdict.Pass, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			s := &runState{
+				o:        Options{Stdout: &stdout, Stderr: &stderr},
+				parent:   context.Background(),
+				w:        &panicWriter{},
+				warnings: &warnings{},
+				decision: verdict.Decision{Verdict: tc.verdict},
+			}
+			if code := s.finish(); code != tc.want {
+				t.Errorf("exit %d, want %d", code, tc.want)
+			}
+			if !strings.HasPrefix(stderr.String(), "rollproof: cannot write results: ") {
+				t.Errorf("stderr is %q", stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "the results writer broke") {
+				t.Errorf("stderr does not hold the panic's text: %q", stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("stdout is %q, want no console: the final file was not written", stdout.String())
+			}
+		})
+	}
+}
+
+// Stop's error means that the probe's pod may still be running: the run keeps it as a warning.
+func TestTheProbesStopErrorIsAWarning(t *testing.T) {
+	w := newWorld(t)
+	w.probe.stopErr = errors.New("the pod delete was refused")
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+	r := w.result()
+	if r.Verdict != "pass" {
+		t.Errorf("verdict %q, want pass", r.Verdict)
+	}
+	if len(r.Warnings) != 1 {
+		t.Fatalf("warnings %q, want one", r.Warnings)
+	}
+	for _, part := range []string{"the probe could not be stopped", "the pod delete was refused", "its pod may still be there"} {
+		if !strings.Contains(r.Warnings[0], part) {
+			t.Errorf("the warning %q does not hold %q", r.Warnings[0], part)
+		}
+	}
+	if !strings.Contains(w.stdout.String(), "the pod delete was refused") {
+		t.Errorf("the console does not print the warning:\n%s", w.stdout.String())
 	}
 }

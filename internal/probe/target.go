@@ -126,8 +126,8 @@ func readHost(host string) (name, namespace string, explicit bool, err error) {
 // unreadableHost is the error of a host that ends in .svc or in the cluster's domain, or has an
 // empty label, and that is not NAME.NAMESPACE.svc or POD.NAME.NAMESPACE.svc.
 func unreadableHost() error {
-	return unsupported("the host cannot be read as a Service: it has an empty label, or it is in the cluster's domain " +
-		"and is not NAME.NAMESPACE.svc")
+	return unsupported("the host cannot be read as a Service: it has an empty label, or it ends in .svc or in the " +
+		"cluster's domain and is not NAME.NAMESPACE.svc")
 }
 
 // unsupported returns a TargetUnsupported condition that ends with the ways out.
