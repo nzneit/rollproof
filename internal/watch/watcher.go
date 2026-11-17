@@ -41,10 +41,13 @@ type Watcher struct {
 	client  kubernetes.Interface
 	factory informers.SharedInformerFactory
 
-	// mu guards tr and last. Every call into tr is made under it, with o.Now read while it is
-	// held, so that tr is told its times in order. Nothing that waits is done under it.
+	// mu guards tr, last and service. Every call into tr is made under it, with o.Now read while
+	// it is held, so that tr is told its times in order. Nothing that waits is done under it.
 	mu sync.Mutex
 	tr *Tracker
+	// service is the Service whose endpoints Transition reads: Options.Service unless UseService
+	// named another.
+	service *types.NamespacedName
 	// last holds, by informer and key, the last object tr was told under that key and not yet told
 	// gone, so that a deletion whose final state the informer does not know is still told.
 	last map[objectKey]runtime.Object
@@ -83,11 +86,12 @@ func Start(ctx context.Context, client kubernetes.Interface, o Options) (*Watche
 		factory: informers.NewSharedInformerFactoryWithOptions(client, 0),
 		tr: NewTracker(TrackerOptions{Namespace: o.Namespace, Selector: selector,
 			Settle: o.Settle, Timeout: o.Timeout, Workers: o.Workers}),
-		last:  map[objectKey]runtime.Object{},
-		conns: map[string]*connection{},
-		wake:  make(chan struct{}, 1),
-		stop:  make(chan struct{}),
-		done:  make(chan struct{}),
+		service: o.Service,
+		last:    map[objectKey]runtime.Object{},
+		conns:   map[string]*connection{},
+		wake:    make(chan struct{}, 1),
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
 	}
 	var synced []cache.InformerSynced
 	for _, c := range w.connections() {

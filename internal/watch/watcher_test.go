@@ -261,7 +261,9 @@ func TestTransitionCancelled(t *testing.T) {
 	}
 }
 
-func TestProbed(t *testing.T) {
+// probedObjects is the namespace of TestProbed: two workloads, of which one is behind the
+// Service orders.
+func probedObjects() []runtime.Object {
 	slice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{Name: "orders-x7k2p", Namespace: "orders",
 			Labels: map[string]string{discoveryv1.LabelServiceName: "orders"}},
@@ -273,10 +275,26 @@ func TestProbed(t *testing.T) {
 				TargetRef: &corev1.ObjectReference{Kind: "Pod", Namespace: "orders", Name: "orders-a-2", UID: "a2"}},
 		},
 	}
-	objs := append(base(), slice,
+	return append(base(), slice,
 		deployment("batch", 1, 1, 1, 1, 1, 1),
 		replicaSet("batch-a", "batch"),
 		pod("batch-a-1", "k1", "ReplicaSet", "batch-a", true, false))
+}
+
+// probedValues runs one deploy transition on w and gives each workload's Probed.
+func probedValues(t *testing.T, w *Watcher, clock *fakeClock) map[string]string {
+	t.Helper()
+	res := make(chan Transition, 1)
+	go func() { res <- w.Transition(t.Context(), verdict.Deploy, clock.Now(), closed()) }()
+	got := map[string]string{}
+	for _, c := range drive(t, clock, res).Workloads {
+		got[c.Workload.Name] = c.Probed
+	}
+	return got
+}
+
+func TestProbed(t *testing.T) {
+	objs := probedObjects()
 	for _, r := range []struct {
 		name          string
 		service       *types.NamespacedName
@@ -288,16 +306,28 @@ func TestProbed(t *testing.T) {
 	} {
 		t.Run(r.name, func(t *testing.T) {
 			w, _, clock := startWatcher(t, r.service, objs...)
-			res := make(chan Transition, 1)
-			go func() { res <- w.Transition(t.Context(), verdict.Deploy, clock.Now(), closed()) }()
-			got := map[string]string{}
-			for _, c := range drive(t, clock, res).Workloads {
-				got[c.Workload.Name] = c.Probed
-			}
+			got := probedValues(t, w, clock)
 			if diff := cmp.Diff(map[string]string{"batch": r.batch, "orders": r.orders}, got); diff != "" {
 				t.Errorf("Probed (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// TestUseService pins the Service that UseService names: a Watcher started with none, and told
+// the Service before its first Transition, reads the endpoints that a Watcher started with that
+// Service reads.
+func TestUseService(t *testing.T) {
+	service := &types.NamespacedName{Namespace: "orders", Name: "orders"}
+	started, _, clock := startWatcher(t, service, probedObjects()...)
+	want := probedValues(t, started, clock)
+
+	told, _, clock := startWatcher(t, nil, probedObjects()...)
+	told.UseService(service)
+	got := probedValues(t, told, clock)
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Probed (-want +got):\n%s", diff)
 	}
 }
 

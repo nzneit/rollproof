@@ -40,6 +40,8 @@ type Clock interface {
 type Watcher interface {
 	InstallReady(ctx context.Context, began time.Time, exited <-chan struct{}) (watch.Install, error)
 	Transition(ctx context.Context, name verdict.WindowName, began time.Time, exited <-chan struct{}) watch.Transition
+	// UseService names the Service whose endpoints Transition reads.
+	UseService(service *types.NamespacedName)
 	PodsAt(at time.Time) (stopping, starting []watch.PodNote)
 	Stop()
 }
@@ -51,7 +53,7 @@ type Watcher interface {
 type Cluster interface {
 	Store(ctx context.Context) (probeImage string, images map[string]config.ImageRef, err error)
 	Deployer(cfg *config.Config) (deploy.Deployer, []string, error)
-	Watcher(ctx context.Context, cfg *config.Config, service *types.NamespacedName) (Watcher, error)
+	Watcher(ctx context.Context, cfg *config.Config) (Watcher, error)
 	Target(ctx context.Context, cfg *config.Config) (probe.Target, error)
 	Probe(cfg *config.Config, probeImage string, raw io.Writer) probe.Probe
 	Facts() report.Cluster
@@ -157,7 +159,7 @@ type runState struct {
 	clusterSeen *report.Cluster
 }
 
-// sequence performs steps 1 to 12 and returns the value of a panic, if one
+// sequence performs steps 1 to 13 and returns the value of a panic, if one
 // stopped it.
 func (s *runState) sequence(ctx context.Context) (caught any) {
 	defer func() { caught = recover() }()
@@ -171,7 +173,7 @@ func (s *runState) sequence(ctx context.Context) (caught any) {
 	return nil
 }
 
-// setUp performs steps 1 to 8: everything before the steady window.
+// setUp performs steps 1 to 9: everything before the steady window.
 func (s *runState) setUp(ctx context.Context) bool {
 	cfg, err := s.u.Load(s.o.ConfigPath)
 	if err != nil {
@@ -229,15 +231,9 @@ func (s *runState) setUp(ctx context.Context) bool {
 		return false
 	}
 	s.releases = d.Releases()
-	t, err := c.Target(ctx, cfg)
-	if err != nil {
-		return s.beforeFail(ctx, err)
-	}
-	s.target = t
-	if s.interrupted(ctx) {
-		return false
-	}
-	wt, err := c.Watcher(ctx, cfg, t.Service)
+	// Step 6: the watcher, before the install. It needs the probe's target, and
+	// so the target's Service, only in a transition.
+	wt, err := c.Watcher(ctx, cfg)
 	if err != nil {
 		return s.beforeFail(ctx, err)
 	}
@@ -246,6 +242,20 @@ func (s *runState) setUp(ctx context.Context) bool {
 		return false
 	}
 	if !s.installStep(ctx) || s.interrupted(ctx) {
+		return false
+	}
+	// Step 8: the probe's target, checked after the install, because the chart's
+	// Service exists only once the previous release is installed.
+	t, err := c.Target(ctx, cfg)
+	if err != nil {
+		return s.beforeFail(ctx, err)
+	}
+	s.target = t
+	if s.interrupted(ctx) {
+		return false
+	}
+	s.watcher.UseService(t.Service)
+	if s.interrupted(ctx) {
 		return false
 	}
 	return s.startProbe(ctx)
@@ -282,7 +292,7 @@ func (s *runState) installStep(ctx context.Context) bool {
 	return false
 }
 
-// startProbe performs step 8: the probe and its first observation.
+// startProbe performs step 9: the probe and its first observation.
 func (s *runState) startProbe(ctx context.Context) bool {
 	p := s.cluster.Probe(s.cfg, s.probeImage, s.ev.file("probe.log"))
 	s.probe = p
@@ -297,7 +307,7 @@ func (s *runState) startProbe(ctx context.Context) bool {
 	return true
 }
 
-// windows performs steps 9 to 11: the windows of the run, each judged as it
+// windows performs steps 10 to 12: the windows of the run, each judged as it
 // ends. It reports false when a signal ended the run.
 func (s *runState) windows(ctx context.Context) bool {
 	s.names = s.deployer.Transitions()
@@ -328,7 +338,7 @@ func (s *runState) windows(ctx context.Context) bool {
 	return s.transitionsStep(ctx)
 }
 
-// transitionsStep performs step 11: each transition of the deployer, in order,
+// transitionsStep performs step 12: each transition of the deployer, in order,
 // until one of them does not pass.
 func (s *runState) transitionsStep(ctx context.Context) bool {
 	for i, name := range s.names {
@@ -387,7 +397,7 @@ func (s *runState) placeTransition(i int, tr watch.Transition, res deploy.Result
 	}
 }
 
-// stopProbe performs step 12: the probe is stopped, its last lines are read,
+// stopProbe performs step 13: the probe is stopped, its last lines are read,
 // and the verdict is decided. A signal that comes while the probe is stopping
 // belongs to the last window that began.
 func (s *runState) stopProbe(ctx context.Context) {
@@ -549,7 +559,7 @@ func (s *runState) toolFailed(caught any) {
 	s.decide(true)
 }
 
-// finish performs steps 13 to 15: the final result.json, the window marks, the
+// finish performs steps 14 to 16: the final result.json, the window marks, the
 // console text, the clean-up and the exit code. A panic here is a warning: the
 // verdict was decided already. The clean-up runs on every path, so that a
 // report that cannot be written does not leave a cluster behind.
@@ -658,7 +668,7 @@ func (s *runState) cleanUpQuietly() {
 	s.cleanUp()
 }
 
-// cleanUp performs step 14: the watcher is stopped, the cluster is deleted
+// cleanUp performs step 15: the watcher is stopped, the cluster is deleted
 // unless it was asked for or a signal ended the run, and an error is a
 // warning.
 func (s *runState) cleanUp() {

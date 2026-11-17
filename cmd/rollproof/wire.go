@@ -9,7 +9,6 @@ import (
 	"os"
 	"time"
 
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 
 	"rollproof/internal/cluster"
@@ -156,8 +155,9 @@ func (s *session) Deployer(cfg *config.Config) (deploy.Deployer, []string, error
 	return helm, runner.Removed(), nil
 }
 
-// Watcher follows the workloads of the test's namespace.
-func (s *session) Watcher(ctx context.Context, cfg *config.Config, service *types.NamespacedName) (run.Watcher, error) {
+// Watcher follows the workloads of the test's namespace. The Service whose
+// endpoints a transition reads comes later, from UseService.
+func (s *session) Watcher(ctx context.Context, cfg *config.Config) (run.Watcher, error) {
 	startCtx, cancel := context.WithTimeout(ctx, cfg.Limits.Timeout)
 	defer cancel()
 	w, err := watch.Start(startCtx, s.client, watch.Options{
@@ -166,7 +166,6 @@ func (s *session) Watcher(ctx context.Context, cfg *config.Config, service *type
 		Settle:    cfg.Limits.Settle,
 		Timeout:   cfg.Limits.Timeout,
 		Workers:   cfg.Cluster.Workers,
-		Service:   service,
 		Now:       time.Now,
 	})
 	if err != nil {

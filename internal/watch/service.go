@@ -8,11 +8,18 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// behind returns the watched workloads behind the Service that o.Service names: the workloads of
+// UseService names the Service whose endpoints Transition reads, in place of Options.Service;
+// nil names none. It is called before the first Transition.
+func (w *Watcher) UseService(service *types.NamespacedName) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.service = service
+}
+
+// behind returns the watched workloads behind the Service that svc names: the workloads of
 // the pods that its EndpointSlices name as an endpoint's target. A Service in a namespace other
 // than the watched one has no watched workload behind it, and nothing is read.
-func (w *Watcher) behind(ctx context.Context) (map[Workload]bool, error) {
-	svc := w.o.Service
+func (w *Watcher) behind(ctx context.Context, svc *types.NamespacedName) (map[Workload]bool, error) {
 	found := map[Workload]bool{}
 	if svc.Namespace != w.o.Namespace {
 		return found, nil
@@ -48,10 +55,13 @@ func (t *Tracker) podWorkloadByUID(uid types.UID) (Workload, bool) {
 // reading is one reading of the workloads behind the Service: nil when there is no Service, the
 // reading failed, or ctx had ended when it returned, which counts as no reading.
 func (w *Watcher) reading(ctx context.Context) map[Workload]bool {
-	if w.o.Service == nil {
+	w.mu.Lock()
+	svc := w.service
+	w.mu.Unlock()
+	if svc == nil {
 		return nil
 	}
-	found, err := w.behind(ctx)
+	found, err := w.behind(ctx, svc)
 	if err != nil || ctx.Err() != nil {
 		return nil
 	}

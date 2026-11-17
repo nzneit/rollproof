@@ -139,7 +139,6 @@ type fakeCluster struct {
 	target                                                  probe.Target
 	removed                                                 []string
 	kept                                                    string
-	service                                                 *types.NamespacedName
 }
 
 // Store records "store", runs its hook and returns the scripted image and map.
@@ -160,12 +159,10 @@ func (c *fakeCluster) Deployer(cfg *config.Config) (deploy.Deployer, []string, e
 	return c.w.deployer, c.removed, nil
 }
 
-// Watcher records "watcher", runs its hook, keeps the service it was given and
-// gives the fake watcher.
-func (c *fakeCluster) Watcher(ctx context.Context, cfg *config.Config, service *types.NamespacedName) (Watcher, error) {
+// Watcher records "watcher", runs its hook and gives the fake watcher.
+func (c *fakeCluster) Watcher(ctx context.Context, cfg *config.Config) (Watcher, error) {
 	c.w.calls.add("watcher")
 	c.w.hook("watcher")
-	c.service = service
 	if c.watcherErr != nil {
 		return nil, c.watcherErr
 	}
@@ -277,9 +274,19 @@ type fakeWatcher struct {
 	transitions        map[verdict.WindowName]watch.Transition
 	stopping, starting []watch.PodNote
 	podsAt             []time.Time // every moment PodsAt was asked about
+	// service is the Service UseService named, and useCalls the calls made
+	// before it: what the test that pins its place reads.
+	service  *types.NamespacedName
+	useCalls []string
 	// before, when set, runs at the start of Transition, before it waits for the
 	// command: a test's way to fail while the command is still running.
 	before func(verdict.WindowName)
+}
+
+// UseService keeps the Service and the calls made before it.
+func (f *fakeWatcher) UseService(service *types.NamespacedName) {
+	f.service = service
+	f.useCalls = f.w.calls.list()
 }
 
 // InstallReady waits until the install's command has exited or ctx ends, then

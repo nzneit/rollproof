@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -103,8 +104,8 @@ func TestPass(t *testing.T) {
 	if code := w.run(context.Background()); code != 0 {
 		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
 	}
-	want := []string{"load", "check", "create", "store", "deployer", "fetch", "target", "watcher",
-		"install", "install-ready", "probe", "start", "deploy", "transition-deploy",
+	want := []string{"load", "check", "create", "store", "deployer", "fetch", "watcher",
+		"install", "install-ready", "target", "probe", "start", "deploy", "transition-deploy",
 		"rollback", "transition-rollback", "probe-stop", "end-commands", "watch-stop", "delete"}
 	if diff := cmp.Diff(want, w.calls.list()); diff != "" {
 		t.Errorf("calls (-want +got):\n%s", diff)
@@ -118,6 +119,25 @@ func TestPass(t *testing.T) {
 	}
 	if !strings.HasPrefix(w.stdout.String(), "rollproof: PASS") {
 		t.Errorf("stdout does not start with the console text:\n%s", w.stdout.String())
+	}
+}
+
+// TestUseServiceAfterTheTarget pins where the watcher gets its Service: the one
+// the target named, given after the target check and before the probe starts.
+func TestUseServiceAfterTheTarget(t *testing.T) {
+	w := newWorld(t)
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if diff := cmp.Diff(w.cluster.target.Service, w.watcher.service); diff != "" {
+		t.Errorf("the Service given to UseService (-want +got):\n%s", diff)
+	}
+	calls := w.watcher.useCalls
+	if len(calls) == 0 || calls[len(calls)-1] != "target" {
+		t.Fatalf("UseService came after %q, want the target check last", calls)
+	}
+	if slices.Contains(calls, "start") {
+		t.Errorf("UseService came after the probe started; the calls were %q", calls)
 	}
 }
 
@@ -168,18 +188,18 @@ func TestEachBeforeFailure(t *testing.T) {
 		}, "chart-fetch-failed", then("end-commands", "delete")},
 		{"target", func(w *world) {
 			w.cluster.targetErr = verdict.Condition{Code: verdict.TargetUnsupported, Text: "the Service orders/orders is headless"}
-		}, "target-unsupported", then("target", "end-commands", "delete")},
+		}, "target-unsupported", then("watcher", "install", "install-ready", "target", "end-commands", "watch-stop", "delete")},
 		{"install exits non-zero", func(w *world) {
 			w.deployer.results["install"] = deploy.Result{Ending: deploy.ExitedNonZero, ExitCode: 1}
 			w.watcher.installErr = verdict.Condition{Code: verdict.NothingWatched, Text: "must not be used"}
-		}, "install-failed", then("target", "watcher", "install", "install-ready", "end-commands", "watch-stop", "delete")},
+		}, "install-failed", then("watcher", "install", "install-ready", "end-commands", "watch-stop", "delete")},
 		{"nothing watched", func(w *world) {
 			w.watcher.installErr = verdict.Condition{Code: verdict.NothingWatched,
 				Text: "15 s after the install command returned, namespace orders held no Deployment, StatefulSet or DaemonSet"}
-		}, "nothing-watched", then("target", "watcher", "install", "install-ready", "end-commands", "watch-stop", "delete")},
+		}, "nothing-watched", then("watcher", "install", "install-ready", "end-commands", "watch-stop", "delete")},
 		{"probe not started", func(w *world) {
 			w.probe.startErr = verdict.Condition{Code: verdict.ProbeNotStarted, Text: "no observation within limits.timeout"}
-		}, "probe-not-started", then("target", "watcher", "install", "install-ready", "probe", "start", "end-commands", "watch-stop", "delete")},
+		}, "probe-not-started", then("watcher", "install", "install-ready", "target", "probe", "start", "end-commands", "watch-stop", "delete")},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
