@@ -142,12 +142,31 @@ func judge(t Timeline, p placement) Decision {
 		begun = begun || !w.Start.IsZero()
 	}
 
-	if len(p.before) > 0 {
-		for i := range d.Windows {
-			d.Windows[i].Result = NotRun
+	// A condition placed on a window that never began is the caller's mistake; it is never
+	// dropped. The run is not verified, and the conditions are listed after the reason.
+	var stray []Reason
+	var strayWindow WindowName
+	for i, w := range t.Windows {
+		if w.Start.IsZero() && len(p.windows[i]) > 0 {
+			if stray == nil {
+				strayWindow = w.Name
+			}
+			stray = append(stray, reasonsOf(w.Name, p.windows[i], "")...)
 		}
+	}
+	if stray != nil {
+		d.Verdict = NotVerified
+		d.Reasons = append([]Reason{{
+			Code: InternalError, Verdict: NotVerified, Decided: true,
+			Text: "a condition was placed in the " + string(strayWindow) + " window, which never began",
+		}}, stray...)
+		d.notJudgeBegun(t)
+		return d
+	}
+	if len(p.before) > 0 {
 		d.Verdict = NotVerified
 		d.Reasons = reasonsOf("", p.before, NotVerified)
+		d.notJudgeBegun(t)
 		return d
 	}
 	if !begun {
@@ -239,4 +258,15 @@ func reasonsOf(w WindowName, cs []Condition, decides Verdict) []Reason {
 	}
 	rs[pick].Decided = true
 	return rs
+}
+
+// notJudgeBegun sets the result of every window of t: not-judged for one that began, not-run for
+// one that never did.
+func (d *Decision) notJudgeBegun(t Timeline) {
+	for i, w := range t.Windows {
+		d.Windows[i].Result = NotRun
+		if !w.Start.IsZero() {
+			d.Windows[i].Result = NotJudged
+		}
+	}
 }

@@ -34,7 +34,7 @@ func stalled(w Window) Window { w.Finished = time.Time{}; return w }
 // inProgress is w before it has ended.
 func inProgress(w Window) Window { w.Finished, w.End = time.Time{}, time.Time{}; return w }
 
-func notBegun(name WindowName) Window { return Window{Name: name} }
+func notBegun(name WindowName, cs ...Condition) Window { return Window{Name: name, Conditions: cs} }
 
 func cond(c Code) Condition { return Condition{Code: c, Text: "text of " + string(c)} }
 
@@ -201,7 +201,11 @@ func placedRows() []placedRow {
 	}, {
 		name: "a timed condition before the steady window's Start goes to Before",
 		tl:   Timeline{Windows: []Window{steady(), deploy(), rollback()}, Timed: []Condition{timed(ProbeLineInvalid, -1*sec)}, Now: at(70 * sec)},
-		want: summary{Verdict: NotVerified, Results: notRun3, Reasons: []string{":probe-line-invalid"}, Decided: ProbeLineInvalid},
+		want: summary{Verdict: NotVerified, Results: []Result{NotJudged, NotJudged, NotJudged}, Reasons: []string{":probe-line-invalid"}, Decided: ProbeLineInvalid},
+	}, {
+		name: "a condition on a window that never began",
+		tl:   Timeline{Windows: []Window{steady(), deploy(), notBegun(Rollback, cond(ProbeFailures))}, Now: at(40 * sec)},
+		want: summary{Verdict: NotVerified, Results: []Result{NotJudged, NotJudged, NotRun}, Reasons: []string{":internal-error", "rollback:probe-failures"}, Decided: InternalError},
 	}, {
 		name: "a timed condition between one window's End and the next Start belongs to the earlier",
 		tl: Timeline{Windows: []Window{steady(), deploy(), {Name: Rollback, Start: at(40500 * msec), Finished: at(55 * sec), End: at(70 * sec)}},
@@ -225,7 +229,7 @@ func TestDecidePlaced(t *testing.T) {
 				t.Errorf("Ignored = %v, want %v", ignored, tc.ignored)
 			}
 			for _, r := range d.Reasons {
-				if r.Text != "text of "+string(r.Code) {
+				if r.Text != "text of "+string(r.Code) && !(r.Code == InternalError && r.Window == "") {
 					t.Errorf("reason %s has the text %q", r.Code, r.Text)
 				}
 			}
