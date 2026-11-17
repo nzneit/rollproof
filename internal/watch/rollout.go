@@ -17,7 +17,8 @@ limitations under the License.
 // The rules of Complete are copied from
 // k8s.io/kubectl/pkg/polymorphichelpers/rollout_status.go at kubectl v0.37.0
 // (Kubernetes v1.37.0), with two changes: they take typed objects, and where
-// kubectl returns an error, Complete answers "not complete". Read them again
+// kubectl returns an error, Complete answers "not complete". The copy keeps
+// kubectl out of the tool: no package of the tool imports it. Read them again
 // at every Kubernetes minor; TestCompleteAgreesWithKubectl compares them.
 
 package watch

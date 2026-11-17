@@ -72,7 +72,6 @@ type fakeTimer struct {
 	ch chan time.Time
 }
 
-// Now gives now.
 func (c *fakeClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()

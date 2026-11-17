@@ -387,9 +387,8 @@ func (s *runState) transitionsStep(ctx context.Context) bool {
 	return true
 }
 
-// placeTransition fills one transition's window: its finish and end, its
-// conditions from the watcher and from the command, and the pods that were
-// stopping and starting at its first failure.
+// placeTransition fills one transition's window: its finish and end, and its
+// conditions from the watcher and from the command.
 func (s *runState) placeTransition(i int, tr watch.Transition, res deploy.Result) {
 	w := &s.tl.Windows[i]
 	w.Finished, w.End = tr.Finished, tr.Ended
@@ -575,8 +574,9 @@ func (s *runState) toolFailed(caught any) {
 }
 
 // finish performs steps 14 to 16: the final result.json, the window marks, the
-// console text, the clean-up and the exit code. A panic here is a warning: the
-// verdict was decided already. The clean-up runs on every path, so that a
+// console text, the clean-up and the exit code. A panic here after the final
+// file was written is a warning: the verdict was decided already. A panic
+// before it is the refused write. The clean-up runs on every path, so that a
 // report that cannot be written does not leave a cluster behind.
 func (s *runState) finish() (code int) {
 	refused := false
@@ -826,7 +826,6 @@ type discardCloser struct{}
 // Write drops what is written and reports it as written.
 func (discardCloser) Write(p []byte) (int, error) { return len(p), nil }
 
-// Close does nothing.
 func (discardCloser) Close() error { return nil }
 
 // evidence is where the run's evidence files come from. A file that cannot be

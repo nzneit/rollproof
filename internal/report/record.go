@@ -6,8 +6,8 @@ package report
 import "time"
 
 // Run is the record of one run: everything result.json holds, and Out, the
-// results folder, for the console's last line. Every nested type is defined
-// in the same file, with only strings, numbers, booleans and times.
+// results folder, for the console's last line. It holds no values but strings,
+// numbers, booleans and times.
 type Run struct {
 	Schema           int          `json:"schema"`
 	Final            bool         `json:"final"`
@@ -70,7 +70,8 @@ type Transition struct {
 
 // Workload is one watched workload in one transition. Workload is the kind,
 // a slash and the name. Probed is yes, no or not known. QuickestStopMs is
-// nil when no ready pod was deleted.
+// nil when the stop is zero: no ready pod was deleted, or one was gone at
+// the moment its deletion was first seen.
 type Workload struct {
 	Workload       string `json:"workload"`
 	PodsAtStart    int    `json:"pods_at_start"`

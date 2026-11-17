@@ -277,10 +277,12 @@ func (h handler) OnDelete(obj any) { h.w.gone(h.kind, obj) }
 
 // set tells the Tracker that obj was created or changed. An update whose resource version is old's
 // comes only from a list again, because the informers run with no resync: the Tracker is told
-// that the watch may have missed changes. An empty version is no sign of one; the API server
-// gives every object a version, and only a fake client gives none. An update whose UID differs
-// from old's is a new object under the old name: the informer missed a deletion and a creation
-// between the two, so old is told gone first.
+// that the watch may have missed changes. That sign is client-go's shared informer, read at
+// v0.37.2: an object it already holds comes back as an update with an equal version only after a
+// resync, whose period is zero here. An empty version is no sign of one; the API server gives
+// every object a version, and only a fake client gives none. An update whose UID differs from
+// old's is a new object under the old name: the informer missed a deletion and a creation between
+// the two, so old is told gone first.
 func (w *Watcher) set(kind string, old, obj runtime.Object) {
 	key := objectKey{kind, cache.MetaObjectToName(obj.(metav1.Object)).String()}
 	w.mu.Lock()

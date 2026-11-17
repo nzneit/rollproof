@@ -396,7 +396,8 @@ func lists(v any, key string, isList, notList map[string]int) {
 }
 
 func TestNilListsAreWrittenAsEmptyLists(t *testing.T) {
-	// Every list of the record is nil: each struct has only its name set.
+	// Every list of the record is nil but one workload list, which stays a list; each struct has
+	// only its name set.
 	r := Run{
 		Reasons:     []Reason{{Code: "internal-error"}},
 		Windows:     []Window{{Name: "steady"}},

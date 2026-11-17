@@ -237,10 +237,8 @@ func (s *session) Delete(ctx context.Context) error {
 // realClock is the run's clock: time.Now and time.After.
 type realClock struct{}
 
-// Now returns the current time.
 func (realClock) Now() time.Time { return time.Now() }
 
-// After returns a channel that receives after d.
 func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 
 // httpOptions are the built-in probe's settings as the probe takes them.

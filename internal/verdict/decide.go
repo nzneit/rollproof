@@ -56,8 +56,8 @@ type WindowResult struct {
 }
 
 // Decision is the verdict so far. GoOn says whether the run starts its next transition. Uncounted
-// is the number of observations outside every window. Ignored are Timed conditions later than the
-// last window's End; the report shows them as warnings.
+// is the number of observations outside every window. Ignored are Timed conditions at or after
+// the last window's End; the report shows them as warnings.
 type Decision struct {
 	Verdict   Verdict
 	GoOn      bool
@@ -139,7 +139,8 @@ func place(t Timeline) placement {
 	return p
 }
 
-// judge applies rules 1, 2 and 4 to 7 to what place gave.
+// judge applies rules 1 and 4 to 9 to what place gave. Rule 2, the windows'
+// lengths, and rule 8's running of a transition to its end are run's.
 func judge(t Timeline, p placement) Decision {
 	d := Decision{
 		Windows:   slices.Clone(p.results),

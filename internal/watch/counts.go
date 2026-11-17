@@ -125,7 +125,9 @@ func (t *Tracker) counts(tr *transition, b time.Time) []Count {
 	}
 	began := tr.t.Began
 	digests := make([]map[string]bool, len(ws))
-	stopped := make([]bool, len(ws)) // whether cs[i].QuickestStop holds a pod's time
+	// stopped says whether cs[i].QuickestStop holds a pod's time. Zero is both a time and the
+	// absence of one: a pod gone at the moment its deletion was first seen stopped in no time.
+	stopped := make([]bool, len(ws))
 	for uid, p := range t.pods {
 		w, ok := t.podWorkload(p)
 		i, watched := index[w]
@@ -288,8 +290,7 @@ func (t *Tracker) unschedulable(ws []Workload) []string {
 	return out
 }
 
-// Install is what the install left: every watched workload with its pods and the image digests
-// they run.
+// Install is what the install left: every watched workload with the image digests its pods run.
 type Install struct {
 	Workloads []Count
 }

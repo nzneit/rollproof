@@ -55,8 +55,9 @@ type Transition struct {
 }
 
 // Count is one workload in one transition: its pods at the start, how many of those are gone, how
-// many pods were created, and the image digests those ran. QuickestStop is zero when no ready pod
-// was deleted. Probed is yes, no or not known.
+// many pods were created, and the image digests those ran. QuickestStop is the shortest stop of a
+// ready pod that was deleted. Zero means that none was timed, or that one was gone at the moment
+// its deletion was first seen. Probed is yes, no or not known.
 type Count struct {
 	Workload                   Workload
 	AtStart, Replaced, Created int
@@ -310,7 +311,6 @@ func (t *Tracker) noteMissed(m time.Time) {
 	}
 }
 
-// later returns the later of two moments.
 func later(a, b time.Time) time.Time {
 	if a.Before(b) {
 		return b
