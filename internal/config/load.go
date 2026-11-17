@@ -427,12 +427,36 @@ func Load(path string, env func(name string) (string, bool)) (*Config, error) {
 	if err := strict.Decode(&f); err != nil {
 		return nil, x.decodeError(err)
 	}
+	if err := checkNullItems(x); err != nil {
+		return nil, err
+	}
+	if err := checkPasswordForms(&f, x); err != nil {
+		return nil, err
+	}
 	c, err := convert(&f, x)
 	if err != nil {
 		return nil, err
 	}
 	c.Path, c.Dir = real, filepath.Dir(real)
+	absolutePaths(c)
+	if err := validate(c, x); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// passwordForm is the one form that a registry's password may take in the file.
+var passwordForm = regexp.MustCompile(`^\$\{env\.[A-Za-z_][A-Za-z0-9_]*\}$`)
+
+// checkPasswordForms rejects a registry password that is not one ${env.NAME} form. It reads the
+// file's own struct, before substitution exists.
+func checkPasswordForms(f *fileConfig, x *index) error {
+	for i, r := range f.Registries {
+		if r.Password != "" && !passwordForm.MatchString(r.Password) {
+			return x.reject(fmt.Sprintf("registries[%d].password", i), "must be one ${env.NAME} form")
+		}
+	}
+	return nil
 }
 
 func convert(f *fileConfig, x *index) (*Config, error) {
@@ -555,4 +579,17 @@ func matchesQuoted(value, quoted string) bool {
 		return quoted == value[:7]+"..."
 	}
 	return quoted == value
+}
+
+var nullItemRe = regexp.MustCompile(`^(?:registries|deploy\.helm\.(?:previous|candidate)\.values|probe\.custom\.env)\[[0-9]+\]$`)
+
+// checkNullItems rejects a null item in registries, in a release's values or in a custom probe's
+// env. The decoder drops such an item without a word, so only the file's own nodes show it.
+func checkNullItems(x *index) error {
+	for _, e := range x.entries {
+		if e.tag == "!!null" && !e.hasKey && nullItemRe.MatchString(e.path) {
+			return x.reject(e.path, "must not be empty")
+		}
+	}
+	return nil
 }
