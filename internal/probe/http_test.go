@@ -388,6 +388,93 @@ func TestRunHTTPDrainsOnCancel(t *testing.T) {
 	}
 }
 
+func TestRunHTTPWarmupBeginsWhenTheTargetAnswers(t *testing.T) {
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) <= 5 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	defer srv.Close()
+	o := testOptions(srv.URL)
+	o.Warmup = 100 * time.Millisecond
+	out := runFor(t, o, 500*time.Millisecond)
+	// The five failures of the warm-up must not be among the lines: every line written is a pass.
+	obs := out.observations(t)
+	if len(obs) == 0 {
+		t.Fatal("no observation after the warm-up")
+	}
+	for i, ob := range obs {
+		if !ob.OK {
+			t.Fatalf("line %d is a failure (%s); the warm-up's failures must not be written", i, ob.Class)
+		}
+	}
+	if n := requests.Load(); n < 6 {
+		t.Errorf("the server saw %d requests, want the warm-up's five failures and the checks after them", n)
+	}
+}
+
+func TestRunHTTPWarmupWritesNothingWhenTheTargetNeverAnswers(t *testing.T) {
+	seen := make(chan struct{}, 64)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		seen <- struct{}{}
+	}))
+	defer srv.Close()
+	o := testOptions(srv.URL)
+	o.Warmup = 100 * time.Millisecond
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	out := &capture{}
+	done := make(chan error, 1)
+	go func() { done <- RunHTTP(ctx, o, out) }()
+	for i := 0; i < 5; i++ {
+		select {
+		case <-seen:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the warm-up sent fewer than five checks")
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunHTTP: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunHTTP did not return within 5 s of the cancel")
+	}
+	if len(out.got) != 0 {
+		t.Errorf("%d lines were written during the warm-up, want none", len(out.got))
+	}
+}
+
+func TestRunHTTPWarmupRestartsItsCountAfterAFailure(t *testing.T) {
+	var requests, failedAt atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 3 {
+			failedAt.Store(time.Now().UnixNano())
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	defer srv.Close()
+	o := testOptions(srv.URL)
+	o.Rate = 20
+	o.Warmup = 120 * time.Millisecond
+	obs := runFor(t, o, 600*time.Millisecond).observations(t)
+	if len(obs) == 0 {
+		t.Fatal("no line")
+	}
+	if failedAt.Load() == 0 {
+		t.Fatal("the warm-up did not reach the failing check")
+	}
+	failed := time.Unix(0, failedAt.Load())
+	if delay := obs[0].T.Sub(failed); delay < o.Warmup {
+		t.Errorf("the first observation came %v after the failed check, want at least the warm-up %v",
+			delay, o.Warmup)
+	}
+}
+
 func TestRunHTTPNeverSilentWhileItWorks(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		time.Sleep(600 * time.Millisecond)

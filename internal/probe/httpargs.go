@@ -14,7 +14,8 @@ import (
 
 // HTTPOptions are the settings of the built-in probe. Rate is requests a second, 1 or more.
 // ExpectMin and ExpectMax are the status range that passes, both ends included. A Host entry of
-// Headers sets the host the request names.
+// Headers sets the host the request names. Warmup, above zero, is how long the checks must pass
+// without a failure before the probe writes its first observation; zero means no warm-up.
 type HTTPOptions struct {
 	URL       string
 	Headers   map[string]string
@@ -22,6 +23,7 @@ type HTTPOptions struct {
 	Timeout   time.Duration
 	ExpectMin int
 	ExpectMax int
+	Warmup    time.Duration
 }
 
 // HTTPArgs gives the arguments that make the binary's probe http command run o: what the probe's
@@ -57,7 +59,8 @@ func (h *headerFlag) Set(s string) error {
 }
 
 // ParseHTTPArgs is the reverse of HTTPArgs, for the command itself. For every o,
-// ParseHTTPArgs(HTTPArgs(o)) gives o back.
+// ParseHTTPArgs(HTTPArgs(o)) gives o back with Warmup one second: the built-in probe checks its
+// target before it writes its first observation, and the arguments carry no flag for it.
 func ParseHTTPArgs(args []string) (HTTPOptions, error) {
 	if len(args) < 2 || args[0] != "probe" || args[1] != "http" {
 		return HTTPOptions{}, errors.New("the arguments are not those of the probe http command")
@@ -94,5 +97,6 @@ func ParseHTTPArgs(args []string) (HTTPOptions, error) {
 	if !ok || err1 != nil || err2 != nil || min > max {
 		return HTTPOptions{}, errors.New("--expect-status is not MIN-MAX with MIN not above MAX")
 	}
-	return HTTPOptions{URL: *url, Headers: headers, Rate: *rate, Timeout: d, ExpectMin: min, ExpectMax: max}, nil
+	return HTTPOptions{URL: *url, Headers: headers, Rate: *rate, Timeout: d, ExpectMin: min, ExpectMax: max,
+		Warmup: time.Second}, nil
 }

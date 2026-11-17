@@ -61,6 +61,13 @@ type httpRun struct {
 // writes their lines and returns nil. It returns an error only when the URL's host cannot be
 // resolved at the start.
 //
+// When o.Warmup is above zero, RunHTTP first sends one check at a time, leaving no more than the
+// rate's interval between two of them, and writes nothing for them. The observations begin once
+// the checks have passed without a failure for o.Warmup; a failed check starts that time again. A
+// target that never answers leaves the probe with no observation at all, so the tool ends the run
+// not verified when its wait for the first observation (limits.timeout) runs out. A ctx that ends
+// during the warm-up returns nil with nothing written.
+//
 // A write to out that fails is not reported: RunHTTP's caller has nothing to act on. A reader of
 // the log sees the silence; on a pipe, a failed write ends the process with SIGPIPE.
 func RunHTTP(ctx context.Context, o HTTPOptions, out io.Writer) error {
@@ -110,6 +117,10 @@ func RunHTTP(ctx context.Context, o HTTPOptions, out io.Writer) error {
 		gathered: map[int]*secondOfPasses{},
 	}
 
+	if o.Warmup > 0 && !r.warmUp(ctx) {
+		return nil
+	}
+
 	var wg sync.WaitGroup
 	r.start = time.Now()
 	// The summary lines have a goroutine of their own, so that a Write that blocks never stops
@@ -151,6 +162,44 @@ func RunHTTP(ctx context.Context, o HTTPOptions, out io.Writer) error {
 			}()
 			i++
 			timer.Reset(time.Until(r.start.Add(time.Duration(i) * time.Second / time.Duration(o.Rate))))
+		}
+	}
+}
+
+// warmUp sends one request at a time until the checks have passed without a failure for
+// o.Warmup, and reports whether that happened. It writes nothing: a failed check only starts the
+// time again. No more than the rate's interval is left between two checks.
+func (r *httpRun) warmUp(ctx context.Context) bool {
+	interval := time.Second / time.Duration(r.o.Rate)
+	var since time.Time // when the unbroken run of passes began; zero before the first of them
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		began := time.Now()
+		rctx, cancel := context.WithTimeout(ctx, r.o.Timeout)
+		class, err := r.get(rctx)
+		cancel()
+		if err != nil || class != "" {
+			since = time.Time{}
+		} else {
+			if since.IsZero() {
+				since = began
+			}
+			if time.Since(since) >= r.o.Warmup {
+				return true
+			}
+		}
+		wait := interval - time.Since(began)
+		if wait <= 0 {
+			continue
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
 		}
 	}
 }
