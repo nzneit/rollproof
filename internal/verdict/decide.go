@@ -59,8 +59,9 @@ type WindowResult struct {
 }
 
 // Decision is the verdict so far. GoOn says whether the run starts its next transition. Uncounted
-// is the number of observations outside every window. Ignored are Timed conditions at or after
-// the last window's End; the report shows them as warnings.
+// is the number of observations that no window counts: those after the last window ended, and
+// those before the first window when the run has no install window. Ignored are Timed conditions
+// at or after the last window's End; the report shows them as warnings.
 type Decision struct {
 	Verdict   Verdict
 	GoOn      bool

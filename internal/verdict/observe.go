@@ -12,8 +12,9 @@ import (
 const clockLayout = "15:04:05.00"
 
 // observe adds what the probe saw to p: counts in p.results, ProbeFailures, SteadyNotClean and
-// ProbeSilent conditions in p.windows, and the lines that no window holds in p.uncounted. It adds
-// to windows that began only. It does nothing when the first window has not begun.
+// ProbeSilent conditions in p.windows, and the lines that no window holds in p.uncounted: those
+// after the last window ended, and those before the first window when the run has no install
+// window. It adds to windows that began only. It does nothing when the first window has not begun.
 func observe(t Timeline, p *placement) {
 	if len(t.Windows) == 0 || t.Windows[0].Start.IsZero() {
 		return
@@ -34,13 +35,21 @@ func holder(t Timeline, p *placement, m time.Time) int {
 	return -1
 }
 
-// countObservations fills the counts of p.results (steps 1 to 5 of the observation rules).
+// countObservations fills the counts of p.results (steps 1 to 5 of the observation rules). An
+// observation that no begun window holds, whose time is before the first window's Start, is
+// counted in the first window, the install window, when the run has one; the rest that no window
+// holds add to p.uncounted. So it is the install window's for the criteria below too: the time of
+// the last failure, AfterFinish and the crossings.
 func countObservations(t Timeline, p *placement) {
 	for _, o := range t.Observations {
 		i := holder(t, p, o.T)
 		if i < 0 {
-			p.uncounted++
-			continue
+			if t.Windows[0].Name == Install && o.T.Before(t.Windows[0].Start) {
+				i = 0
+			} else {
+				p.uncounted++
+				continue
+			}
 		}
 		r := &p.results[i]
 		r.LagMs = max(r.LagMs, o.Lag)

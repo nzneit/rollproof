@@ -259,11 +259,29 @@ func TestObserve(t *testing.T) {
 			Steady:  clean,
 		},
 	}, {
-		name: "an observation that began before the install window is not counted",
+		name: "an observation that began before the install window is counted in it",
 		tl: timeline(10*sec, withInstall(steadyOnly()), passes(-15*sec, 10*sec),
 			[]Observation{{Written: at(-14500 * msec), T: at(-15500 * msec), OK: true, N: 50, Ms: 30, Lag: 5}}),
-		want:      summary{Verdict: Pass, Results: []Result{ResultPass, ResultPass, NotRun, NotRun}, GoOn: true},
-		tallies:   map[WindowName]tally{Install: {Checks: 3000, SlowestMs: 30, LagMs: 5}, Steady: clean},
+		want: summary{Verdict: Pass, Results: []Result{ResultPass, ResultPass, NotRun, NotRun}, GoOn: true},
+		tallies: map[WindowName]tally{
+			Install: {Checks: 3050, SlowestMs: 30, LagMs: 5},
+			Steady:  clean,
+		},
+	}, {
+		name: "a failed check that began before the install window and was written in it is counted there",
+		tl: timeline(10*sec, withInstall(steadyOnly()), passes(-15*sec, 10*sec),
+			[]Observation{failure(-15500*msec, -13500*msec, "timeout")}),
+		want: summary{Verdict: Pass, Results: []Result{ResultPass, ResultPass, NotRun, NotRun}, GoOn: true},
+		tallies: map[WindowName]tally{
+			Install: {Checks: 3001, Failed: 1, ByClass: map[string]int{"timeout": 1}, FirstFailure: at(-15500 * msec), SlowestMs: 30, LagMs: 5},
+			Steady:  clean,
+		},
+	}, {
+		name: "with no install window, an observation before the steady window is not counted",
+		tl: timeline(10*sec, steadyOnly(), passes(0, 10*sec),
+			[]Observation{{Written: at(500 * msec), T: at(-500 * msec), OK: true, N: 50, Ms: 30, Lag: 5}}),
+		want:      summary{Verdict: Pass, Results: []Result{ResultPass, NotRun, NotRun}, GoOn: true},
+		tallies:   map[WindowName]tally{Steady: clean},
 		uncounted: 1,
 	}, {
 		name: "a failed check that began in the install window and was written in the steady window",
@@ -299,12 +317,11 @@ func TestObserve(t *testing.T) {
 		texts: map[string]string{"steady:steady-not-clean": "10 checks failed (503 10), first at 10:00:00.00\n" +
 			"no check has passed since the probe started: every check failed for 25.0 s"},
 	}, {
-		name: "one check passed, before the install window: the line is left out",
+		name: "one check passed, before the install window: it is counted there, and the steady window's reason has no second line",
 		tl: timeline(10*sec, withInstall(steadyOnly()), failures(-15*sec, 10*sec),
 			[]Observation{{Written: at(-14500 * msec), T: at(-15500 * msec), OK: true, N: 1, Ms: 30, Lag: 5}}),
-		want:      summary{Verdict: NotVerified, Results: []Result{ResultPass, ResultNotVerified, NotRun, NotRun}, Reasons: []string{"steady:steady-not-clean"}, Decided: SteadyNotClean},
-		texts:     map[string]string{"steady:steady-not-clean": "10 checks failed (503 10), first at 10:00:00.00"},
-		uncounted: 1,
+		want:  summary{Verdict: NotVerified, Results: []Result{ResultPass, ResultNotVerified, NotRun, NotRun}, Reasons: []string{"steady:steady-not-clean"}, Decided: SteadyNotClean},
+		texts: map[string]string{"steady:steady-not-clean": "10 checks failed (503 10), first at 10:00:00.00"},
 	}, {
 		name: "no check has passed in a run with no install window",
 		tl:   timeline(10*sec, steadyOnly(), failures(0, 10*sec)),
