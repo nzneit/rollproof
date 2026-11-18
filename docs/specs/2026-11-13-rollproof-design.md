@@ -39,15 +39,19 @@ up before its first observation. The plan's first end-to-end runs showed why, an
 accepted it for now. A revision on the same day, after the first plan was built, took the warm-up
 out again. The install now settles under the running probe, and the steady window begins when it
 has settled (sections 4, 6, 7 and 10). The maintainer chose that design from six sketches.
-Section 14, point 23 records both steps and what the revision leaves open. The revision's text
-waits for the maintainer's review, and the first plan's code still has the warm-up (section 13).
+Two reviews of the revision followed the same day, and the maintainer ruled on what they found.
+Section 14, point 23 records the steps, the rulings and what the revision leaves open. The
+revision's text waits for the maintainer's review, and the first plan's code still has the
+warm-up (section 13).
 
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
 Fable model wrote each of the first two reviews. AI agents on an Opus model gathered the evidence,
 did the two readings, wrote the third review, eight of them with one part of the text each, and
 were the three readers of the last check. Two AI agents on a Fable model each sketched three
 designs for the revision of 2026-11-17. An AI session on an Opus model compared them with the
-maintainer, and the same session, then on a Fable model, wrote the revision.
+maintainer, and the same session, then on a Fable model, wrote the revision. Two AI agents on a
+DeepSeek model reviewed it, and the session, on an Opus model again, checked their findings and
+carried the maintainer's rulings into the text.
 Where a statement rests on a measurement, a page or a source file that was read, section 16 names
 the source. Everything else is design, not fact. Nothing here had been run when the design was
 agreed. The revision of 2026-11-17 rests on one result of the first plan's runs, and section 16
@@ -209,8 +213,8 @@ workload, in the sections that follow, is one of them: one Deployment, StatefulS
 ```
 set up     cluster, namespaces, registry, images, charts, setup commands
 install    previous release, wait until ready
-probe on   : the install settles | steady | deploy and settle | roll back and settle |
-             counted, not judged   judged from here
+probe on   : install window | steady | deploy and settle | roll back and settle |
+             failures counted | failures judged from here on
 verdict    report, evidence, exit code
 ```
 
@@ -220,10 +224,12 @@ verdict    report, evidence, exit code
    and run the caller's `setup` commands.
 2. **Install** the previous release and wait until it is ready (section 7).
 3. **Start the probe**, let the install settle under it, and hold a steady window before anything
-   changes. The install settles for `limits.settle`, counted from the probe's first observation
-   at the earliest and started again by a break (section 7). The probe's checks in that time are
-   counted and reported, and they are not judged. A fault of the probe there makes the run not
-   verified (rule 9 of section 10). The steady window begins when the install has settled.
+   changes. The time in which the install settles under the probe is the install window. It lasts
+   `limits.settle`, counted from the probe's first observation at the earliest and started again by
+   a break (section 7). The probe's failed checks in it are counted and reported, and they are not
+   judged. Silence, a fault of the probe, a signal or a failure of the tool or of the install in it
+   makes the run not verified (rule 4 of section 10). The steady window begins when the install has
+   settled.
 4. **Deploy the candidate.** Wait for the transition to finish, under a timeout, and keep the
    probe running for the settle time after it.
 5. **Roll back** to the previous release, with the same wait and the same settle time. This step
@@ -231,35 +237,39 @@ verdict    report, evidence, exit code
 6. **Decide and report.**
 
 A transition is a deploy, a rollback or a restart. The install is not one: the probe starts only
-when the install is ready, and what the probe reports while the install settles is not judged.
+when the install is ready, and a failed check in the install window is not judged.
 
 ### Windows
 
-The time from the moment the install has settled to the end of the last window is divided into
-windows with no gap between them: the steady window, then one window for each transition.
+The time from the probe's first observation to the end of the last window is divided into windows
+with no gap between them: the install window, the steady window, then one window for each
+transition.
 
-The steady window begins at the moment the install has settled under the probe (section 7). That
-is `limits.settle` after the probe's first observation at the earliest. The window lasts
-`limits.steady`. A transition's window runs from the moment the tool starts the transition until
-`limits.settle` after the transition has finished (section 7), or until `limits.timeout` when the
-transition stalls. The settle time is part of the window because failures can begin after a
-rollout reports done (section 3). It has to be quiet: a pod change inside it puts the transition
-back in progress.
+The install window runs from the probe's first observation until the install has settled under
+the probe (section 7), which takes `limits.settle` at the least. The steady window begins there
+and lasts `limits.steady`. A transition's window runs from the moment the tool starts the
+transition until `limits.settle` after the transition has finished (section 7), or until
+`limits.timeout` when the transition stalls. The settle time is part of the window because
+failures can begin after a rollout reports done (section 3). It has to be quiet: a pod change
+inside it puts the transition back in progress.
 
-The time before the steady window, and the time in which the tool stops the probe, belong to no
-window. The probe runs through the last part of the time before the steady window: from its first
-observation until the install has settled. Its checks there are counted and reported, and they
-are not judged; a fault of the probe there makes the run not verified (rule 9 of section 10). The
-install is not a transition, and a cluster may need a moment before it routes to a Service that
-the install has just created (section 7). A result that the probe writes while it is being
-stopped still counts, by its `t` (section 6).
+A failed check in the install window is counted and reported, and it does not judge the release. The
+install is not a transition, and a cluster may need a moment before it routes to a Service that the
+install has just created (section 7). Silence, a fault of the probe, an install that failed, a
+signal or a failure of the tool in the install window makes the run not verified, as in any window
+(rule 4 of section 10). The report keeps the install window apart from the other windows, so that
+nobody adds its failures to theirs (section 10).
+
+The time before the probe's first observation, and the time in which the tool stops the probe,
+belong to no window. A result that the probe writes while it is being stopped still counts, by
+its `t` (section 6).
 
 ### When a run passes
 
 A run passes only when all four hold:
 
 1. Every transition finished inside `limits.timeout`, and its command succeeded.
-2. The probe reported no failure in any window.
+2. The probe reported no failure in the steady window or in a transition's window.
 3. The probe kept to its contract and ran until the tool stopped it, and it produced observations
    in every window, with no silence longer than `limits.silence`.
 4. Every transition replaced at least one pod.
@@ -312,20 +322,20 @@ The tool is one Go binary. Each unit has one job.
 | `cluster` | Checks the runner before anything is created: the system, the engine, the tool's own binary. Creates and deletes the kind cluster and the run's registry, writes mirror, certificate and credential settings into the nodes, waits until the cluster is ready, and creates the probe's namespace and the workload's | kind, the container engine, the Kubernetes API |
 | `images` | Puts the caller's images and the probe's own image into the run's registry, has the nodes pull them, and returns their digests | The container engine, image archives |
 | `deploy` | The deploy contract: install, deploy, roll back. A Helm driver and a commands driver. It checks that `helm` is there, fetches the charts, and runs the caller's `setup` commands with the commands driver's command runner | Helm, or the caller's commands |
-| `watch` | Observes the watched workloads: when the install is ready and when it has settled, when a transition finished, whether it stalled, which pods were replaced and how long they took to stop. It follows the pods' status and logs while they live, and gathers the events and pod states for the evidence. It performs the restart, because it holds the set of watched workloads. Given a Service's name by `probe`, it says which watched workloads are behind it | The Kubernetes API |
+| `watch` | Observes the watched workloads: when the install is ready and when it has settled, counted from the time of the probe's first observation that `run` hands it, when a transition finished, whether it stalled, which pods were replaced and how long they took to stop. It follows the pods' status and logs while they live, and gathers the events and pod states for the evidence. It performs the restart, because it holds the set of watched workloads. Given a Service's name by `probe`, it says which watched workloads are behind it | The Kubernetes API |
 | `probe` | The probe contract: start, stop, collect observations. The built-in HTTP probe and the custom probe. Before the probe starts it checks the built-in probe's target, and names that Service to `run`. At the first observation it checks the clock | The probe's pod, and for the built-in probe its URL |
-| `run` | Sequences the phases and marks the windows on the timeline | The two contracts as interfaces, and every other unit only as a step it calls |
-| `verdict` | Turns observations and transition results into pass, fail or not verified, with reasons, and says when the install has settled and after each window whether the run goes on | Nothing. It is a pure function |
+| `run` | Sequences the phases and marks the windows on the timeline. It reads the probe's observations from the moment the probe starts, so that none waits for a reader | The two contracts as interfaces, and every other unit only as a step it calls |
+| `verdict` | Turns observations and transition results into pass, fail or not verified, with reasons, and says at the end of each window, the install window's included, whether the run goes on | Nothing. It is a pure function |
 | `report` | Writes the console text, `result.json`, the GitHub job summary and the evidence folder | File formats |
 
 Flow of one run: `config`, then `cluster`, then `images`. `config` then fills in the image forms,
 `deploy` fetches the charts and runs the `setup` commands, and `deploy` installs. `probe` starts,
-`watch` says when the install has settled under it, and `run` begins the steady window there.
-For each transition `run` marks the window, `deploy` acts or `watch` restarts, and `watch` waits.
-When the install has settled, and at the end of each window, `run` hands `verdict` what it has so
-far. It begins the steady window only when `verdict` finds nothing against it, and it starts the
-next transition only when `verdict` says that every window so far is a pass. Then `probe` stops,
-`verdict` decides once more with what arrived late, and `report` writes.
+and its first observation opens the install window. `watch` says when the install has settled
+under the probe, and the steady window begins there. For each transition `run` marks the window,
+`deploy` acts or `watch` restarts, and `watch` waits. At the end of each window, the install
+window's included, `run` hands `verdict` what it has so far, and it begins the next window only
+when `verdict` says that the run goes on. Then `probe` stops, `verdict` decides once more with
+what arrived late, and `report` writes.
 
 Three properties the plan must keep:
 
@@ -457,7 +467,7 @@ How a line is read:
 
 A fault of a line is placed in the window that holds the moment the line was written. Section 10
 says how it is weighed against a failure in the same window. A fault of a line that was written
-before the steady window began has no window, and makes the run not verified (rule 9 of
+before the probe's first observation has no window, and makes the run not verified (rule 9 of
 section 10).
 
 **Time.** The default time of a line is the timestamp the node's container runtime puts on it in
@@ -473,22 +483,22 @@ the probe author's. With kind, the runner and the nodes share a clock: the nodes
 on the runner's kernel, and Linux gives a container no wall clock of its own. The tool checks
 this when the probe starts. It compares the time that the runtime put on the first observation
 with the moment it read that line, and a difference above a bound that the plan sets ends the run
-as not verified. The check is part of the probe's start, so it comes before any window. An engine
+as not verified. The check is part of the probe's start: the install window opens only when it
+has passed, and a check that failed has no window (rule 9 of section 10). An engine
 that runs in a virtual machine can have a clock of its own.
 
-An observation is assigned to the window that holds its time. One whose time is before the steady
-window began is counted for the report of the install and is not judged (section 7). One whose
-time is after the last window ended is not counted; the evidence keeps it. One whose `t`
-is later than the moment its line was written is a fault of the line, because a check cannot
-begin after its result. Like every such fault, it makes the window in which the line was written
-not verified, or, when the line was written before the steady window, the run (rule 9 of
-section 10).
+An observation is assigned to the window that holds its time, the install window included. One
+in the install window is counted there and is not judged (section 7). One whose time is before
+the install window began, or after the last window ended, is not counted; the evidence keeps it.
+One whose `t` is later than the moment its line was written is a fault of the line, because a
+check cannot begin after its result. Like every such fault, it makes the window in which the line
+was written not verified.
 
 A failed check that began in one window and whose line was written in a later one is counted
 where it began. The report says how many failures crossed the start of a transition in this way,
-because the transition may be what cut them. In the same way, a failed check that began before
-the steady window and whose line was written inside it is counted before the window, and is not
-judged.
+because the transition may be what cut them. A failed check that began in the install window and
+whose line was written in the steady window is therefore counted in the install window, and is
+not judged.
 
 **Lifecycle.**
 
@@ -497,33 +507,35 @@ judged.
   verified, and the report shows the state of the probe's pod (section 10). A probe that exits
   before its first observation ends that wait at once: the run is not verified because the probe
   exited, and nobody waits out the timeout for a probe that is gone.
-- **Before the steady window.** The install settles under the probe for `limits.settle`, counted
-  from the moment the first observation was written at the earliest, by the runtime's timestamp
-  and not by a `t` on the line, and started again by a break of the install's conditions
-  (section 7). The observations of that time are kept and counted for the report,
-  and they are not judged. The steady window begins when the install has settled. Everything
-  from there on is judged, and a failure in the steady window makes it not verified. A probe
+- **The install window.** The first observation opens the install window, at the moment its
+  line was written, by the runtime's timestamp and not by a `t` on the line. The install settles
+  under the probe for `limits.settle`, counted from that moment at the earliest and started again
+  by a break of the install's conditions (section 7). A failed check in the install window is
+  counted and is not judged. The steady window begins when the install has settled, and from
+  there on a failed check is judged: in the steady window it makes the run not verified. A probe
   therefore needs no warm-up of its own. A target that the install has just created may need a
-  moment before the cluster routes to it, and what a probe's first checks meet then falls before
-  the steady window. No result of the probe moves the start of the steady window. Only the
-  moment of its first observation, and the install's own conditions, do.
+  moment before the cluster routes to it, and what a probe's first checks meet then falls in the
+  install window. Silence and a fault of the probe are judged in the install window as in any
+  other (section 10). Whether a check passed or failed never moves the start of the steady
+  window. Only the moment of the first observation, and the install's own conditions, do.
 - **Exit.** The probe's pod is never restarted: its restart policy is `Never`. The tool reads an
   exit from the state of the container named `probe`. A probe that exits before the tool stops it
-  makes the window in which it exited not verified. One that exits before the steady window
-  began makes the run not verified (rule 9 of section 10). The silence that follows an exit is
-  not reported beside it: the exit is the reason.
+  makes the window in which it exited not verified, the install window included. One that exits
+  before its first observation makes the run not verified (rule 9 of section 10). The silence
+  that follows an exit is not reported beside it: the exit is the reason.
 - **Silence.** Silence is time with no observation. Log text does not end it. It is measured on
-  the tool's clock from the start of the steady window to the end of the last window, by when
+  the tool's clock from the probe's first observation to the end of the last window, by when
   observation lines were written and never by `t`, so a probe that reports late results is not
   silent for that reason. A stretch longer than `limits.silence` with no observation makes every
   window it overlaps not verified. The stretch from a window's start to its first observation
   counts, and so does the stretch from the last observation to the window's end. A probe that
-  hangs and never writes again therefore cannot pass. Silence is not measured while the install
-  settles; a probe that stops writing there is silent in the steady window. The configuration
-  keeps `limits.silence` shorter than `limits.steady` and `limits.settle` (section 8), so a
-  window with no observation at all is always silent.
+  hangs and never writes again therefore cannot pass, and nor can one that hangs in the install
+  window and then writes again. The configuration keeps `limits.silence` shorter than
+  `limits.steady` and `limits.settle` (section 8), so a window with no observation at all is
+  always silent. The built-in probe writes a line within one request timeout while it works, so
+  its first moments are not silent for that reason either.
 - **Stop.** The tool stops the probe when the run's last window has ended, whether or not every
-  transition was run, or when the run ends before the steady window began. It deletes the
+  transition was run, or when the run ends before the probe's first observation. It deletes the
   probe's pod with a grace period as long as the drain, so the probe gets SIGTERM, and it goes on
   reading the probe's lines until the container has exited.
   The drain is 10 seconds for a custom probe. For the built-in probe it is the request timeout
@@ -581,8 +593,8 @@ The tool reads the log of the container named `probe` and judges an early exit b
 alone, so a proxy that a mesh injects into the pod does not break the contract. It does change
 what is tested: the probe's requests then pass through the mesh. A mesh's proxy may send a failed
 request again before the probe sees the failure (Istio does so twice by default), which hides
-failures. A probe that starts before its proxy is ready reports failures at first. They fall
-before the steady window, and are not judged, when the proxy is ready within the time the install
+failures. A probe that starts before its proxy is ready reports failures at first. They fall in
+the install window, and are not judged, when the proxy is ready within the time the install
 settles.
 
 Probe pods run on the control-plane node, so that the worker nodes hold only the workload and the
@@ -597,8 +609,8 @@ on the namespace cannot keep it out. For a custom probe the image decides.
 It speaks the same contract. It is the tool's own binary, started as `rollproof probe http`.
 
 - **Open model.** Request *i* starts at start + *i*/rate, whatever earlier requests did. Start is
-  the moment the probe has resolved its host (see "Names" below). The probe reports from its
-  first request on and has no warm-up (section 14, point 23).
+  the moment the probe starts. The probe reports from its first request on and has no warm-up
+  (section 14, point 23).
 - **Requests.** HTTP GET to `probe.http.url`, with the headers of `probe.http.headers` when the
   configuration gives any. A `Host` header sets the host that the request names. A URL may be
   `https`. The probe then does not verify the server's certificate, as the kubelet's own HTTP
@@ -626,9 +638,13 @@ It speaks the same contract. It is the tool's own binary, started as `rollproof 
   works: the configuration keeps `probe.http.timeout` shorter than `limits.silence` (section 8).
 - **On SIGTERM** it starts no new request, waits for those in flight to end or to time out,
   writes their lines and exits.
-- **Names.** It resolves the URL's host once at start and then dials that address, so cluster DNS
-  is not on the path of every request. A Service's cluster address does not change during a
-  rollout.
+- **Names.** It resolves the URL's host for its first request, and for each request after it until
+  a lookup succeeds, and then dials that address, so cluster DNS is not on the path of every
+  request. The lookup is part of the request and of its timeout. A request whose lookup fails is
+  a failure of class `other`, so a name that the cluster does not resolve yet falls in the install
+  window like any other failed check, and a name that never resolves makes the steady window not
+  verified (`steady-not-clean`). A
+  Service's cluster address does not change during a rollout.
 
 **The target check.** Before it starts the probe, the tool reads the URL's host as the name of a
 Service: `NAME.NAMESPACE`, with or without `.svc` and the cluster's domain after it. A single
@@ -921,13 +937,16 @@ A chart that places workloads in a second namespace has only the named one watch
 - **Nothing to watch.** When no such workload exists `limits.settle` after the install command
   returned, the run is not verified, and the text names the namespace, the selector and the three
   kinds. A workload that an operator creates a few seconds after the command returned is still
-  found, and a mistyped selector costs seconds and not the whole timeout. Pods that some other
-  controller manages are not watched (section 15).
+  found, and a mistyped selector costs seconds and not the whole timeout. The check stops when
+  the install is ready. After that, a set with no workload is a break of the install (section 7,
+  "When the install has settled"). Pods that some other controller manages are not watched
+  (section 15).
 - **Strategies.** A watched StatefulSet or DaemonSet must update by rolling. With `OnDelete`, a
   changed template replaces no pod until someone deletes one, and `kubectl rollout status` gives
-  no status for any strategy but the rolling one. Such a workload is not verified: found after
-  the install, it ends the run, and brought in by a transition, it makes that transition's window
-  not verified. It is left out of the conditions for a ready install and a finished transition,
+  no status for any strategy but the rolling one. Such a workload is not verified: found before
+  the probe's first observation, it ends the run, found in the install window, it makes that
+  window not verified, and brought in by a transition, it makes that transition's window not
+  verified. It is left out of the conditions for a ready install and a finished transition,
   which it could never meet, so it does not turn into a stall. A Deployment is watched with
   either of its strategies. One that deletes all its pods before it
   creates new ones fails the probe, and that is the right verdict.
@@ -974,12 +993,14 @@ the two other conditions hold. The tool then starts the probe (section 6).
 **When the install has settled.** The install settles under the running probe. It has settled
 when its conditions have held without a break for `limits.settle`. That time is counted from the
 later of two moments: the moment the probe's first observation was written, and the moment the
-conditions last came to hold. A break is a moment at which a watched workload does not report its
-rollout complete, or a deleted pod is not gone. It starts the time again. The steady window
-begins at the moment the install has settled.
+conditions last came to hold. A break is a moment at which one of those conditions does not
+hold: no workload is watched, a watched workload does not report its rollout complete, or a
+deleted pod is not gone. It starts the time again. The time from the probe's first observation
+until the install has settled is the install window (section 4), and the steady window begins
+at its end.
 
-What the probe reports while the install settles is kept and counted for the report, and it is
-not judged. Two things are new in that time, and the settle time is for both:
+A failed check in the install window is counted for the report, and it is not judged. Two things
+are new in that time, and the settle time is for both:
 
 - **The target.** A cluster may route to a Service that the install has just created only a
   moment after its endpoints are ready. In the first plan's end-to-end runs kube-proxy on the
@@ -988,15 +1009,20 @@ not judged. Two things are new in that time, and the settle time is for both:
 - **The probe's own pod.** What its first moments meet, such as a proxy that a mesh injects
   (section 6), falls in the same time.
 
-A failed check in that time decides nothing, because the install is not a transition
+A failed check in the install window decides nothing, because the install is not a transition
 (section 4). The steady window follows it and judges the installed release as before: a release
-that keeps failing requests fails them in the steady window too. No result of the probe moves the
-start of the steady window, so a probe cannot delay or shape its own judgement.
+that keeps failing requests fails them in the steady window too. Whether a check passed or failed
+never moves the start of the steady window, so a probe cannot shape its own judgement by what it
+reports. The moment of its first observation is a floor: a probe that is slow to write it delays
+the steady window, within the `limits.timeout` that its start has.
 
-The install's rule is stricter than the quiet settle time of a transition, which a change of
-readiness does not start again. In a transition's window, the failures that a pod which stops
-being ready causes are judged. While the install settles they are not, so the tool itself asks
-for a release that stays ready (section 14, point 23).
+The install's rule is stricter than the quiet settle time of a transition. Each change that starts
+a transition's settle time again, a pod created or deleted or a spec changed, also leaves a
+watched workload's rollout not complete, at least until its controller has seen the change, so it
+is a break of the install too (section 16). A change of readiness is a break of the install, and
+does not start a transition's settle time again. In a transition's window, the failures that a
+pod which stops being ready causes are judged. In the install window they are not, so the tool
+itself asks for a release that stays ready (section 14, point 23).
 
 The limit is as for a transition. The install has `limits.timeout`, counted from its start, to
 become ready, and its settle time may run past that limit. Conditions that do not hold when the
@@ -1004,11 +1030,15 @@ limit passes, or that break after it and before the install has settled, end the
 verified: the install failed. When the settle time started again, the report says what started
 it.
 
-The tool waits until the install has settled whatever the probe reports or does meanwhile, an
-exit included, as a window runs to its end, so that the record of that time is whole. `verdict`
-then decides whether the steady window begins. A fault of the probe in that time, such as an exit
-or a line that breaks the contract, makes the run not verified (rule 9 of section 10), and the
-steady window does not begin.
+The install window runs to its end as any window does (rule 2 of section 10), so that the
+record of that time is whole: the tool waits until the install has settled whatever the probe
+reports or does meanwhile, an exit after its first observation included. A probe that exits
+before its first observation ends the run at once (section 6). `verdict` then decides whether the
+run goes on. Silence, a fault of the probe, a watched workload of a form the tool cannot judge,
+a signal or a failure of the tool in the install window makes the run not verified (rule 4 of
+section 10), and the steady window does not begin. A condition of the install window that the
+tool learns of only after the steady window began is placed late: the steady window runs to its
+end, and the run stops there (rule 8 of section 10).
 
 **Pods replaced.** For each watched workload the tool counts how many of the pods that existed at
 the start of a transition are gone at its end, and how many pods the transition created. A
@@ -1297,18 +1327,21 @@ tool.
 | `probe.http.timeout` | 2 s | It is the caller's own latency rule: a slower request is a failure. 2 s is the experiments' value, where the slowest request that passed on a hosted runner took 247 ms. A service with a latency budget writes its budget here, and keeps `limits.silence` above it |
 | `probe.http.expect-status` | 200 to 299 | A redirect or an error page is not an answer from the workload |
 | `limits.steady` | 10 s | Long enough to show that the probe and the workload work before anything changes: 2,000 checks at the default rate. It is not a control for a failure that is rare without any rollout; the paragraph below the table is for that |
-| `limits.settle` | 15 s | It covers what begins only after a transition has finished: a second rollout, a controller that acts a little late, a new pod that fails soon after it became ready, and a probe's late results. The experiments do not size it. Their failures after a rollout reported done ended within about 3 s, but they are counted from `kubectl rollout status`, which returns before old pods are gone, and the tool waits for those. 15 s is a first value, and a fixture is to confirm it or change it (section 14, point 7). The install settles for the same time under the probe, before the steady window (section 7). There it covers the moment a cluster takes to route to a Service that the install has just created, about a second in the first plan's runs, and the first moments of the probe's own pod. Nothing sizes it for that either. Every report says how long before the steady window the last failed check came, which shows how much of the time was needed |
+| `limits.settle` | 15 s | It covers what begins only after a transition has finished: a second rollout, a controller that acts a little late, a new pod that fails soon after it became ready, and a probe's late results. The experiments do not size it. Their failures after a rollout reported done ended within about 3 s, but they are counted from `kubectl rollout status`, which returns before old pods are gone, and the tool waits for those. 15 s is a first value, and a fixture is to confirm it or change it (section 14, point 7). The install settles for the same time under the probe, in the install window (section 7). There it covers the moment a cluster takes to route to a Service that the install has just created, about a second in the first plan's runs, and the first moments of the probe's own pod. Nothing sizes it for that either. Every run that reaches its steady window reports how long before it the last failed check came, which shows how much of the time was needed |
 | `limits.timeout` | 5 minutes | The length of Helm's default timeout for one operation. It is not the same bound: Helm applies its timeout to each hook separately, and this limit covers a whole transition from its start, hooks included. The tool passes the value to Helm as its `--timeout` (section 7). One limit covers, each on its own: the wait for the cluster to be ready, a node's pull of an image, a chart's fetch, a `setup` command, the install, the probe's start and a transition |
 | `limits.silence` | 5 s | While it works, the built-in probe writes a line within one request timeout, and at the defaults at least one a second. A custom probe that checks less often raises it, and raises `limits.steady` and `limits.settle` with it |
 
-There is no failure budget. A pass means that the probe reported no failure, which is the claim
-the tool is named for. Thresholds of other kinds are not in the first release (section 15).
+There is no failure budget. A pass means that the probe reported no failure in the steady window
+or in a transition's window, which is the claim the tool is named for. A failed check in the
+install window is counted and does not change the verdict (section 7). Thresholds of other kinds
+are not in the first release (section 15).
 
-**A failure that no pod event explains.** With no budget, one failed request fails a run, and a
-workload may fail one request in some minutes with no rollout at all, or a small runner may
-starve the probe. The check for that is one run with `limits.steady: 5m`. A failure in that
-steady window is the workload's own baseline or the runner, not the rollout. The built-in probe
-also reports how far it ran behind its schedule (section 6), which shows a starved runner.
+**A failure that no pod event explains.** With no budget, one failed request in a judged window
+keeps a run from passing, and a workload may fail one request in some minutes with no rollout at
+all, or a small runner may starve the probe. The check for that is one run with `limits.steady: 5m`.
+A failure in that steady window is the workload's own baseline or the runner, not the rollout. The
+built-in probe also reports how far it ran behind its schedule (section 6), which shows a starved
+runner.
 
 ### The command line
 
@@ -1627,23 +1660,33 @@ does not get in their way.
 
 ### Rules of the verdict
 
-1. The windows are judged in order: the steady window, then each transition's. The first window
-   that is not a pass decides the verdict and ends the run. The transitions after it are not run.
+1. The windows are judged in order: the install window, the steady window, then each
+   transition's. The first window that fails or is not verified decides the verdict and ends the
+   run. The windows after it are not run.
 2. Every window runs to its end, whatever happened in it, so that the evidence is whole. The
-   steady window lasts `limits.steady`. A transition's window lasts until the transition has
+   install window lasts until the install has settled, or until the install fails (section 7).
+   The steady window lasts `limits.steady`. A transition's window lasts until the transition has
    finished and the settle time has passed, or until `limits.timeout` when it stalls. Only a
    signal, or a failure of the tool itself, cuts a window short.
-3. Each condition is placed in a window.
+3. Each condition from the probe's first observation on is placed in a window. Rule 9 says what
+   happens to one before it.
    - A failure belongs to the window that holds its time.
    - Silence belongs to every window it overlaps.
    - A stall, a failed command, a refused restart, a watched workload of a form the tool cannot
-     judge, and a transition that replaced no pod belong to their transition's window.
+     judge, and a transition that replaced no pod belong to their transition's window. An install
+     that fails after the probe's first observation, and a watched workload of a form the tool
+     cannot judge that appears in that time, belong to the install window.
    - A fault of the probe belongs to the window that holds the moment it happened: an early exit,
      a line that breaks the contract, a `t` later than its line.
    - A signal and a failure of the tool itself belong to the window in progress. One that comes
      while the tool is stopping the probe, before the verdict is decided, belongs to the last
      window.
-4. The steady window is not verified when anything is placed in it: a failure, silence, a fault
+4. The install window is not verified when silence, a fault of the probe, an install that
+   failed, a watched workload of a form the tool cannot judge, a signal or a failure of the tool
+   is placed in it. A failure placed in it is counted
+   and reported, and it decides nothing: the install is not a transition, and the steady window
+   that follows judges the installed release (section 7).
+   The steady window is not verified when anything is placed in it: a failure, silence, a fault
    of the probe, a signal, a failure of the tool. A failure before anything changed points at the
    previous release, at the probe or at the runner, not at a transition.
 5. A transition's window fails when the probe reported a failure in it, when the transition
@@ -1656,22 +1699,17 @@ does not get in their way.
    reports failures and then crashes has shown downtime. So has a run in which the tool itself
    failed after the probe had reported failures.
 8. A condition may be placed late, in a window the run has already left: a failure that the probe
-   reports late, or silence that began in one window and passed the limit in the next. That
-   window is then judged by it all the same. A transition that is in progress at that moment is
-   run to its end, and the run stops there. Every window that ran after the judged one is
-   reported as not judged, and a transition that never started as not run. A fault of the probe
-   that belongs before the steady window, and whose line is read only after the window began, is
-   placed late in the same way: the run is not verified, the steady window runs to its end, and
-   the run stops there.
-9. What happens before the steady window has no window. Each of these makes the run not
-   verified: a rejected configuration, a runner the tool cannot use, a cluster, an image or a
+   reports late, a fault in a line that the tool reads late, or silence that began in one window
+   and passed the limit in the next. That window is then judged by it all the same, the install
+   window included. The window in progress at that moment runs to its end, and the run stops
+   there. Every window that ran after the judged one is reported as not
+   judged, and a transition that never started as not run.
+9. What happens before the probe's first observation has no window. Each of these makes the run
+   not verified: a rejected configuration, a runner the tool cannot use, a cluster, an image or a
    chart that could not be set up, a `setup` command or an install that failed, nothing to watch,
    a workload or a target the tool cannot judge, a probe that never started, a clock in the nodes
    that differs from the runner's, a fault of the probe (an early exit, a line that breaks the
-   contract, a `t` later than its line), a signal, a failure of the tool. A failed check is not
-   one of them. What the probe reports while the install settles is counted and reported, and it
-   is not judged (section 7): the install is not a transition, and the steady window that follows
-   it judges the installed release.
+   contract, a `t` later than its line), a signal, a failure of the tool.
 10. Nothing that happens after the verdict was decided changes it. The verdict is decided once
     the probe has stopped and its late lines are in (section 5). An error while the tool then
     writes its report, completes the evidence or deletes the cluster is a warning, on the
@@ -1695,8 +1733,9 @@ releases    previous   orders 1.4.2, oci://registry.example/charts/orders; chart
 images      orders     run by deployment/orders, in pods the deploy created
 probe       built-in HTTP: GET http://orders.orders.svc/api/orders/latest
             200 a second (one check every 5 ms), timeout 2 s, status 200-299
-install     settled after 15.0 s under the probe; not judged
+install     settled after 15.0 s under the probe; failures not judged
             3,000 checks, 6 failed (refused 5, timeout 1), the last 14.9 s before the steady window
+            slowest 44 ms, behind 9 ms
 
 window     length   checks   failed   after finish   slowest   behind   result
 steady     10.0 s    2,000        0              -     41 ms     6 ms   pass
@@ -1734,8 +1773,9 @@ releases    previous   orders 1.4.2, oci://registry.example/charts/orders; chart
 images      orders     run by deployment/orders, in pods the deploy created
 probe       built-in HTTP: GET http://orders.orders.svc/api/orders/latest
             200 a second (one check every 5 ms), timeout 2 s, status 200-299
-install     settled after 15.0 s under the probe; not judged
+install     settled after 15.0 s under the probe; failures not judged
             3,000 checks, 6 failed (refused 5, timeout 1), the last 14.9 s before the steady window
+            slowest 44 ms, behind 9 ms
 
 window     length   checks   failed   after finish   slowest   behind   result
 steady     10.0 s    2,000        0              -     39 ms     5 ms   pass
@@ -1770,10 +1810,12 @@ results: /tmp/rollproof-results-7f3a
     the Helm release's, or, for the commands driver, the workload's namespace.
   - A run prints the lines for what it reached. One that ended before the tool started the probe
     has no probe lines and no tables. One that ended before the probe's first observation has the
-    probe's lines, and no install lines and no tables. One that ended while the install settled
-    has the install's lines and no tables: the first says that the install had not settled when
-    the run ended, in place of the time it took, and the second gives the counts up to that
-    moment and the time of the last failure.
+    probe's lines, and no install lines and no tables. One that ended in the install window, or
+    whose install window decided the verdict before the steady window began, has the install's
+    lines and no tables. One whose install window was judged late has the first table too, with
+    the windows that ran reported as not judged. When the install had not settled when the run
+    ended, the first line says so in place of the time it took, and the others give the counts up
+    to that moment and the time of the last failure.
   - The lines for the releases give, for the Helm driver, each chart's name, the version that
     Helm resolved and where it came from, and the names of the values files and the top-level
     keys of the inline maps. The commands driver gives the commands' first words.
@@ -1785,12 +1827,15 @@ results: /tmp/rollproof-results-7f3a
     probe is named by its image digest and the names of its `env` entries, with the line "a
     custom probe judged this run; the tool does not know what it checks".
   - The install's lines follow the probe's. They say how long the install took to settle under
-    the probe, counted from the probe's first observation, and what the probe reported in that
-    time: the checks, the failures by class, and how long before the steady window the last
-    failure came. They always say "not judged". When the settle time started again, they say
-    what started it.
-  - The first table has a row for every window. Its result is one of pass, FAIL, NOT VERIFIED,
-    not run and not judged. "After finish" counts the failures that fell in the settle time.
+    the probe, counted from the probe's first observation, and what the probe reported in the
+    install window: the checks, the failures by class, how long before the steady window the last
+    failure came, the slowest check that passed and how far the probe ran behind its schedule.
+    The first line ends with NOT VERIFIED when the install window decided the verdict, on time or
+    late, and otherwise with "failures not judged". When the settle time
+    started again, they say what started it.
+  - The first table has a row for every window but the install window, whose lines come before
+    it. Its result is one of pass, FAIL, NOT VERIFIED, not run and not judged. "After finish"
+    counts the failures that fell in the settle time.
     "Slowest" is the slowest check that passed, and "behind" the furthest that the probe ran
     behind its schedule, both as the probe reported them. When failures crossed the start of a
     transition (section 6), a line under the table says how many.
@@ -1807,8 +1852,9 @@ results: /tmp/rollproof-results-7f3a
     (deleted, not gone) or starting (created, not ready) at the moment of the first failure, and
     the release each belongs to. They say what was happening and name no cause.
   - On `steady-not-clean`, when no check has passed since the probe started, a line under the
-    count says so, and for how long. The target has then never answered. That points at the
-    installed release or at what the probe was aimed at, and not at a failure that came and went.
+    count says so, and for how long. The target has then passed no check: every check failed,
+    whether refused, answered outside the range or not answered. That points at the installed
+    release or at what the probe was aimed at, and not at a failure that came and went.
   - On a stall, the console lists each watched workload that is not complete, with its counts,
     and each pod that is not ready: its phase, why it is not scheduled, the state of its
     containers and how each last ended. Those come from the pod's status. The last event message
@@ -1829,23 +1875,27 @@ results: /tmp/rollproof-results-7f3a
   - a schema version, and whether the file is final;
   - `verdict`: `pass`, `fail` or `not-verified`, the strings of the action's output;
   - the reasons. Each has a `code` from the table below, the `verdict` that the code stands for,
-    the `window` it was placed in, if any, and a text. One reason is marked as the one that
-    decided: of the reasons that carry the verdict in the window that decided, or of all the
-    reasons when the run ended before the steady window began, the one that comes first in the
-    table below;
-  - every window: its name (`steady`, `deploy`, `rollback` or `restart`), its start and its end,
+    the `window` it was placed in, if any, which is `install` for the install window, and a
+    text. One reason is marked as the one that decided: of the reasons that carry the verdict in
+    the window that decided, the install window included, or of all the reasons when the run
+    ended before the probe's first observation, the one that comes first in the table below;
+  - every window but the install window: its name (`steady`, `deploy`, `rollback` or
+    `restart`), its start and its end,
     and its result, which is one of `pass`, `fail`, `not-verified`, `not-run` and `not-judged`.
     With them its counts: checks, failures, failures after the transition finished, failures by
     class, failures that crossed its start, and the time of the first failure. And the slowest
     check that passed and the furthest lag that the probe reported;
   - the install: when it was ready, when the probe's first observation was written, when it had
-    settled, and what started its settle time again, if anything did. With them the counts of
-    what the probe reported before the steady window: checks, failures, failures by class, the
-    time of the last failure, and the slowest check that passed. The install is not one of the
-    windows, so a wrapper that adds up the windows' failures does not count these. The steady
-    window's start is the moment the install had settled; the time of the probe's first
-    observation is here. A run that ended before the install had settled has no time of
-    settling, and one that ended before the probe's first observation has no install record;
+    settled, and what started its settle time again, if anything did. With them the counts of the
+    install window: checks, failures, failures by class, the time of the last failure, the
+    slowest check that passed and the furthest lag that the probe reported. They count every
+    observation whose time falls in the install window, a failure whose line was written after it
+    included. The install window is reported here and not in the list of windows, so a wrapper
+    that adds up the windows' failures does not count these. The steady window's start is the
+    moment the install had settled; the time of the probe's first observation is here. A run
+    that ended before the install was ready has no install record. One that ended before the
+    probe's first observation has no time of it and no counts, and one that ended before the
+    install had settled has no time of settling;
   - every transition: whether it stalled, how its command ended, and what started the settle time
     again, if anything did. For each watched workload: the pods at the start, the pods replaced,
     whether it was added or removed, whether it is probed, and the quickest stop;
@@ -1868,10 +1918,10 @@ results: /tmp/rollproof-results-7f3a
   - the cluster: its provider, which is `kind`, the provider's version, the Kubernetes version,
     the node image digest and the number of workers.
 
-  Within a schema version nothing is removed and nothing changes its meaning; fields and reason
-  codes are added. A wrapper that meets a code it does not know goes by that reason's `verdict`.
-  The list of what a pass did not exercise is text for people: `result.json` carries the facts
-  behind it and no codes for it.
+  Within a schema version, from the first release that carries it, nothing is removed and
+  nothing changes its meaning; fields and reason codes are added. A wrapper that meets a code it
+  does not know goes by that reason's `verdict`. The list of what a pass did not exercise is text
+  for people: `result.json` carries the facts behind it and no codes for it.
 
   **When it is written.** The tool writes a first `result.json` as soon as it has the results
   folder: `not-verified`, with the reason `internal-error` and the text "the run did not
@@ -1930,9 +1980,9 @@ results: /tmp/rollproof-results-7f3a
 | `workload-unsupported` | not verified | A watched StatefulSet or DaemonSet has an update strategy other than the rolling one |
 | `target-unsupported` | not verified | The built-in probe's URL names a Service that does not exist, is headless, or routes only within a node, or it names one pod of a headless Service |
 | `probe-not-started` | not verified | No observation arrived inside `limits.timeout`, and the probe was still running |
-| `probe-exited` | not verified | The probe exited before the tool stopped it, whether before the steady window or in a window |
+| `probe-exited` | not verified | The probe exited before the tool stopped it, whether before its first observation or in a window |
 | `probe-line-invalid` | not verified | A line broke the probe contract: its form, a field's type or value, a `t` later than the line, or an observation behind a prefix |
-| `steady-not-clean` | not verified | The probe reported a failure in the steady window. A failure before it, while the install settled, is not one |
+| `steady-not-clean` | not verified | The probe reported a failure in the steady window. A failure in the install window is not one |
 | `probe-silent` | not verified | The probe wrote no observation for longer than `limits.silence` |
 | `no-pod-replaced` | not verified | A transition finished, its command succeeded, and it replaced no pod |
 | `restart-failed` | not verified | The API server refused the change by which the tool restarts a workload |
@@ -1946,8 +1996,8 @@ results: /tmp/rollproof-results-7f3a
 - Which transitions were tested, and what each exercised. A deploy tests the candidate's start-up
   and the previous release's shutdown. A rollback tests the previous release's start-up and the
   candidate's shutdown. A restart tests both, of the one release. A run with a deploy and no
-  rollback says that the candidate's shutdown was not exercised, and a restart-only run cannot be
-  mistaken for a deploy and a rollback.
+  rollback says that the candidate's shutdown was not exercised, nor the installed release's
+  start-up, and a restart-only run cannot be mistaken for a deploy and a rollback.
 - Which workloads had pods replaced, which had none, and, when the built-in probe judged the run,
   which of them the probe reaches. A transition in which no probed workload had a pod replaced
   says so under "exercised", in place of the start-up and the shutdown it would name: the probe
@@ -2020,9 +2070,10 @@ A line leaves the list when a fixture shows the tool catching what it names.
 **Without a cluster.**
 
 - Table tests for every route through `verdict`: each rule of section 10, each pair of conditions
-  in one window, the decision to go on when the install has settled and after a window, a late
-  failure, a fault of the probe that is placed late before the steady window, a signal and a
-  failure of the tool in each phase of a run, and the exit code of each verdict.
+  in one window, the install window with a failure in it and with each condition that makes it
+  not verified, on time and placed late, the decision to go on after each window, a late
+  failure, a signal and a failure of the tool in each phase of a run, and the exit code of each
+  verdict.
 - Configuration validation: unknown keys, a missing or unknown `version`, unset and empty
   variables, an unknown `${…}` form, an image name that `images` does not list, a password
   written in the file, a combination of releases or commands that section 7 rejects, both or
@@ -2032,24 +2083,29 @@ A line leaves the list when a fixture shows the tool catching what it names.
 - Probe lines, on a fake clock: the type and the range of each field, an observation behind a
   prefix, a cut last line, an unknown `v`, assignment to windows, a failure that crosses the
   start of a transition, silence at a window's start and at its end, the start timeout, a probe
-  that exits before its first observation, and what counts during the drain. And the time before
-  the steady window: observations that are counted and not judged, a failure that began there
-  and was written in the steady window, and a fault of the probe there.
+  that exits before its first observation, and what counts during the drain. And the install
+  window: observations that are counted and not judged, one whose time is before it, a failure
+  that began there and was written in the steady window, and silence and a fault of the probe
+  there.
 - The built-in probe against a server in the same process: the rate held while the handler is
   slow, and the lag it reports; each failure class; a status outside the range; a redirect; a
   body cut short; the summary line; the headers and the `Host` as the server received them;
-  `https` with a certificate that nobody signed; and what it does on SIGTERM.
+  `https` with a certificate that nobody signed; a host that does not resolve at first and then
+  does; and what it does on SIGTERM.
 - The rules of `watch`, on recorded API objects and a fake clock: when a transition has finished,
   with a command still running and with pods created and deleted inside it; the settle time and
   what starts it again; when the install has settled, with a first observation before and after
-  the moment the install's conditions last came to hold, with a pod that stops being ready, and
-  with a break after the limit;
+  the moment the install's conditions last came to hold, with a pod that stops being ready, with
+  the last watched workload removed, with a workload of a strategy other than the rolling one
+  that appears, and with a break after the limit;
   pods counted by UID; a workload added, removed and renamed; nothing to
   watch; a strategy other than the rolling one; a Deployment past its progress deadline; the
   quickest stop, over pods that were ready; which workloads are behind a Service.
 - The target check: each form of host, a headless Service, a pod's name, a node-local policy, a
   Service that does not exist.
-- Golden files for the report formats, one for each verdict, and for the kind configuration and
+- Golden files for the report formats, one for each verdict and one for each ending of a run
+  that the console list names: before the probe's first observation, in the install window, and
+  with the install window deciding the verdict. Golden files, too, for the kind configuration and
   node settings the tool generates. Among them a host that has `as`, a mirror, a `ca` and
   credentials together.
 - The deploy drivers against a fake command runner that records the arguments, the environment
@@ -2057,8 +2113,9 @@ A line leaves the list when a fixture shows the tool catching what it names.
   of a command maps to a reason, and a command stopped at the limit.
 - Masking: a password planted in every input, a command's output and a pod's log included, and
   then searched for, in both forms, in everything the tool wrote.
-- `result.json`: the first file, its replacement, a rejected configuration, a signal, and a
-  results folder that holds an earlier run.
+- `result.json`: the first file, its replacement, a rejected configuration, a signal, a results
+  folder that holds an earlier run, and the install record of a run that ended before the install
+  was ready, before the probe's first observation, before the install had settled, and after.
 - Names: the cluster's name from the file's path, `--name`, and that a cluster without the prefix
   is never deleted.
 - The checks that raise a reason outside a window, each against a fake: every check of the
@@ -2070,7 +2127,9 @@ service, copied from the experiments' test service, with switches for start dela
 behaviour, and a chart whose values produce each variant. The previous release and the candidate
 are two images of it. They differ in content, by a version string built into each: one build
 under two tags has one digest, and a deploy from it to itself would replace no pod. The suite
-asserts the verdict and the set of reason codes.
+asserts the verdict and the set of reason codes. The two rows with a probe that fails its first
+seconds also assert the install record, because they prove that a failed check in the install
+window is counted and decides nothing.
 
 | Fixture | Expected |
 | --- | --- |
@@ -2089,6 +2148,8 @@ asserts the verdict and the set of reason codes.
 | A second rollout starts 5 s after the tool saw the deploy's first one finish | Pass; the deploy's window covers both rollouts, and `result.json` says what started the settle time again |
 | The chart denies traffic by default, and the test's values let the probe in | Pass |
 | A custom probe, the TCP loop of section 6 pointed at the fixture's own Service and port, judges the first fixture | Pass |
+| The same custom probe reports a failed check about 500 times a second for its first 5 s, and only then checks the Service | Pass; the install record holds at least 2,000 failures, the last of them at least 9 s before the steady window, and neither the steady window nor a transition's holds one |
+| The same, with failed checks for its first 20 s | Not verified, `steady-not-clean`; the failures from 15 s after its first observation on fall in the steady window |
 | The same custom probe judges a candidate with no readiness probe | Fail, in the deploy window |
 | The workload is a StatefulSet behind a Service with a cluster address | Pass |
 | The workload is a DaemonSet behind a Service with a cluster address | Pass |
@@ -2105,6 +2166,15 @@ asserts the verdict and the set of reason codes.
 
 The first row is the fixture that the other rows change one thing of. This document calls it the
 first fixture.
+
+The two rows with a probe that fails its first seconds put those failures in the probe, not in
+the target. A release that fails its first seconds after it reported ready fails them again when
+the rollback starts it, and failures tied to the install alone would need a timer whose right
+value depends on how fast the pods and the probe start. A probe's failures begin with its first
+observation, as the install window does. The two rows hold the start of the steady window
+between 5 and 20 s after that observation, with thousands of observations in the install window,
+so that a reader of the probe's lines that starts late shows too. The first fixture alone cannot
+show it: the moment the cluster takes to route to a new Service varies, and a run may meet none.
 
 Where a row names no reason code, the set it expects is the one code of its cause in the table of
 reasons: `probe-failures` for a fail in a window, `probe-silent` for the probe that stops writing,
@@ -2125,10 +2195,10 @@ status` instead, the second rollout could begin before the settle time does, and
 pass without the rule it is there for.
 
 The rows with a probe that goes silent, exits or ignores SIGTERM use small custom probes, because
-the built-in probe has no switch for any of that and must not get one. The two rows with the TCP
-loop are the ones in which a custom probe decides the verdict of a real transition. Every other
-row uses the built-in probe, and every row but the StatefulSet's and the DaemonSet's is a
-Deployment.
+the built-in probe has no switch for any of that and must not get one. Four rows use the TCP loop:
+in two a custom probe decides the verdict of a real transition, and two prove the install window.
+Every other row uses the built-in probe, and every row but the StatefulSet's and the DaemonSet's is
+a Deployment.
 
 **The suite's matrix.** The suite runs on Docker, on amd64, with the default node image, once
 under Helm 3 and once under Helm 4. The first fixture alone also runs on the oldest node image
@@ -2171,6 +2241,8 @@ that number is set with the series.
   reports the false failures and the furthest that the probe ran behind.
 - **The settle time.** The fixture whose pods fail after they became ready, with that delay
   varied, gives the time from the tool's own finish to the first failure (section 14, point 7).
+  Every run of the series also gives how long before the steady window the probe's last failed
+  check came, which sizes the install's use of the same time.
 - **A large image.** The fixture padded to about 1 GB (section 14, point 16).
 
 ## 13. Layout, incubation and graduation
@@ -2239,8 +2311,9 @@ the fourth on gets a plan of its own. The first plan covers steps 1 to 3.
 
 Step 3 was built on 2026-11-17 with the built-in probe's warm-up, which this text no longer has.
 A plan of its own brings the skeleton to this text before step 4: first the rule for when the
-install has settled, then the start of the steady window, the counts and the report (section 14,
-point 23).
+install has settled, then the install window, in the same step as the built-in probe's changes:
+no warm-up, a schedule that starts when the probe starts, and a failed lookup as a failed check.
+Then the counts and the report (section 14, point 23).
 
 ## 14. Open points for the plan
 
@@ -2300,8 +2373,8 @@ which step proves which point.
    the settle time catches. The fixture whose pods fail some seconds after they became ready, run
    with that delay varied, confirms the default or changes it (section 12). The install settles
    for the same time (section 7), and nothing sizes the default for that use either. Every run
-   records how long before the steady window the last failed check came, and the fixture series
-   reads that figure too.
+   that reaches its steady window records how long before it the last failed check came, and the
+   fixture series reads that figure too.
 8. **kind as a library.** kind's project calls itself alpha grade, has not committed to its
    library surface, and has no compatibility plan between node images and kind releases. The plan
    confirms that the linked release creates a cluster through the Docker and nerdctl providers,
@@ -2389,17 +2462,17 @@ which step proves which point.
 
     Two AI agents on a Fable model then each sketched three designs in which no probe warms up,
     one from the run's timeline and one from the install. The maintainer chose this one the same
-    day. The install settles under the running probe, what the probe reports in that time is
-    counted and not judged, and the steady window begins when the install has settled
+    day. The install settles under the running probe, a failed check in that time is counted and
+    not judged, and the steady window begins when the install has settled
     (sections 4, 6, 7 and 10). It takes away the one exception that section 7 had, an install
     with no settle time, and it adds no key and no reason code. What lost, and why:
     - **A steady window that begins after the last early failure, inside a limit.** The probe's
       own results would then choose where judging starts. A previous release that fails now and
       then would get a clean steady window more often, and its failures would later count
       against the candidate.
-    - **A probe that starts only when the install has settled.** It costs the same time and
-      reports nothing of it, and the first moments of the probe's own pod stay in the steady
-      window.
+    - **A probe that starts only when the install has settled.** It costs the same time, and
+      nothing measures that time, so no run can show how much of it was needed. The first
+      moments of the probe's own pod stay in the steady window.
     - **A container that runs before the probe, in the probe's pod, and dials the target until
       it answers.** It is the warm-up in another place, and it serves only a probe that names a
       TCP target.
@@ -2410,11 +2483,34 @@ which step proves which point.
       in a source, that the same delay is what lets a transition's window catch a pod that stops
       while the cluster still routes to it.
 
+    Two reviews of the revision followed the same day, one a careful reading and one a critic's,
+    by two AI agents on a DeepSeek model. The drafting session checked each finding against the
+    text and the sources, and the text carries the findings that held. The maintainer made five
+    rulings on them:
+    - The time from the probe's first observation until the install has settled is the install
+      window. The rules of section 10 treat it as a window, so silence, a fault of the probe, a
+      signal, a failure of the tool and a condition placed late follow the rules every window
+      follows, and a failed check in it is counted and decides nothing. The report keeps it apart
+      from the list of windows. The other way, a window in that list like the others, would have
+      given `result.json` a window whose failures do not count, a result of its own, and a trap
+      for a wrapper that adds up the windows' failures.
+    - Silence is measured from the probe's first observation, in the install window too. A probe
+      that stops writing there and then writes again is silent, as one that exits there has a
+      fault.
+    - A host that the built-in probe cannot resolve yet is a failed check of class `other`, and
+      the probe looks it up again. It no longer ends the probe (section 6).
+    - An install whose conditions break while it settles and do not hold again keeps the limit of
+      section 7: the run waits until `limits.timeout` has passed and is then `install-failed`.
+      Ending the wait once the conditions have not held for `limits.settle` would fail a pod that
+      restarts once and then serves.
+    - Two rows of section 12 prove the install window with a custom probe that fails its first
+      seconds, because failures that the target causes at the install come back in the rollback.
+
     What the revision rests on, and what it leaves open:
     - Nothing has been run with it. The first plan's code still has the warm-up (section 13).
-    - Every run is `limits.settle` longer: 15 s on a job that took about 4.5 minutes in the
-      experiments (section 3). The key now also sizes the install's settle time, and nobody has
-      sized it for that (point 7).
+    - Every run that reaches its steady window is at least `limits.settle` longer: 15 s at the
+      default, on a job that took about 4.5 minutes in the experiments (section 3). The key now
+      also sizes the install's settle time, and nobody has sized it for that (point 7).
     - It is not known that the probe's own pod, in a cluster with no mesh, meets no failure of
       its own that lasts longer than the settle time. The first fixture, run with no warm-up,
       shows whether it does.
@@ -2423,19 +2519,19 @@ which step proves which point.
       difference. The other way is one rule for both.
     - Two answers are the chosen design's own, and the maintainer did not rule on them
       separately: the install settles for `limits.settle` and has no key of its own, and a
-      failed check before the steady window never changes a verdict.
+      failed check in the install window never changes a verdict.
     - An installed release that fails only in the first seconds after it reported ready is not
       seen at the install. Its start-up is judged in the rollback's window, or in the restart's
-      when no previous release is named.
-    - A run that passes may now print failed checks, on a line that says "not judged".
+      when no previous release is named. A commands run with `install` and `deploy` and no
+      `rollback` starts the installed release only once, and judges its start-up in no window.
+    - A run that passes may now print failed checks, on a line that says "failures not judged".
     - In `result.json` the steady window's start is no longer the time of the probe's first
-      observation. No release carries the schema yet, so its version stays.
-    - The first plan's built-in probe exits when its host cannot be resolved at its start, and
-      the run is then `probe-exited`. Section 6 does not say what the probe does then. A failed
-      check in its place would fall before the steady window like any other. That change is not
-      made here.
+      observation. No release carries the schema yet, so its version stays: a version keeps its
+      meaning from the first release that carries it (section 10).
+    - The first plan's built-in probe exits when its host cannot be resolved at its start. The
+      next plan changes that to the failed check that section 6 now describes.
     - The report does not say how many ready endpoints the probe's target had when the steady
-      window began. It would sharpen the text for a target that never answered.
+      window began. It would sharpen the text for a target that passed no check.
 
 ## 15. Not in the first release
 
@@ -2639,12 +2735,13 @@ reported. Nothing was run, and the agents' reports are not filed in the reposito
 Seen and read on 2026-11-17, for the amendment and the revision of that day. The runs were the
 first plan's own end-to-end suite on a workstation, with kind through rootless nerdctl, under
 Helm 3 and under Helm 4. Their logs are not filed in the repository. The drafting session read
-the kind file itself.
+the kind file and the kubectl file itself.
 
 | Source | What this design takes from it |
 | --- | --- |
 | The first plan's end-to-end runs | That the built-in probe, started as soon as the install was ready, had its first five checks refused, then one check that took about a second and one that timed out, and no failure after those |
 | kind at `v0.33.0`: the kubeadm configuration it writes for a cluster | That kind sets kube-proxy's shortest time between syncs to 1 s in every cluster it creates |
+| `k8s.io/kubectl` at `v0.37.2`: the rollout status of a Deployment, a StatefulSet and a DaemonSet | That a rollout is not complete while its controller has not yet seen the workload's latest spec, while fewer pods are updated than the spec asks for, and while an updated pod is not available or, for a StatefulSet, not ready. So a pod created, a spec changed and a pod that stops being ready each make the install's conditions not hold (section 7) |
 
 Still not shown by any run or any page: that 15 s is long enough for an install to settle under
 the probe; that the probe's own pod meets no failure of its own after that time; that a shorter
