@@ -16,26 +16,28 @@ import (
 )
 
 // facts is everything the run has learned, in the units' own types, at the
-// moment it writes a record. probeStopped says that the probe was asked to
-// stop; probe holds what its Stop returned unless that Stop panicked after it
-// was asked. probeBegun says that the tool started the probe. settling is the
-// install as watch reported it.
+// moment it writes a record. probeStop says how the tool's stop of the probe
+// went; probe holds what its Stop returned, which the record uses when the stop
+// was asked. probeLines and probeJSONText are the probe's counts as Counts gave
+// them, which the record uses otherwise. probeBegun says that the tool started
+// the probe. settling is the install as watch reported it.
 type facts struct {
-	cfg          *config.Config
-	decision     verdict.Decision
-	transitions  []transitionFacts
-	install      watch.Install
-	settling     watch.Settling
-	releases     []deploy.Release
-	probe        probe.Facts
-	probeStopped bool
-	probeBegun   bool
-	target       probe.Target
-	images       map[string]config.ImageRef
-	removed      []string
-	warnings     []string
-	cluster      *report.Cluster
-	version, out string
+	cfg                       *config.Config
+	decision                  verdict.Decision
+	transitions               []transitionFacts
+	install                   watch.Install
+	settling                  watch.Settling
+	releases                  []deploy.Release
+	probe                     probe.Facts
+	probeStop                 probeStop
+	probeLines, probeJSONText int
+	probeBegun                bool
+	target                    probe.Target
+	images                    map[string]config.ImageRef
+	removed                   []string
+	warnings                  []string
+	cluster                   *report.Cluster
+	version, out              string
 }
 
 // transitionFacts is one transition as the units reported it: what the
@@ -218,20 +220,44 @@ func transitionRecords(trs []transitionFacts) []report.Transition {
 	return out
 }
 
+// probeRecord returns the probe's entry. When the tool asked the probe to stop and Stop gave its
+// Facts, the counts and stopped_when_asked are those Facts'. Otherwise stopped_when_asked is null,
+// the counts are those that Counts gave, and a note after the target's says why (section 10).
 func probeRecord(f facts, h *config.HTTP, settings []report.Setting) report.Probe {
 	var names []string
 	for k := range h.Headers { // names only: a header's value is never read
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	return report.Probe{
+	p := report.Probe{
 		Kind: "http", Target: "GET " + h.URL, Settings: settings, Headers: names,
-		Lines: f.probe.Lines, JSONLinesWithoutOK: f.probe.JSONTextLines,
 		// On http there is no certificate to check, so none is left unchecked.
 		CertificateChecked: certificateChecked(h.URL),
-		StoppedWhenAsked:   f.probe.StoppedWhenAsked || !f.probeStopped,
 		Notes:              f.target.Notes,
 	}
+	if f.probeStop == asked {
+		p.Lines, p.JSONLinesWithoutOK = f.probe.Lines, f.probe.JSONTextLines
+		p.StoppedWhenAsked = new(f.probe.StoppedWhenAsked)
+		return p
+	}
+	p.Lines, p.JSONLinesWithoutOK = f.probeLines, f.probeJSONText
+	// A new slice, so that the target's own notes are not written into.
+	p.Notes = append(append([]string(nil), f.target.Notes...), f.probeStop.note())
+	return p
+}
+
+// note is the sentence of a probe entry whose stop the tool did not judge, and empty for asked,
+// whose Facts say how the probe stopped.
+func (p probeStop) note() string {
+	switch p {
+	case notAsked:
+		return "the run was interrupted, so the tool did not ask the probe to stop"
+	case cutBySignal:
+		return "the run was interrupted while the tool waited for the probe to stop"
+	case stopFailed:
+		return "the tool failed while it stopped the probe"
+	}
+	return ""
 }
 
 // certificateChecked says whether the probe checks a certificate. The scheme

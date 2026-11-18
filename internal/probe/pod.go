@@ -33,12 +33,15 @@ type Facts struct {
 	ClockDifference      time.Duration
 }
 
-// Probe is one probe of a run, as run holds it: Events, Start and Stop of Pod, with
+// Probe is one probe of a run, as run holds it: Events, Start, Stop and Counts of Pod, with
 // the same contracts.
 type Probe interface {
 	Events() <-chan Event
 	Start(ctx context.Context) (Started, error)
 	Stop(ctx context.Context) (Facts, error)
+	// Counts joins the Probe interface with the contract of Pod's Counts. run calls it when it
+	// cannot use Stop's Facts.
+	Counts() (lines, jsonText int)
 }
 
 // ClockBound is the largest difference, either way, between the runtime's timestamp of the first

@@ -92,7 +92,9 @@ const (
 // a window only when verdict says that it goes on. Once the probe was created,
 // the run stops it before the final verdict, whether the run's last window
 // ended, the run ended before the probe's first observation or the tool failed,
-// unless a signal ended the run.
+// unless a signal ended the run. After a failure of the tool, a signal that had
+// already come is a reason beside the failure, and a command that still runs is
+// stopped before the probe.
 func Run(ctx context.Context, o Options, u Units) int {
 	s := &runState{o: o, u: u, warnings: &warnings{}}
 	s.parent = ctx
@@ -117,9 +119,18 @@ func Run(ctx context.Context, o Options, u Units) int {
 	}
 	if caught != nil {
 		s.toolFailed(caught)
+		// A signal that came before the failure was handled belongs to the same window
+		// (section 10 rule 3), and is no warning after the verdict.
+		if !s.signalSeen && s.interrupted(s.parent) {
+			s.decide(true)
+		}
+	}
+	// The run's own context ends here, before the probe's stop, so that a command that still runs
+	// is stopped first (section 7, "When the tool fails"). The probe's stop keeps the caller's.
+	s.cancel()
+	if caught != nil {
 		s.stopAfterFailure()
 	}
-	s.cancel()
 	s.endReading()
 	s.waitCommands()
 	s.endCommands()
@@ -166,7 +177,8 @@ type runState struct {
 	probeFacts probe.Facts
 	probeStart probe.Started
 	settling   watch.Settling // the install window as watch reported it, for the record
-	stopped    bool
+	stop       probeStop      // notAsked until the tool begins to stop the probe
+	countsSeen *[2]int        // the probe's lines and JSON text lines from Counts, read once
 	names      []verdict.WindowName
 
 	mu          sync.Mutex // guards the timeline, which the event reader extends
@@ -470,23 +482,34 @@ func (s *runState) stopProbe(ctx context.Context) {
 }
 
 // stopAfterFailure stops the probe after a failure of the tool, as stopProbe does, when the
-// probe was created and not yet asked to stop and no signal ended the run: section 6 stops the
-// probe at every end of a run but a signal. The stop's context is the caller's, so the run's own
-// cancel does not cut it short and a signal does; Stop bounds its own wait by the drain and
-// stopMargin. Its last lines are read while the stop runs, or dropped when the event reader is
-// gone, as haltProbe says. A signal that came meanwhile is placed as stopProbe places one, and
-// the verdict is decided again with the internal-error that the failure placed. A panic in the
-// stop, or one of the reader, is the tool's failure too: it is placed as one more internal-error
-// beside the first.
+// probe was created, its stop has not begun and no signal ended the run: section 6 stops the
+// probe at every end of a run but a signal. Run has ended its own context first, so that a
+// command that still runs is stopped before the probe (section 7). The stop's context is the
+// caller's, so the run's own cancel does not cut it short and a signal does; Stop bounds its own
+// wait by the drain and stopMargin. Its last lines are read while the stop runs, or dropped when
+// the event reader is gone, as haltProbe says. A signal that came meanwhile is placed as
+// stopProbe places one, and the verdict is decided again with the internal-error that the
+// failure placed. A panic in the stop, or one of the reader, is the tool's failure too: it is
+// placed as one more internal-error beside the first. A panic of the decision after that is a
+// warning, as any failure after the verdict was decided.
 func (s *runState) stopAfterFailure() {
-	if s.probe == nil || s.stopped || s.parent.Err() != nil {
+	if s.probe == nil || s.stop != notAsked || s.parent.Err() != nil {
 		return
 	}
 	defer func() {
 		if p := recover(); p != nil {
-			// A panic of the last decision; a reader's panic that it met was taken by then.
+			// A panic of the stop before Stop was called, or of the last decision; a reader's panic
+			// that it met was taken by then.
 			s.place(verdict.Condition{Code: verdict.InternalError, Text: panicText(p)})
-			s.decide(true)
+			func() {
+				defer func() {
+					if p := recover(); p != nil {
+						// The verdict was decided when the first failure was placed.
+						s.warnings.add("the tool failed after the verdict was decided: " + panicText(p))
+					}
+				}()
+				s.decide(true)
+			}()
 		}
 	}()
 	p := s.haltProbe(s.parent)
@@ -501,16 +524,20 @@ func (s *runState) stopAfterFailure() {
 }
 
 // haltProbe asks the probe to stop and returns when Stop has returned, with the value of a panic
-// in Stop, if one came. The event reader reads the probe's last lines meanwhile. When the reader
-// is gone before Stop has returned, because a panic stopped it, the lines are taken here and
-// dropped, so that the probe never waits on a channel that nobody reads.
+// in Stop, if one came. The stop counts as the tool's failure from its first step until takeStop
+// learns how Stop went, and the probe's events are taken before Stop's goroutine starts: a panic
+// there leaves no stop running behind it, and the stop is not begun again. The event reader
+// reads the probe's last lines meanwhile. When the reader is gone before Stop has returned,
+// because a panic stopped it, the lines are taken here and dropped, so that the probe never waits
+// on a channel that nobody reads.
 func (s *runState) haltProbe(ctx context.Context) any {
+	s.stop = stopFailed
+	events := s.probe.Events()
 	stopped := make(chan any, 1)
 	go func() {
 		defer func() { stopped <- recover() }()
 		s.takeStop(ctx)
 	}()
-	events := s.probe.Events()
 	var gone <-chan struct{} // the reader's end, until it has come
 	if s.reader != nil {
 		gone = s.reader.done
@@ -530,14 +557,34 @@ func (s *runState) haltProbe(ctx context.Context) any {
 	}
 }
 
-// takeStop asks the probe to stop, keeps the Facts it gives, marks the probe as stopped, and
+// probeStop is how the tool's stop of the probe went: not asked because a signal ended the run;
+// Stop returned its Facts and no error; Stop returned an error after its context had ended; the
+// tool failed while it stopped the probe.
+type probeStop int
+
+const (
+	notAsked probeStop = iota
+	asked
+	cutBySignal
+	stopFailed
+)
+
+// takeStop asks the probe to stop, keeps the Facts it gives, records how the stop went, and
 // warns when Stop gave an error. After a start that failed, Stop gives what that stop left. The
-// probe counts as stopped from the moment it was asked, so that a Stop that panicked is not asked
-// again.
+// stop counts as the tool's failure from the moment the probe was asked until Stop returns, so
+// that a Stop that panicked is recorded as one and is not asked again. An error of Stop after its
+// context ended is a signal's doing (cutBySignal); any other, a refused or timed-out delete, is
+// the tool's failure (stopFailed).
 func (s *runState) takeStop(ctx context.Context) {
-	s.stopped = true
+	s.stop = stopFailed
 	f, err := s.probe.Stop(ctx)
 	s.probeFacts = f
+	switch {
+	case err == nil:
+		s.stop = asked
+	case ctx.Err() != nil:
+		s.stop = cutBySignal
+	}
 	if err != nil {
 		// Stop's error is the pod delete's, or the context's: the probe's pod may still run.
 		s.warnings.add("the probe could not be stopped: " + err.Error() + "; its pod may still be there")
@@ -590,6 +637,9 @@ func (s *runState) place(c verdict.Condition) {
 // that this is the run's last call, which places the tool's own faults and
 // checks that no window was left open.
 func (s *runState) decide(final bool) verdict.Decision {
+	if h := decideHook; h != nil {
+		h()
+	}
 	s.ask()
 	t := s.timeline()
 	t.Now = s.u.Clock.Now()
@@ -748,23 +798,26 @@ func (s *runState) finish() (code int) {
 
 // record returns the report's record of the run so far.
 func (s *runState) record() report.Run {
+	lines, jsonText := s.probeCounts()
 	return record(facts{
-		cfg:          s.cfg,
-		decision:     s.decision,
-		transitions:  s.transitions,
-		install:      s.install,
-		settling:     s.settling,
-		releases:     s.releases,
-		probe:        s.probeFacts,
-		probeStopped: s.stopped,
-		probeBegun:   s.probe != nil,
-		target:       s.target,
-		images:       s.images,
-		removed:      s.removed,
-		warnings:     s.warnings.all(),
-		cluster:      s.clusterFacts(),
-		version:      s.o.Version,
-		out:          s.w.Dir(),
+		cfg:           s.cfg,
+		decision:      s.decision,
+		transitions:   s.transitions,
+		install:       s.install,
+		settling:      s.settling,
+		releases:      s.releases,
+		probe:         s.probeFacts,
+		probeStop:     s.stop,
+		probeLines:    lines,
+		probeJSONText: jsonText,
+		probeBegun:    s.probe != nil,
+		target:        s.target,
+		images:        s.images,
+		removed:       s.removed,
+		warnings:      s.warnings.all(),
+		cluster:       s.clusterFacts(),
+		version:       s.o.Version,
+		out:           s.w.Dir(),
 	})
 }
 
@@ -775,6 +828,21 @@ func (s *runState) clusterFacts() *report.Cluster {
 		s.clusterSeen = &c
 	}
 	return s.clusterSeen
+}
+
+// probeCounts is what the probe's Counts gives, for a probe whose stop gave no Facts that the
+// record can use: read once, by the first record, which the final result.json is written from, so
+// that a later rewrite for a warning gives the same counts. Zeros when there is no probe or its
+// stop was asked.
+func (s *runState) probeCounts() (lines, jsonText int) {
+	if s.probe == nil || s.stop == asked {
+		return 0, 0
+	}
+	if s.countsSeen == nil {
+		l, j := s.probe.Counts()
+		s.countsSeen = &[2]int{l, j}
+	}
+	return s.countsSeen[0], s.countsSeen[1]
 }
 
 // mark is one window's boundaries in windows.json.
@@ -1095,6 +1163,10 @@ type reader struct {
 // into the timeline: a test's way to make the reader fail, as only a runtime fault could. It is nil
 // in the tool.
 var eventHook func(probe.Event)
+
+// decideHook, when a test sets it, runs at the start of each decision: a test's way to make a
+// decision fail, as only a runtime fault could. It is nil in the tool.
+var decideHook func()
 
 // readEvents starts the goroutine that reads the probe's events. startProbe calls it before the
 // probe starts, so that the probe's sends have a reader from its first line on.

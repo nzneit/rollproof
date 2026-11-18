@@ -114,8 +114,11 @@ type Probe struct {
 	Lines              int       `json:"lines"`
 	JSONLinesWithoutOK int       `json:"json_lines_without_ok"`
 	CertificateChecked bool      `json:"certificate_checked"`
-	StoppedWhenAsked   bool      `json:"stopped_when_asked"`
-	Notes              []string  `json:"notes"`
+	// StoppedWhenAsked is true when the probe stopped within the drain after the tool asked it;
+	// false when it did not. Null when the tool did not ask it, stopped waiting for it because a
+	// signal came, or failed while it stopped it; Notes then says which.
+	StoppedWhenAsked *bool    `json:"stopped_when_asked"`
+	Notes            []string `json:"notes"`
 }
 
 // Release is one release of the Helm driver: the chart's name and the

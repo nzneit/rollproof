@@ -188,7 +188,7 @@ func TestConsoleLines(t *testing.T) {
 			"status 200-299\n            the server's certificate was not verified\n"},
 		{"a note of the target", passRun, func(r *Run) { r.Probes[0].Notes = []string{affinity} },
 			"status 200-299\n            " + affinity + "\n"},
-		{"a probe that did not stop", passRun, func(r *Run) { r.Probes[0].StoppedWhenAsked = false },
+		{"a probe that did not stop", passRun, func(r *Run) { r.Probes[0].StoppedWhenAsked = new(false) },
 			"status 200-299\n            the probe did not stop when asked; checks still in flight were not reported\n"},
 		{"variables taken out", passRun, func(r *Run) { r.RemovedVariables = []string{"HELM_DRIVER", "HELM_NAMESPACE"} },
 			"slowest 44 ms, behind 9 ms\ntaken out of the commands' environment: HELM_DRIVER, HELM_NAMESPACE\n\nwindow"},
@@ -254,6 +254,27 @@ func TestConsoleLines(t *testing.T) {
 				t.Errorf("Console has no\n%s\nin\n%s", c.want, got)
 			}
 		})
+	}
+}
+
+// A probe whose stop the tool did not judge is not blamed: its note is printed, and no line says
+// that it did not stop when asked. A probe that did not stop is.
+func TestConsoleProbeNotAsked(t *testing.T) {
+	const note = "the run was interrupted, so the tool did not ask the probe to stop"
+	const line = "did not stop when asked"
+	r := passRun()
+	r.Probes[0].StoppedWhenAsked = nil
+	r.Probes[0].Notes = []string{note}
+	got := Console(r)
+	if strings.Contains(got, line) {
+		t.Errorf("Console says %q of a probe that was not asked:\n%s", line, got)
+	}
+	if !strings.Contains(got, "status 200-299\n            "+note+"\n") {
+		t.Errorf("Console does not print the note under the probe:\n%s", got)
+	}
+	r.Probes[0].StoppedWhenAsked, r.Probes[0].Notes = new(false), nil
+	if got := Console(r); !strings.Contains(got, line) {
+		t.Errorf("Console does not say %q of a probe that did not stop:\n%s", line, got)
 	}
 }
 

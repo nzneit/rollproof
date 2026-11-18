@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -215,11 +216,26 @@ type fakeDeployer struct {
 	results  map[string]deploy.Result
 	releases []deploy.Release
 	block    map[string]chan struct{} // commands that wait before they return
-	busyN    atomic.Int32             // command goroutines inside a command now
+	// orCtx names the commands that wait on their block or their context, whichever comes first,
+	// as a real command ends when the tool stops it; the others wait on their block alone.
+	orCtx map[string]bool
+	busyN atomic.Int32 // command goroutines inside a command now
+
+	mu   sync.Mutex
+	ctxs map[string]context.Context // the context each command was given
 }
 
 // busy is the number of command goroutines that are inside a command now.
 func (d *fakeDeployer) busy() int { return int(d.busyN.Load()) }
+
+// cancelled says whether the context that the command name was given has ended. Safe from any
+// goroutine.
+func (d *fakeDeployer) cancelled(name string) bool {
+	d.mu.Lock()
+	ctx := d.ctxs[name]
+	d.mu.Unlock()
+	return ctx != nil && ctx.Err() != nil
+}
 
 // Fetch records "fetch" and returns the scripted error.
 func (d *fakeDeployer) Fetch(ctx context.Context) error {
@@ -228,16 +244,29 @@ func (d *fakeDeployer) Fetch(ctx context.Context) error {
 	return d.fetchErr
 }
 
-// command records name, runs its hook, waits for the command's block when it has
-// one, and returns the scripted result, or a success when it has none, with the
-// times of the clock.
+// command records name and its context, runs its hook, waits for the command's block when it has
+// one (or for its context, when orCtx names it), and returns the scripted result, or a success
+// when it has none, with the times of the clock.
 func (d *fakeDeployer) command(ctx context.Context, name string) deploy.Result {
 	d.busyN.Add(1)
 	defer d.busyN.Add(-1)
+	d.mu.Lock()
+	if d.ctxs == nil {
+		d.ctxs = map[string]context.Context{}
+	}
+	d.ctxs[name] = ctx
+	d.mu.Unlock()
 	d.w.calls.add(name)
 	d.w.hook(name)
 	if hold := d.block[name]; hold != nil {
-		<-hold
+		if d.orCtx[name] {
+			select {
+			case <-hold:
+			case <-ctx.Done():
+			}
+		} else {
+			<-hold
+		}
 	}
 	res, ok := d.results[name]
 	if !ok {
@@ -385,11 +414,26 @@ type fakeProbe struct {
 	made, once sync.Once
 	facts      probe.Facts
 	last       []probe.Event // the lines that the drain gives: Stop sends them before it closes the channel
+	// linesRead and jsonTextRead are what Counts gives.
+	linesRead, jsonTextRead int
+	// startWaits makes Start wait, once it has sent the scripted events, until its context ends,
+	// and return the context's error, as a Start that a signal cut does.
+	startWaits bool
+	// eventsPanic makes Events panic once Start has returned.
+	eventsPanic bool
+	returned    atomic.Bool // Start has returned
 }
 
+// Counts gives the scripted counts.
+func (p *fakeProbe) Counts() (lines, jsonText int) { return p.linesRead, p.jsonTextRead }
+
 // Events gives the probe's channel, made at the first call: with room for the scripted events and
-// 64 more, or with no buffer when unbuffered is set.
+// 64 more, or with no buffer when unbuffered is set. With eventsPanic it panics once Start has
+// returned.
 func (p *fakeProbe) Events() <-chan probe.Event {
+	if p.eventsPanic && p.returned.Load() {
+		panic("the probe's events broke")
+	}
 	p.made.Do(func() {
 		if p.unbuffered {
 			p.ch = make(chan probe.Event)
@@ -401,13 +445,20 @@ func (p *fakeProbe) Events() <-chan probe.Event {
 }
 
 // Start records "start", runs its hook and sends every scripted event into the probe's channel.
-// With startErr it then closes the channel, as a Start that failed does, and returns the error.
+// With startWaits it then waits until ctx ends; with startErr, or when ctx ended, it closes the
+// channel, as a Start that failed does, and returns the error.
 func (p *fakeProbe) Start(ctx context.Context) (probe.Started, error) {
+	defer p.returned.Store(true)
 	p.w.calls.add("start")
 	p.w.hook("start")
 	p.Events()
 	for _, e := range p.events {
 		p.ch <- e
+	}
+	if p.startWaits {
+		<-ctx.Done()
+		p.once.Do(func() { close(p.ch) })
+		return probe.Started{}, ctx.Err()
 	}
 	if p.startErr != nil {
 		p.once.Do(func() { close(p.ch) })
@@ -510,15 +561,36 @@ func (w *world) hook(name string) {
 // cannot.
 func (w *world) result() resultFile {
 	w.t.Helper()
+	r, err := w.readResult()
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return r
+}
+
+// resultFromHook is result for a hook that may run off the test's goroutine: it reports a file
+// that cannot be read with t.Error, never t.Fatal, and says whether it read the file.
+func (w *world) resultFromHook() (resultFile, bool) {
+	w.t.Helper()
+	r, err := w.readResult()
+	if err != nil {
+		w.t.Error(err)
+		return resultFile{}, false
+	}
+	return r, true
+}
+
+// readResult reads w.out/result.json and decodes it.
+func (w *world) readResult() (resultFile, error) {
 	b, err := os.ReadFile(filepath.Join(w.out, "result.json"))
 	if err != nil {
-		w.t.Fatalf("read result.json: %v", err)
+		return resultFile{}, fmt.Errorf("read result.json: %w", err)
 	}
 	var r resultFile
 	if err := json.Unmarshal(b, &r); err != nil {
-		w.t.Fatalf("decode result.json: %v", err)
+		return resultFile{}, fmt.Errorf("decode result.json: %w", err)
 	}
-	return r
+	return r, nil
 }
 
 // passes is one summary line of 200 passed checks for each second from
