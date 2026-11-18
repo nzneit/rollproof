@@ -2,6 +2,7 @@ package report
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 )
@@ -523,6 +524,16 @@ func TestClean(t *testing.T) {
 				t.Errorf("clean(%q) = %q, want %q", c.in, got, c.want)
 			}
 		})
+	}
+}
+
+// Two classes whose names clean to one name are one class on the console: their counts are added,
+// so that they still sum to the failed checks.
+func TestCleanClassesAddsCountsThatCleanToOneName(t *testing.T) {
+	got := cleanClasses(map[string]int{"time\nout": 2, "time\tout": 3, "time out": 4, "refused": 1})
+	want := map[string]int{"time out": 9, "refused": 1}
+	if !maps.Equal(got, want) {
+		t.Errorf("cleanClasses = %v, want %v", got, want)
 	}
 }
 

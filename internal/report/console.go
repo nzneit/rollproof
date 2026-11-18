@@ -107,13 +107,15 @@ func cleanSettings(s []Setting) []Setting {
 	return out
 }
 
+// cleanClasses cleans the names of the classes. Classes whose names clean to one name are one
+// class, with their counts added, so that the counts still sum to the failed checks.
 func cleanClasses(m map[string]int) map[string]int {
 	if m == nil {
 		return nil
 	}
 	out := make(map[string]int, len(m))
 	for name, n := range m {
-		out[clean(name)] = n
+		out[clean(name)] += n
 	}
 	return out
 }
