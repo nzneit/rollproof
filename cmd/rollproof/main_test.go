@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	"rollproof/internal/config"
 	"rollproof/internal/deploy"
 	"rollproof/internal/probe"
+	"rollproof/internal/run"
 	"rollproof/internal/verdict"
 )
 
@@ -410,5 +413,224 @@ func TestProbeHTTPErrorExitsOne(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Errorf("stdout holds %q, want nothing", stdout.String())
+	}
+}
+
+// The fake runs of the helper child, which ROLLPROOF_HELPER names.
+const (
+	fakeWaits   = "waits"   // prints started, waits until its context ends, prints returned and returns 2
+	fakeLingers = "lingers" // prints started, prints cancelled when its context ends, waits 30 s and prints returned
+	fakeFails   = "fails"   // returns 1 at once
+)
+
+// TestHelperProcess is the child that the signal tests start. Without
+// ROLLPROOF_HELPER it does nothing. With it, it runs `rollproof run` with the
+// fake run that the variable names, and ends the process as main does.
+func TestHelperProcess(t *testing.T) {
+	fake := os.Getenv("ROLLPROOF_HELPER")
+	if fake == "" {
+		return
+	}
+	runOf = func(ctx context.Context, o run.Options, _ run.Units) int {
+		// A child that its test left behind ends on its own.
+		orphaned := time.After(time.Minute)
+		switch fake {
+		case fakeWaits:
+			fmt.Fprintln(o.Stdout, "started")
+			select {
+			case <-ctx.Done():
+			case <-orphaned:
+				return 3
+			}
+			fmt.Fprintln(o.Stdout, "returned")
+			return 2
+		case fakeLingers:
+			fmt.Fprintln(o.Stdout, "started")
+			select {
+			case <-ctx.Done():
+			case <-orphaned:
+				return 3
+			}
+			fmt.Fprintln(o.Stdout, "cancelled")
+			time.Sleep(30 * time.Second)
+			fmt.Fprintln(o.Stdout, "returned")
+			return 2
+		case fakeFails:
+			return 1
+		}
+		fmt.Fprintf(o.Stderr, "no fake run is named %q\n", fake)
+		return 3
+	}
+	endProcess(realMain([]string{"run", "-f", "rollproof.yaml"}, os.Stdout, os.Stderr, os.Getenv))
+}
+
+// helperChild is this test binary, started to run TestHelperProcess with a
+// fake run.
+type helperChild struct {
+	cmd    *exec.Cmd
+	stdout lockedBuffer
+	stderr lockedBuffer
+	exited chan struct{} // closed when Wait has returned and the output is complete
+}
+
+// startChild starts the child with the fake run that fake names. The child is
+// killed at the end of the test if it still runs.
+func startChild(t *testing.T, fake string) *helperChild {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &helperChild{exited: make(chan struct{})}
+	c.cmd = exec.Command(exe, "-test.run=^TestHelperProcess$")
+	c.cmd.Env = append(os.Environ(), "ROLLPROOF_HELPER="+fake)
+	c.cmd.Stdout = &c.stdout
+	c.cmd.Stderr = &c.stderr
+	if err := c.cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		_ = c.cmd.Wait()
+		close(c.exited)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-c.exited:
+			return
+		default:
+		}
+		_ = c.cmd.Process.Kill()
+		select {
+		case <-c.exited:
+		case <-time.After(5 * time.Second):
+			t.Error("the child did not end within 5 s of its kill")
+		}
+	})
+	return c
+}
+
+// output gives the child's stdout and stderr, for a failure's message.
+func (c *helperChild) output() string {
+	return "\nstdout:\n" + c.stdout.String() + "stderr:\n" + c.stderr.String()
+}
+
+// waitFor waits up to 20 s until the child has written line on stdout.
+func (c *helperChild) waitFor(t *testing.T, line string) {
+	t.Helper()
+	deadline := time.After(20 * time.Second)
+	for !strings.Contains(c.stdout.String(), line+"\n") {
+		select {
+		case <-c.exited:
+			if strings.Contains(c.stdout.String(), line+"\n") {
+				return
+			}
+			t.Fatalf("the child ended before it wrote %q%s", line, c.output())
+		case <-deadline:
+			t.Fatalf("the child did not write %q within 20 s%s", line, c.output())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// signal sends sig to the child's process.
+func (c *helperChild) signal(t *testing.T, sig syscall.Signal) {
+	t.Helper()
+	if err := c.cmd.Process.Signal(sig); err != nil {
+		t.Fatalf("sending %s: %v", sig, err)
+	}
+}
+
+// wait waits up to within for the child to end, and gives how it ended. A race
+// that the race detector found in the child fails the test too, since a child
+// that a signal ends exits with no code to say so.
+func (c *helperChild) wait(t *testing.T, within time.Duration) syscall.WaitStatus {
+	t.Helper()
+	select {
+	case <-c.exited:
+	case <-time.After(within):
+		t.Fatalf("the child did not end within %s%s", within, c.output())
+	}
+	if strings.Contains(c.stderr.String(), "DATA RACE") {
+		t.Errorf("the race detector found a race in the child%s", c.output())
+	}
+	return c.cmd.ProcessState.Sys().(syscall.WaitStatus)
+}
+
+// ending says how a child ended, for a failure's message.
+func ending(ws syscall.WaitStatus) string {
+	if ws.Signaled() {
+		return "by " + ws.Signal().String()
+	}
+	return "with exit " + strconv.Itoa(ws.ExitStatus())
+}
+
+// TestASignalEndsTheToolByIt sends SIGINT or SIGTERM while the run waits for
+// its context: the run returns, and the process then ends by that signal, as a
+// shell expects of a program that a user interrupts (section 10, "On a signal").
+func TestASignalEndsTheToolByIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sig  syscall.Signal
+	}{
+		{"SIGINT", syscall.SIGINT},
+		{"SIGTERM", syscall.SIGTERM},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := startChild(t, fakeWaits)
+			c.waitFor(t, "started")
+			c.signal(t, tc.sig)
+			ws := c.wait(t, 10*time.Second)
+			if !ws.Signaled() || ws.Signal() != tc.sig {
+				t.Errorf("the child ended %s, want by %s%s", ending(ws), tc.sig, c.output())
+			}
+			if !strings.Contains(c.stdout.String(), "returned\n") {
+				t.Errorf("the process ended before the run returned%s", c.output())
+			}
+		})
+	}
+}
+
+// TestASecondSignalEndsTheToolAtOnce sends a second signal while the run is
+// still ending after the first: the process ends by the second at once, and the
+// run's own end never comes. The back-to-back case sends SIGINT and then
+// SIGTERM, since Linux may merge a second SIGINT into a first one that is still
+// pending.
+func TestASecondSignalEndsTheToolAtOnce(t *testing.T) {
+	t.Run("after the run's context ended", func(t *testing.T) {
+		c := startChild(t, fakeLingers)
+		c.waitFor(t, "started")
+		c.signal(t, syscall.SIGINT)
+		c.waitFor(t, "cancelled")
+		c.signal(t, syscall.SIGINT)
+		ws := c.wait(t, 5*time.Second)
+		if !ws.Signaled() || ws.Signal() != syscall.SIGINT {
+			t.Errorf("the child ended %s, want by %s%s", ending(ws), syscall.SIGINT, c.output())
+		}
+		if strings.Contains(c.stdout.String(), "returned") {
+			t.Errorf("the run returned before the process ended%s", c.output())
+		}
+	})
+	t.Run("back to back", func(t *testing.T) {
+		c := startChild(t, fakeLingers)
+		c.waitFor(t, "started")
+		c.signal(t, syscall.SIGINT)
+		c.signal(t, syscall.SIGTERM)
+		ws := c.wait(t, 5*time.Second)
+		if !ws.Signaled() || ws.Signal() != syscall.SIGTERM {
+			t.Errorf("the child ended %s, want by %s%s", ending(ws), syscall.SIGTERM, c.output())
+		}
+		if strings.Contains(c.stdout.String(), "returned") {
+			t.Errorf("the run returned before the process ended%s", c.output())
+		}
+	})
+}
+
+// TestNoSignalExitsWithTheCode pins that a run that no signal stopped ends the
+// process with the run's exit code.
+func TestNoSignalExitsWithTheCode(t *testing.T) {
+	c := startChild(t, fakeFails)
+	ws := c.wait(t, 20*time.Second)
+	if ws.Signaled() || ws.ExitStatus() != 1 {
+		t.Errorf("the child ended %s, want with exit 1%s", ending(ws), c.output())
 	}
 }
