@@ -13,7 +13,7 @@ const clockLayout = "15:04:05.00"
 
 // observe adds what the probe saw to p: counts in p.results, ProbeFailures, SteadyNotClean and
 // ProbeSilent conditions in p.windows, and the lines that no window holds in p.uncounted. It adds
-// to windows that began only. It does nothing when the steady window has not begun.
+// to windows that began only. It does nothing when the first window has not begun.
 func observe(t Timeline, p *placement) {
 	if len(t.Windows) == 0 || t.Windows[0].Start.IsZero() {
 		return
@@ -62,10 +62,16 @@ func countObservations(t Timeline, p *placement) {
 		if r.FirstFailure.IsZero() || o.T.Before(r.FirstFailure) {
 			r.FirstFailure = o.T
 		}
+		if r.LastFailure.IsZero() || o.T.After(r.LastFailure) {
+			r.LastFailure = o.T
+		}
 		if f := t.Windows[i].Finished; !f.IsZero() && !o.T.Before(f) {
 			r.AfterFinish++
 		}
 		for j := i + 1; j < len(t.Windows); j++ {
+			if t.Windows[j].Name == Install || t.Windows[j].Name == Steady {
+				continue
+			}
 			if s := t.Windows[j].Start; !s.IsZero() && s.After(o.T) && !s.After(o.Written) {
 				p.results[j].Crossed++
 			}
@@ -73,11 +79,13 @@ func countObservations(t Timeline, p *placement) {
 	}
 }
 
-// addFailures places a condition in each begun window that counted a failure (step 6 of the observation rules).
+// addFailures places a condition in each begun window that counted a failure (step 6 of the
+// observation rules), except the install window: a failure there is counted and decides nothing.
+// For the steady window it adds a line when no check has passed since the probe started.
 func addFailures(t Timeline, p *placement) {
 	for i, w := range t.Windows {
 		r := p.results[i]
-		if w.Start.IsZero() || r.Failed == 0 {
+		if w.Start.IsZero() || w.Name == Install || r.Failed == 0 {
 			continue
 		}
 		type classCount struct {
@@ -106,11 +114,26 @@ func addFailures(t Timeline, p *placement) {
 		if w.Name == Steady {
 			code = SteadyNotClean
 		}
+		text := fmt.Sprintf("%d %s failed (%s), first at %s", r.Failed, noun, strings.Join(parts, ", "), r.FirstFailure.UTC().Format(clockLayout))
+		if w.Name == Steady && !passedBefore(t, p.ends[i]) {
+			text += "\nno check has passed since the probe started: every check failed for " +
+				strconv.FormatFloat(p.ends[i].Sub(t.Windows[0].Start).Seconds(), 'f', 1, 64) + " s"
+		}
 		p.windows[i] = append(p.windows[i], Condition{
 			Code: code,
-			Text: fmt.Sprintf("%d %s failed (%s), first at %s", r.Failed, noun, strings.Join(parts, ", "), r.FirstFailure.UTC().Format(clockLayout)),
+			Text: text,
 		})
 	}
+}
+
+// passedBefore says whether any observation of the timeline passed at a time before end.
+func passedBefore(t Timeline, end time.Time) bool {
+	for _, o := range t.Observations {
+		if o.OK && o.T.Before(end) {
+			return true
+		}
+	}
+	return false
 }
 
 // silenceEnd is where the measured stretch ends: the end of the last begun window, or the moment

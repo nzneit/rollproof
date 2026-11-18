@@ -104,12 +104,15 @@ func (c Code) Verdict() Verdict {
 	}
 }
 
-// WindowName is the name of a window: Steady "steady", Deploy "deploy", Rollback "rollback" or
-// Restart "restart".
+// WindowName is the name of a window: Install "install", Steady "steady", Deploy "deploy",
+// Rollback "rollback" or Restart "restart". The install window is from the probe's first
+// observation until the install has settled. It is a window for the rules and for a reason's
+// Window; a report lists it apart from the other windows.
 type WindowName string
 
 // Names of the windows of a run.
 const (
+	Install  WindowName = "install"
 	Steady   WindowName = "steady"
 	Deploy   WindowName = "deploy"
 	Rollback WindowName = "rollback"

@@ -23,6 +23,16 @@ func failure(began, written time.Duration, class string) Observation {
 	return Observation{Written: at(written), T: at(began), OK: false, N: 1, Class: class, Ms: 12, Lag: 2}
 }
 
+// failures gives one failed check a second, written when it began, from `from` up to but not
+// including `to`: class 503.
+func failures(from, to time.Duration) []Observation {
+	var obs []Observation
+	for d := from; d < to; d += sec {
+		obs = append(obs, failure(d, d, "503"))
+	}
+	return obs
+}
+
 // deployFailures gives the 243 failures of section 10's failing example:
 // 212 from 12.31 s, one every 50 ms, then 31 from 25 s (the deploy's
 // Finished), one every 100 ms. The first 198 are refused, the other 45
@@ -239,6 +249,68 @@ func TestObserve(t *testing.T) {
 		tallies: map[WindowName]tally{Deploy: {Checks: 6002, Failed: 2, ByClass: map[string]int{"503": 1, "unclassified": 1},
 			FirstFailure: at(26 * sec), SlowestMs: 30, LagMs: 5}},
 		texts: map[string]string{"deploy:probe-failures": "2 checks failed (503 1, unclassified 1), first at 10:00:26.00"},
+	}, {
+		name: "failed checks in the install window are counted and decide nothing",
+		tl: timeline(10*sec, withInstall(steadyOnly()), passes(-15*sec, 10*sec),
+			[]Observation{failure(-14900*msec, -14900*msec, "refused"), failure(-14800*msec, -12800*msec, "timeout")}),
+		want: summary{Verdict: Pass, Results: []Result{ResultPass, ResultPass, NotRun, NotRun}, GoOn: true},
+		tallies: map[WindowName]tally{
+			Install: {Checks: 3002, Failed: 2, ByClass: map[string]int{"refused": 1, "timeout": 1}, FirstFailure: at(-14900 * msec), SlowestMs: 30, LagMs: 5},
+			Steady:  clean,
+		},
+	}, {
+		name: "an observation that began before the install window is not counted",
+		tl: timeline(10*sec, withInstall(steadyOnly()), passes(-15*sec, 10*sec),
+			[]Observation{{Written: at(-14500 * msec), T: at(-15500 * msec), OK: true, N: 50, Ms: 30, Lag: 5}}),
+		want:      summary{Verdict: Pass, Results: []Result{ResultPass, ResultPass, NotRun, NotRun}, GoOn: true},
+		tallies:   map[WindowName]tally{Install: {Checks: 3000, SlowestMs: 30, LagMs: 5}, Steady: clean},
+		uncounted: 1,
+	}, {
+		name: "a failed check that began in the install window and was written in the steady window",
+		tl:   timeline(10*sec, withInstall(steadyOnly()), passes(-15*sec, 10*sec), []Observation{failure(-200*msec, 300*msec, "timeout")}),
+		want: summary{Verdict: Pass, Results: []Result{ResultPass, ResultPass, NotRun, NotRun}, GoOn: true},
+		tallies: map[WindowName]tally{
+			Install: {Checks: 3001, Failed: 1, ByClass: map[string]int{"timeout": 1}, FirstFailure: at(-200 * msec), SlowestMs: 30, LagMs: 5},
+			Steady:  clean, // its Crossed stays 0: only a transition's start is crossed
+		},
+	}, {
+		name:  "the probe is silent for 7 s in the install window and then writes again",
+		tl:    timeline(10*sec, withInstall(steadyOnly()), passes(-15*sec, -9*sec), passes(-3*sec, 10*sec)),
+		want:  summary{Verdict: NotVerified, Results: []Result{ResultNotVerified, NotJudged, NotRun, NotRun}, Reasons: []string{"install:probe-silent"}, Decided: ProbeSilent},
+		texts: map[string]string{"install:probe-silent": "no observation for 7.0 s, from 09:59:50.00"},
+	}, {
+		name: "a silence that begins in the install window and ends in the steady window; the install window decides",
+		tl:   timeline(10*sec, withInstall(steadyOnly()), passes(-15*sec, -2*sec), passes(4*sec, 10*sec)),
+		want: summary{Verdict: NotVerified, Results: []Result{ResultNotVerified, NotJudged, NotRun, NotRun}, Reasons: []string{"install:probe-silent"}, Decided: ProbeSilent},
+	}, {
+		name: "a line that breaks the contract in the install window",
+		tl:   withTimed(timeline(10*sec, withInstall(steadyOnly()), passes(-15*sec, 10*sec)), timed(ProbeLineInvalid, -5*sec)),
+		want: summary{Verdict: NotVerified, Results: []Result{ResultNotVerified, NotJudged, NotRun, NotRun}, Reasons: []string{"install:probe-line-invalid"}, Decided: ProbeLineInvalid},
+	}, {
+		name: "a failed check in the install window and one in the steady window: only the second is judged",
+		tl: timeline(10*sec, withInstall(steadyOnly()), passes(-15*sec, 10*sec),
+			[]Observation{failure(-10*sec, -10*sec, "refused"), failure(4500*msec, 4500*msec, "refused")}),
+		want:  summary{Verdict: NotVerified, Results: []Result{ResultPass, ResultNotVerified, NotRun, NotRun}, Reasons: []string{"steady:steady-not-clean"}, Decided: SteadyNotClean},
+		texts: map[string]string{"steady:steady-not-clean": "1 check failed (refused 1), first at 10:00:04.50"},
+	}, {
+		name: "no check has passed since the probe started",
+		tl:   timeline(10*sec, withInstall(steadyOnly()), failures(-15*sec, 10*sec)),
+		want: summary{Verdict: NotVerified, Results: []Result{ResultPass, ResultNotVerified, NotRun, NotRun}, Reasons: []string{"steady:steady-not-clean"}, Decided: SteadyNotClean},
+		texts: map[string]string{"steady:steady-not-clean": "10 checks failed (503 10), first at 10:00:00.00\n" +
+			"no check has passed since the probe started: every check failed for 25.0 s"},
+	}, {
+		name: "one check passed, before the install window: the line is left out",
+		tl: timeline(10*sec, withInstall(steadyOnly()), failures(-15*sec, 10*sec),
+			[]Observation{{Written: at(-14500 * msec), T: at(-15500 * msec), OK: true, N: 1, Ms: 30, Lag: 5}}),
+		want:      summary{Verdict: NotVerified, Results: []Result{ResultPass, ResultNotVerified, NotRun, NotRun}, Reasons: []string{"steady:steady-not-clean"}, Decided: SteadyNotClean},
+		texts:     map[string]string{"steady:steady-not-clean": "10 checks failed (503 10), first at 10:00:00.00"},
+		uncounted: 1,
+	}, {
+		name: "no check has passed in a run with no install window",
+		tl:   timeline(10*sec, steadyOnly(), failures(0, 10*sec)),
+		want: summary{Verdict: NotVerified, Results: []Result{ResultNotVerified, NotRun, NotRun}, Reasons: []string{"steady:steady-not-clean"}, Decided: SteadyNotClean},
+		texts: map[string]string{"steady:steady-not-clean": "10 checks failed (503 10), first at 10:00:00.00\n" +
+			"no check has passed since the probe started: every check failed for 10.0 s"},
 	}}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -288,5 +360,18 @@ func TestSilenceBelongsToEveryWindowItOverlaps(t *testing.T) {
 		if got != want {
 			t.Errorf("%s: probe-silent %v, want %v", tl.Windows[i].Name, got, want)
 		}
+	}
+}
+
+// LastFailure goes by when a failed check began, not by when its line was written or read.
+func TestLastFailure(t *testing.T) {
+	tl := timeline(10*sec, withInstall(steadyOnly()), passes(-15*sec, 10*sec), []Observation{
+		failure(-14900*msec, -14900*msec, "refused"), failure(-100*msec, 300*msec, "timeout"), failure(-7*sec, -7*sec, "refused")})
+	d := Decide(tl)
+	if got := d.Windows[0].LastFailure; !got.Equal(at(-100 * msec)) {
+		t.Errorf("the install window's LastFailure = %v, want %v", got, at(-100*msec))
+	}
+	if got := d.Windows[1].LastFailure; !got.IsZero() {
+		t.Errorf("the steady window's LastFailure = %v, want zero", got)
 	}
 }
