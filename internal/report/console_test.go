@@ -38,20 +38,53 @@ func failRun() Run {
 	return r
 }
 
-// notVerifiedRun is the record of section 10's run that could not test. The
-// probe's entry is filled, as the run fills it once the configuration is read;
-// the console leaves it out because no window began.
+// notVerifiedRun is the record of section 10's run that could not test, which
+// ended before the tool started the probe. Its golden file, the third example
+// of section 10, has no probe lines.
 func notVerifiedRun() Run {
 	r := passRun()
 	r.Verdict = "not-verified"
 	r.Windows = []Window{{Name: "steady", Result: "not-run"}, {Name: "deploy", Result: "not-run"}, {Name: "rollback", Result: "not-run"}}
 	r.Transitions = nil
+	r.Probes, r.Install = nil, nil
 	r.Images[0].RunBy = nil
 	r.Reasons = []Reason{{
 		Code: "nothing-watched", Verdict: "not-verified", Text: "nothing to watch",
 		Detail:  []string{"15 s after the install command returned, namespace orders held no Deployment, StatefulSet or DaemonSet that matches the selector app=order"},
 		Decided: true,
 	}}
+	return r
+}
+
+// beforeFirstRun is a run that ended before the probe's first observation: the probe did not
+// start in time.
+func beforeFirstRun() Run {
+	r := passRun()
+	r.Verdict = "not-verified"
+	r.Windows = []Window{{Name: "steady", Result: "not-run"}, {Name: "deploy", Result: "not-run"}, {Name: "rollback", Result: "not-run"}}
+	r.Transitions = nil
+	r.Images[0].RunBy = nil
+	r.Install = &Install{Ready: *at(-21_000)}
+	r.Reasons = []Reason{{Code: "probe-not-started", Verdict: "not-verified", Decided: true,
+		Text: "no observation within limits.timeout; the pod is Pending; container probe is waiting: ImagePullBackOff"}}
+	return r
+}
+
+// inInstallRun is a run that a signal ended in the install window.
+func inInstallRun() Run {
+	r := beforeFirstRun()
+	r.Install = &Install{Ready: *at(-21_000), FirstObservation: at(-15_000), Checks: 1200, Failed: 6,
+		FailedByClass: map[string]int{"refused": 5, "timeout": 1}, LastFailure: at(-14_900), SlowestMs: 44, LagMs: 9}
+	r.Reasons = []Reason{{Code: "interrupted", Verdict: "not-verified", Window: "install", Text: "a signal stopped the run", Decided: true}}
+	return r
+}
+
+// installDecidedRun is a run whose install window decided the verdict: the probe was silent in it.
+func installDecidedRun() Run {
+	r := beforeFirstRun()
+	r.Install = &Install{Ready: *at(-21_000), FirstObservation: at(-15_000), Settled: at(0), Checks: 1800, SlowestMs: 44, LagMs: 9}
+	r.Reasons = []Reason{{Code: "probe-silent", Verdict: "not-verified", Window: "install", Decided: true,
+		Text: "no observation for 6.0 s, from 09:59:42.00"}}
 	return r
 }
 
@@ -125,6 +158,9 @@ func TestConsoleExamples(t *testing.T) {
 	}{
 		{"testdata/console-stall.golden.txt", stallRun()},
 		{"testdata/console-changed.golden.txt", changedRun()},
+		{"testdata/console-before-first-observation.golden.txt", beforeFirstRun()},
+		{"testdata/console-in-install-window.golden.txt", inInstallRun()},
+		{"testdata/console-install-decided.golden.txt", installDecidedRun()},
 	} {
 		t.Run(c.path, func(t *testing.T) { golden(t, c.path, []byte(Console(c.run))) })
 	}
@@ -154,7 +190,32 @@ func TestConsoleLines(t *testing.T) {
 		{"a probe that did not stop", passRun, func(r *Run) { r.Probes[0].StoppedWhenAsked = false },
 			"status 200-299\n            the probe did not stop when asked; checks still in flight were not reported\n"},
 		{"variables taken out", passRun, func(r *Run) { r.RemovedVariables = []string{"HELM_DRIVER", "HELM_NAMESPACE"} },
-			"status 200-299\ntaken out of the commands' environment: HELM_DRIVER, HELM_NAMESPACE\n\nwindow"},
+			"slowest 44 ms, behind 9 ms\ntaken out of the commands' environment: HELM_DRIVER, HELM_NAMESPACE\n\nwindow"},
+		{"the settle time started again", passRun, func(r *Run) {
+			r.Install.SettleRestartedBy = []string{"no workload was watched 8.0 s after the install was ready"}
+		}, "            slowest 44 ms, behind 9 ms\n            the settle time started again: no workload was watched"},
+		{"an install window judged late: its line", failRun, func(r *Run) {
+			r.Verdict, r.Transitions = "not-verified", nil
+			r.Windows[0].Result, r.Windows[1] = "not-judged", Window{Name: "deploy", Result: "not-run"}
+			r.Reasons = []Reason{{Code: "probe-line-invalid", Verdict: "not-verified", Window: "install", Text: "the line is not one JSON object", Decided: true}}
+		}, "install     settled after 15.0 s under the probe; NOT VERIFIED\n"},
+		{"an install window judged late: the first table is there", failRun, func(r *Run) {
+			r.Verdict, r.Transitions = "not-verified", nil
+			r.Windows[0].Result, r.Windows[1] = "not-judged", Window{Name: "deploy", Result: "not-run"}
+			r.Reasons = []Reason{{Code: "probe-line-invalid", Verdict: "not-verified", Window: "install", Text: "the line is not one JSON object", Decided: true}}
+		}, "ms   not judged\ndeploy "},
+		{"a reason with no window decided, and the install window did not", installDecidedRun, func(r *Run) {
+			r.Reasons = []Reason{{Code: "workload-unsupported", Verdict: "not-verified", Text: "daemonset/agent updates with OnDelete", Decided: true}}
+		}, "install     settled after 15.0 s under the probe; failures not judged\n"},
+		{"no check in the install window", inInstallRun, func(r *Run) {
+			r.Install.Checks, r.Install.Failed, r.Install.FailedByClass, r.Install.LastFailure = 0, 0, nil, nil
+		}, "            0 checks, 0 failed\n            slowest -, behind -\n"},
+		{"one check in the install window", inInstallRun, func(r *Run) {
+			r.Install.Checks, r.Install.Failed, r.Install.FailedByClass, r.Install.LastFailure = 1, 0, nil, nil
+		}, "            1 check, 0 failed\n            slowest 44 ms, behind 9 ms\n"},
+		{"every check failed in the install window", passRun, func(r *Run) {
+			r.Install.Failed, r.Install.FailedByClass, r.Install.LastFailure = 3000, map[string]int{"503": 3000}, at(-100)
+		}, "            3,000 checks, 3,000 failed (503 3,000), the last 0.1 s before the steady window\n            slowest -, behind 9 ms\n"},
 		{"a warning after a pass", passRun, func(r *Run) { r.Warnings = []string{warning} },
 			"  a node drain\n\nwarning: " + warning + "\nresults: /tmp/rollproof-results-7f3a\n"},
 		{"a warning after a fail", failRun, func(r *Run) { r.Warnings = []string{warning} },
@@ -379,7 +440,7 @@ func TestConsoleWrapsDetail(t *testing.T) {
 // not exercised, first under "not exercised"; a pass with a rollback says
 // nothing new.
 func TestConsoleDeployWithoutRollback(t *testing.T) {
-	const line = "the candidate's shutdown, because the run has no rollback"
+	const line = "the candidate's shutdown and the installed release's start-up, because the run has no rollback"
 	r := passRun()
 	r.Windows = r.Windows[:2]
 	r.Transitions = r.Transitions[:1]
@@ -410,7 +471,7 @@ func TestConsoleDeployWithoutRollbackThatRan(t *testing.T) {
 	r.Windows[2] = Window{Name: "rollback", Result: "not-run"}
 	r.Transitions = r.Transitions[:1]
 	got := Console(r)
-	want := "not exercised\n  the candidate's shutdown, because the run has no rollback\n  " + notExercised[0] + "\n"
+	want := "not exercised\n  the candidate's shutdown and the installed release's start-up, because the run has no rollback\n  " + notExercised[0] + "\n"
 	if !strings.Contains(got, want) {
 		t.Errorf("Console has no\n%s\nin\n%s", want, got)
 	}
@@ -474,6 +535,8 @@ func TestConsoleCleansEveryField(t *testing.T) {
 	r.Releases[1].Source = "./ch" + bad + "art"
 	r.Probes[0].Target = "GET http://o" + bad + "rders"
 	r.Probes[0].Notes = []string{"no" + bad + "te"}
+	r.Install.FailedByClass = map[string]int{"re" + bad + "fused": 6}
+	r.Install.SettleRestartedBy = []string{"res" + bad + "tart"}
 	r.Transitions[0].Workloads[0].Workload = "deployment/or" + bad + "ders"
 	r.Warnings = []string{"war" + bad + "ning"}
 	r.Verdict = "fail"
