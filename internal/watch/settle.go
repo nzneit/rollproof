@@ -10,9 +10,10 @@ import (
 )
 
 // Settling is the install from ready until it settled under the probe. First is the probe's first
-// observation, as given. Settled is zero when the install did not settle. Ended is when the wait
-// ended, never before First. Restarts say what started the settle time again. Before holds what
-// happened before First, InWindow what happened from it on, each with its moment in At.
+// observation, as given. Settled is zero when the install did not settle; watch sets it equal to
+// Ended when it did, because run ends the install window at Ended. Ended is when the wait ended,
+// never before First. Restarts say what started the settle time again. Before holds what happened
+// before First, InWindow what happened from it on, each with its moment in At.
 type Settling struct {
 	First, Settled, Ended time.Time
 	Restarts              []string

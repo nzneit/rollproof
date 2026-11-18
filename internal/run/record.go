@@ -17,8 +17,9 @@ import (
 
 // facts is everything the run has learned, in the units' own types, at the
 // moment it writes a record. probeStopped says that the probe was asked to
-// stop and that probe holds what its Stop returned; probeBegun says that the
-// tool started the probe. settling is the install as watch reported it.
+// stop; probe holds what its Stop returned unless that Stop panicked after it
+// was asked. probeBegun says that the tool started the probe. settling is the
+// install as watch reported it.
 type facts struct {
 	cfg          *config.Config
 	decision     verdict.Decision

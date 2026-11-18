@@ -39,9 +39,9 @@ type Clock interface {
 // Watcher is what the run needs of the watch unit.
 type Watcher interface {
 	InstallReady(ctx context.Context, began time.Time, exited <-chan struct{}) (watch.Install, error)
-	// InstallSettled is one more operation of the interface that run holds the watch unit by.
-	// Run calls it once, when the probe's first observation has arrived, and it returns when the
-	// install window has ended.
+	// InstallSettled returns when the install window has ended, or, sooner, when ctx does; the
+	// Settling says how it ended. Run calls it once, when the probe's first observation has
+	// arrived.
 	InstallSettled(ctx context.Context, first time.Time) watch.Settling
 	Transition(ctx context.Context, name verdict.WindowName, began time.Time, exited <-chan struct{}) watch.Transition
 	// UseService names the Service whose endpoints Transition reads.
@@ -87,11 +87,12 @@ const (
 // Run runs one test from the results folder to the exit code: 0 for a pass, 1
 // for a fail, 2 for not verified. When ctx ends, the run is interrupted: it
 // writes its final result first and leaves the cluster, with the probe's pod in
-// it. The windows of a run are the install window, the steady window and one
-// for each transition. The run begins a window only when verdict says that it
-// goes on. Once the probe was created, the run stops it before the final
-// verdict, whether the run's last window ended, the run ended before the
-// probe's first observation or the tool failed, unless a signal ended the run.
+// it unless a stop of the probe had already begun. The windows of a run are the
+// install window, the steady window and one for each transition. The run begins
+// a window only when verdict says that it goes on. Once the probe was created,
+// the run stops it before the final verdict, whether the run's last window
+// ended, the run ended before the probe's first observation or the tool failed,
+// unless a signal ended the run.
 func Run(ctx context.Context, o Options, u Units) int {
 	s := &runState{o: o, u: u, warnings: &warnings{}}
 	s.parent = ctx
@@ -472,10 +473,11 @@ func (s *runState) stopProbe(ctx context.Context) {
 // probe was created and not yet asked to stop and no signal ended the run: section 6 stops the
 // probe at every end of a run but a signal. The stop's context is the caller's, so the run's own
 // cancel does not cut it short and a signal does; Stop bounds its own wait by the drain and
-// stopMargin. Its last lines are read, a signal that came meanwhile is placed as stopProbe places
-// one, and the verdict is decided again with the internal-error that the failure placed. A panic
-// in the stop, or one of the reader, is the tool's failure too: it is placed as one more
-// internal-error beside the first.
+// stopMargin. Its last lines are read while the stop runs, or dropped when the event reader is
+// gone, as haltProbe says. A signal that came meanwhile is placed as stopProbe places one, and
+// the verdict is decided again with the internal-error that the failure placed. A panic in the
+// stop, or one of the reader, is the tool's failure too: it is placed as one more internal-error
+// beside the first.
 func (s *runState) stopAfterFailure() {
 	if s.probe == nil || s.stopped || s.parent.Err() != nil {
 		return

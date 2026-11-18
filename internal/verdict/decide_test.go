@@ -51,7 +51,7 @@ func timed(c Code, d time.Duration) Condition {
 }
 
 // worked gives tl the observations of a probe that worked: one passing
-// summary line a second from the steady window's Start to the end of the
+// summary line a second from the first window's Start to the end of the
 // last window that began (Now while that window is open), and a Silence of
 // 5 s, so that counting observations adds no condition to a row.
 func worked(tl Timeline) Timeline {

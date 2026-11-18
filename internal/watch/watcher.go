@@ -170,8 +170,9 @@ func (w *Watcher) InstallReady(ctx context.Context, began time.Time, exited <-ch
 }
 
 // InstallSettled returns when the settling has ended, as InstallSettling says. When ctx ends
-// first, it returns what it has: Settled zero, Ended that moment, and no condition. Call it once,
-// after InstallReady has returned with no error.
+// first, it returns what it has: the settling as it ended, when it had ended by the Tracker's
+// times, or else Settled zero, Ended that moment, and no condition. Call it once, after
+// InstallReady has returned with no error.
 func (w *Watcher) InstallSettled(ctx context.Context, first time.Time) Settling {
 	tick := time.NewTicker(pollEvery)
 	defer tick.Stop()

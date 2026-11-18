@@ -6,8 +6,8 @@ import (
 )
 
 // Window is one window of a run. Start is zero for a window that never began, and End is zero
-// while it is open. Finished is when its transition last came to be finished: zero for the steady
-// window and for a stall. Conditions are what the caller placed in this window.
+// while it is open. Finished is when its transition last came to be finished: zero for the install
+// and steady windows and for a stall. Conditions are what the caller placed in this window.
 type Window struct {
 	Name       WindowName
 	Start      time.Time
@@ -40,8 +40,9 @@ type Reason struct {
 
 // WindowResult is how one window ended, with its counts. AfterFinish counts failures that began at
 // or after the window's Finished. Crossed counts failures that began before the window's Start and
-// were written in or after it. FirstFailure is zero when nothing failed. LastFailure is the latest
-// time at which a check that failed in this window began, zero when nothing failed.
+// were written in or after it; only a transition's window counts them, because the transition may
+// be what cut them (plan ruling 10). FirstFailure is zero when nothing failed. LastFailure is the
+// latest time at which a check that failed in this window began, zero when nothing failed.
 type WindowResult struct {
 	Name         WindowName
 	Start, End   time.Time
