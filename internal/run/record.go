@@ -118,12 +118,7 @@ func installRecord(f facts) *report.Install {
 		}
 		in.FirstObservation, in.Checks, in.Failed = timePtr(w.Start), w.Checks, w.Failed
 		in.LastFailure, in.SlowestMs, in.LagMs = timePtr(w.LastFailure), w.SlowestMs, w.LagMs
-		if w.ByClass != nil {
-			in.FailedByClass = make(map[string]int, len(w.ByClass))
-			for k, v := range w.ByClass {
-				in.FailedByClass[k] = v
-			}
-		}
+		in.FailedByClass = classCopy(w.ByClass)
 		break
 	}
 	return &in
@@ -184,12 +179,20 @@ func podText(w verdict.WindowName, p watch.PodNote, what string) string {
 func windowRecord(w verdict.WindowResult) report.Window {
 	out := report.Window{Name: string(w.Name), Start: timePtr(w.Start), End: timePtr(w.End),
 		Result: string(w.Result), Checks: w.Checks, Failed: w.Failed, FailedAfterFinish: w.AfterFinish,
-		CrossedStart: w.Crossed, FirstFailure: timePtr(w.FirstFailure), SlowestMs: w.SlowestMs, LagMs: w.LagMs}
-	if w.ByClass != nil {
-		out.FailedByClass = make(map[string]int, len(w.ByClass))
-		for k, v := range w.ByClass {
-			out.FailedByClass[k] = v
-		}
+		CrossedStart: w.Crossed, FirstFailure: timePtr(w.FirstFailure), SlowestMs: w.SlowestMs, LagMs: w.LagMs,
+		FailedByClass: classCopy(w.ByClass)}
+	return out
+}
+
+// classCopy returns a copy of a window's classes, so that the record does not share the decision's
+// map. A nil map stays nil.
+func classCopy(byClass map[string]int) map[string]int {
+	if byClass == nil {
+		return nil
+	}
+	out := make(map[string]int, len(byClass))
+	for k, v := range byClass {
+		out[k] = v
 	}
 	return out
 }

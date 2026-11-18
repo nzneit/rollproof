@@ -78,7 +78,8 @@ func serve(ctx context.Context, env func(string) string, ready chan<- string) er
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /work", func(w http.ResponseWriter, r *http.Request) {
 		if failWork {
-			http.Error(w, "failing", http.StatusInternalServerError)
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, "failing")
 			return
 		}
 		ms, _ := strconv.Atoi(r.URL.Query().Get("ms"))

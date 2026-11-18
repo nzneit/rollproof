@@ -84,6 +84,10 @@ const (
 	afterText  = "interrupted after the verdict was decided"
 )
 
+// windowsBeforeTransitions is how many windows come before the first transition's: the install
+// window and the steady window.
+const windowsBeforeTransitions = 2
+
 // Run runs one test from the results folder to the exit code: 0 for a pass, 1
 // for a fail, 2 for not verified. When ctx ends, the run is interrupted: it
 // writes its final result first and leaves the cluster, with the probe's pod in
@@ -353,7 +357,7 @@ func (s *runState) startProbe(ctx context.Context) bool {
 func (s *runState) windows(ctx context.Context) bool {
 	s.names = s.deployer.Transitions()
 	first := s.probeStart.First
-	s.tl.Windows = make([]verdict.Window, 2, len(s.names)+2)
+	s.tl.Windows = make([]verdict.Window, windowsBeforeTransitions, len(s.names)+windowsBeforeTransitions)
 	s.tl.Windows[0] = verdict.Window{Name: verdict.Install, Start: first}
 	s.tl.Windows[1] = verdict.Window{Name: verdict.Steady}
 	for _, name := range s.names {
@@ -405,7 +409,7 @@ func (s *runState) transitionsStep(ctx context.Context) bool {
 	for i, name := range s.names {
 		// Transition i's window follows the install window, the steady window and the
 		// transitions before it.
-		w := i + 2
+		w := i + windowsBeforeTransitions
 		began := s.tl.Windows[w-1].End // no gap between windows (section 4)
 		if name != verdict.Deploy && name != verdict.Rollback {
 			// This build has no way to start any other transition: the config

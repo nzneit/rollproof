@@ -326,14 +326,13 @@ func TestRunHTTPResolvesOnce(t *testing.T) {
 	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 
 	var calls atomic.Int64
-	defer func(saved func(context.Context, string) ([]string, error)) { lookupHost = saved }(lookupHost)
-	lookupHost = func(_ context.Context, host string) ([]string, error) {
+	replaceLookup(t, func(_ context.Context, host string) ([]string, error) {
 		calls.Add(1)
 		if host != "probe-target.test" {
 			return nil, errors.New("unexpected host " + host)
 		}
 		return []string{"127.0.0.1"}, nil
-	}
+	})
 	obs := runFor(t, testOptions("https://probe-target.test:"+port+"/"), time.Second).observations(t)
 	// Each request looks the host up until one lookup has succeeded. The stub answers at once and requests are 20 ms apart, so a second lookup comes only from a request that began before the first had its answer.
 	if n := calls.Load(); n < 1 || n > 2 {
@@ -352,6 +351,59 @@ func TestRunHTTPResolvesOnce(t *testing.T) {
 	for _, n := range serverNames {
 		if n != "probe-target.test" {
 			t.Errorf("TLS server name %q, want probe-target.test", n)
+		}
+	}
+}
+
+// serveOn starts an HTTP server on addr that counts its requests, and returns its address.
+func serveOn(t *testing.T, addr string, hits *atomic.Int64) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) })}
+	t.Cleanup(func() { srv.Close() })
+	go srv.Serve(ln)
+	return ln.Addr().String()
+}
+
+// The first address a lookup gave is kept: a second lookup, from a request that began before the
+// first answered, does not replace it (section 6, "Names").
+func TestRunHTTPKeepsTheFirstAddress(t *testing.T) {
+	var firstHits, secondHits atomic.Int64
+	firstAddr := serveOn(t, "127.0.0.1:0", &firstHits)
+	_, port, err := net.SplitHostPort(firstAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The second server is on the same port at a second loopback address, so a dial to it can be
+	// told from a dial to the first.
+	secondAddr := serveOn(t, "127.0.0.2:"+port, &secondHits)
+	var calls atomic.Int64
+	replaceLookup(t, func(context.Context, string) ([]string, error) {
+		switch n := calls.Add(1); {
+		case n == 1:
+			time.Sleep(300 * time.Millisecond) // let other requests begin their own lookups
+			return []string{"127.0.0.1"}, nil
+		default:
+			time.Sleep(500 * time.Millisecond) // answer after the first lookup has been kept
+			return []string{"127.0.0.2"}, nil
+		}
+	})
+	obs := runFor(t, testOptions("http://probe-target.test:"+port+"/"), 800*time.Millisecond).observations(t)
+	if n := calls.Load(); n < 2 {
+		t.Fatalf("the host was looked up %d times, want at least 2: the test did not reach the second address", n)
+	}
+	if firstHits.Load() == 0 {
+		t.Errorf("no request reached the first address, %s", firstAddr)
+	}
+	if n := secondHits.Load(); n != 0 {
+		t.Errorf("%d requests reached the second address, %s: the first address was not kept", n, secondAddr)
+	}
+	for _, o := range obs {
+		if !o.OK {
+			t.Errorf("got %+v, want a pass: every request dials the kept address", o)
 		}
 	}
 }
@@ -606,7 +658,24 @@ func TestRunHTTPHostNeverResolves(t *testing.T) {
 	})
 	obs := runFor(t, testOptions("http://nowhere.test/"), time.Second).observations(t)
 	if len(obs) < 40 {
-		t.Errorf("%d lines in 1 s at rate 50, want 45 to 55", len(obs))
+		t.Errorf("%d lines in 1 s at rate 50, want at least 40", len(obs))
+	}
+	for _, o := range obs {
+		if o.OK || o.Class != "other" {
+			t.Fatalf("got %+v, want a failure of class other", o)
+		}
+	}
+}
+
+// A lookup that fails with a timeout before the request's own timeout is class other: only a
+// lookup that the request's timeout cuts is class timeout (section 6, "Names").
+func TestRunHTTPLookupTimeoutIsOther(t *testing.T) {
+	replaceLookup(t, func(context.Context, string) ([]string, error) {
+		return nil, &net.DNSError{Err: "i/o timeout", Name: "slow-dns.test", IsTimeout: true}
+	})
+	obs := runFor(t, testOptions("http://slow-dns.test/"), 300*time.Millisecond).observations(t)
+	if len(obs) == 0 {
+		t.Fatal("no line")
 	}
 	for _, o := range obs {
 		if o.OK || o.Class != "other" {
@@ -629,7 +698,7 @@ func TestRunHTTPLookupsThatHang(t *testing.T) {
 	began := time.Now()
 	out := runFor(t, o, time.Second)
 	if n := started.Load(); n < 40 {
-		t.Errorf("%d lookups started in 1 s at rate 50, want 45 to 55: a lookup must not hold the schedule", n)
+		t.Errorf("%d lookups started in 1 s at rate 50, want at least 40: a lookup must not hold the schedule", n)
 	}
 	obs := out.observations(t)
 	if len(obs) == 0 {

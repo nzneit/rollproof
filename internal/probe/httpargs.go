@@ -57,7 +57,8 @@ func (h *headerFlag) Set(s string) error {
 	return nil
 }
 
-// ParseHTTPArgs is the reverse of HTTPArgs: for every o, ParseHTTPArgs(HTTPArgs(o)) gives o back.
+// ParseHTTPArgs is the reverse of HTTPArgs: for every o, ParseHTTPArgs(HTTPArgs(o)) gives o back,
+// except that an empty Headers map comes back nil, because no --header is written for one.
 func ParseHTTPArgs(args []string) (HTTPOptions, error) {
 	if len(args) < 2 || args[0] != "probe" || args[1] != "http" {
 		return HTTPOptions{}, errors.New("the arguments are not those of the probe http command")

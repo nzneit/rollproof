@@ -195,6 +195,11 @@ func TestConsoleLines(t *testing.T) {
 		{"the settle time started again", passRun, func(r *Run) {
 			r.Install.SettleRestartedBy = []string{"no workload was watched 8.0 s after the install was ready"}
 		}, "            slowest 44 ms, behind 9 ms\n            the settle time started again: no workload was watched"},
+		{"a settle restart that wraps", passRun, func(r *Run) {
+			r.Install.SettleRestartedBy = []string{"no workload was watched 8.0 s after the install was ready"}
+		}, "            slowest 44 ms, behind 9 ms\n" +
+			"            the settle time started again: no workload was watched 8.0 s after the install\n" +
+			"            was ready\n"},
 		{"an install window judged late: its line", failRun, func(r *Run) {
 			r.Verdict, r.Transitions = "not-verified", nil
 			r.Windows[0].Result, r.Windows[1] = "not-judged", Window{Name: "deploy", Result: "not-run"}
@@ -555,6 +560,13 @@ func TestCleanClassesAddsCountsThatCleanToOneName(t *testing.T) {
 	want := map[string]int{"time out": 9, "refused": 1}
 	if !maps.Equal(got, want) {
 		t.Errorf("cleanClasses = %v, want %v", got, want)
+	}
+}
+
+// Classes with equal counts are written in name order.
+func TestClassCountsTieBreakByName(t *testing.T) {
+	if got, want := classCounts(map[string]int{"timeout": 2, "refused": 2, "503": 1}), "refused 2, timeout 2, 503 1"; got != want {
+		t.Errorf("classCounts = %q, want %q", got, want)
 	}
 }
 

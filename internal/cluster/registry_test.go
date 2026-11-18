@@ -41,6 +41,11 @@ func TestStartRegistryCountsItsOwnLimit(t *testing.T) {
 	if !strings.Contains(err.Error(), "the registry did not answer") {
 		t.Errorf("error %q, want it to say that the registry did not answer", err)
 	}
+	// The closed port answers every request with a refused connection, so the error takes the
+	// branch that names the last answer.
+	if !strings.Contains(err.Error(), "with 200 in time; the last answer") {
+		t.Errorf("error %q, want the last answer's branch", err)
+	}
 	if took < limit || took >= limit+registryPoll+time.Second {
 		t.Errorf("startRegistry took %v, want at least %v and less than %v", took, limit, limit+registryPoll+time.Second)
 	}

@@ -709,6 +709,9 @@ func TestWindowMarks(t *testing.T) {
 	if err := json.Unmarshal(b, &marks); err != nil {
 		t.Fatal(err)
 	}
+	if len(marks) != 4 {
+		t.Fatalf("%d window marks, want 4", len(marks))
+	}
 	var names []string
 	for _, m := range marks {
 		names = append(names, m.Name)
@@ -1348,6 +1351,9 @@ func TestASignalLeavesTheProbeUnasked(t *testing.T) {
 	if n := w.calls.count("probe-stop"); n != 0 {
 		t.Errorf("the probe's Stop was called %d times, want 0", n)
 	}
+	if n := w.calls.count("delete"); n != 0 {
+		t.Errorf("Delete called %d times, want 0: the cluster stays after a signal", n)
+	}
 	w.probeStopNotJudged(noteNotAsked)
 }
 
@@ -1777,6 +1783,30 @@ func TestFaultsBeforeAFailedStartAreReasons(t *testing.T) {
 	}
 }
 
+// A start that failed leaves the probe to be stopped; when that stop also fails, the run keeps it
+// as a warning, as it does for any stop error (section 6).
+func TestAFailedStartWhoseStopFailedWarns(t *testing.T) {
+	w := newWorld(t)
+	w.probe.startErr = verdict.Condition{Code: verdict.ProbeNotStarted, Text: "no observation within limits.timeout"}
+	w.probe.stopErr = errors.New("the pod delete was refused")
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if len(r.Warnings) != 1 {
+		t.Fatalf("warnings %q, want the stop's one", r.Warnings)
+	}
+	for _, part := range []string{"the probe could not be stopped", "the pod delete was refused", "its pod may still be there"} {
+		if !strings.Contains(r.Warnings[0], part) {
+			t.Errorf("the warning %q does not hold %q", r.Warnings[0], part)
+		}
+	}
+	if n := w.calls.count("probe-stop"); n != 1 {
+		t.Errorf("the probe's Stop was called %d times after a failed start, want 1", n)
+	}
+	w.probeStopNotJudged(noteStopFailed)
+}
+
 // lateClock is the fake clock except that it runs before once, ahead of the run's first wait,
 // which is the steady window's.
 type lateClock struct {
@@ -1938,8 +1968,8 @@ func TestASettlingWithNoResultIsTheToolsFailure(t *testing.T) {
 	if code := w.run(context.Background()); code != 2 {
 		t.Fatalf("exit %d, want 2", code)
 	}
-	if window, _ := w.result().windowOf("internal-error"); window != "install" {
-		t.Errorf("internal-error in window %q, want install", window)
+	if window, text := w.result().windowOf("internal-error"); window != "install" || text != "the install neither settled nor failed" {
+		t.Errorf("internal-error in window %q with text %q", window, text)
 	}
 	w.probeWasStopped()
 }

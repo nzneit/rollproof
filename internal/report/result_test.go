@@ -328,7 +328,7 @@ func TestProbeStoppedWhenAskedNull(t *testing.T) {
 func TestNoNulls(t *testing.T) {
 	// stopped_when_asked is null when the tool did not ask the probe to stop, stopped waiting for
 	// it, or failed while it stopped it (section 10).
-	timesAndCluster := []string{"cluster", "end", "first_failure", "first_observation", "install", "last_failure", "quickest_stop_ms", "settled", "start", "stopped_when_asked"}
+	keysThatMayBeNull := []string{"cluster", "end", "first_failure", "first_observation", "install", "last_failure", "quickest_stop_ms", "settled", "start", "stopped_when_asked"}
 	for _, r := range []Run{
 		{},
 		{
@@ -352,7 +352,7 @@ func TestNoNulls(t *testing.T) {
 		var found []string
 		nulls(v, "", &found)
 		for _, k := range found {
-			if !slices.Contains(timesAndCluster, k) {
+			if !slices.Contains(keysThatMayBeNull, k) {
 				t.Errorf("%s is null in\n%s", k, b)
 			}
 		}

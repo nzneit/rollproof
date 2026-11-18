@@ -268,6 +268,16 @@ func TestObserve(t *testing.T) {
 			Steady:  clean,
 		},
 	}, {
+		name: "the first observation's own t is before its line, and it is counted in the install window",
+		tl: timeline(10*sec, withInstall(steadyOnly()),
+			[]Observation{{Written: at(-15 * sec), T: at(-15500 * msec), OK: true, N: 50, Ms: 30, Lag: 5}},
+			passes(-14*sec, 10*sec)),
+		want: summary{Verdict: Pass, Results: []Result{ResultPass, ResultPass, NotRun, NotRun}, GoOn: true},
+		tallies: map[WindowName]tally{
+			Install: {Checks: 2850, SlowestMs: 30, LagMs: 5},
+			Steady:  clean,
+		},
+	}, {
 		name: "a failed check that began before the install window and was written in it is counted there",
 		tl: timeline(10*sec, withInstall(steadyOnly()), passes(-15*sec, 10*sec),
 			[]Observation{failure(-15500*msec, -13500*msec, "timeout")}),
@@ -279,7 +289,7 @@ func TestObserve(t *testing.T) {
 	}, {
 		name: "with no install window, an observation before the steady window is not counted",
 		tl: timeline(10*sec, steadyOnly(), passes(0, 10*sec),
-			[]Observation{{Written: at(500 * msec), T: at(-500 * msec), OK: true, N: 50, Ms: 30, Lag: 5}}),
+			[]Observation{failure(-500*msec, 500*msec, "refused")}),
 		want:      summary{Verdict: Pass, Results: []Result{ResultPass, NotRun, NotRun}, GoOn: true},
 		tallies:   map[WindowName]tally{Steady: clean},
 		uncounted: 1,
@@ -320,7 +330,11 @@ func TestObserve(t *testing.T) {
 		name: "one check passed, before the install window: it is counted there, and the steady window's reason has no second line",
 		tl: timeline(10*sec, withInstall(steadyOnly()), failures(-15*sec, 10*sec),
 			[]Observation{{Written: at(-14500 * msec), T: at(-15500 * msec), OK: true, N: 1, Ms: 30, Lag: 5}}),
-		want:  summary{Verdict: NotVerified, Results: []Result{ResultPass, ResultNotVerified, NotRun, NotRun}, Reasons: []string{"steady:steady-not-clean"}, Decided: SteadyNotClean},
+		want: summary{Verdict: NotVerified, Results: []Result{ResultPass, ResultNotVerified, NotRun, NotRun}, Reasons: []string{"steady:steady-not-clean"}, Decided: SteadyNotClean},
+		tallies: map[WindowName]tally{
+			Install: {Checks: 16, Failed: 15, ByClass: map[string]int{"503": 15}, FirstFailure: at(-15 * sec), SlowestMs: 30, LagMs: 5},
+			Steady:  {Checks: 10, Failed: 10, ByClass: map[string]int{"503": 10}, FirstFailure: at(0), SlowestMs: 0, LagMs: 2},
+		},
 		texts: map[string]string{"steady:steady-not-clean": "10 checks failed (503 10), first at 10:00:00.00"},
 	}, {
 		name: "no check has passed in a run with no install window",
@@ -383,6 +397,9 @@ func TestSilenceBelongsToEveryWindowItOverlaps(t *testing.T) {
 // LastFailure goes by when a failed check began, not by when its line was written or read.
 func TestLastFailure(t *testing.T) {
 	tl := timeline(10*sec, withInstall(steadyOnly()), passes(-15*sec, 10*sec), []Observation{
+		// This one began before the install window and was written in the steady one: it is the
+		// install window's, and older than the failure below that decides LastFailure.
+		failure(-16*sec, 5*sec, "timeout"),
 		failure(-14900*msec, -14900*msec, "refused"), failure(-100*msec, 300*msec, "timeout"), failure(-7*sec, -7*sec, "refused")})
 	d := Decide(tl)
 	if got := d.Windows[0].LastFailure; !got.Equal(at(-100 * msec)) {
