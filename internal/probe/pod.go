@@ -505,8 +505,21 @@ func (p *Pod) Stop(ctx context.Context) (Facts, error) {
 //
 // It serves Stop, a Start that failed other than by its context, and a Stop after a Start that
 // panicked; ending the watcher again after Stop ended it is harmless. The probe stopped when
-// asked when its log ended before the ask, or within the drain after it.
+// asked when its log ended before the ask, or within the drain after it, also when the pod's
+// status still read the container as running when the wait ran out. A panic inside halt ends
+// the follower and the watcher and closes Events before it goes on.
 func (p *Pod) halt(ctx context.Context, r *probeRun) (Facts, error) {
+	defer func() {
+		// A panic leaves nothing of the run behind: the follower and the watcher end, and
+		// Events closes, before the panic goes on.
+		if v := recover(); v != nil {
+			r.cancel()
+			<-r.followerDone
+			<-r.watcherDone
+			p.closeEvents()
+			panic(v)
+		}
+	}()
 	endedBefore := false
 	select {
 	case <-r.followerDone:
@@ -528,12 +541,12 @@ func (p *Pod) halt(ctx context.Context, r *probeRun) (Facts, error) {
 	}
 
 	var ctxErr error
-	stopped := false
+	var ranOut time.Time // o.Now() when the wait ran out; zero when it did not
 	wait := time.NewTimer(p.o.Drain + stopMargin)
 	select {
 	case <-r.followerDone:
-		stopped = endedBefore || r.endedAt.Sub(asked) < p.o.Drain
 	case <-wait.C:
+		ranOut = p.o.Now()
 	case <-ctx.Done():
 		ctxErr = ctx.Err()
 	}
@@ -541,6 +554,13 @@ func (p *Pod) halt(ctx context.Context, r *probeRun) (Facts, error) {
 	r.cancel()
 	<-r.followerDone
 	p.closeEvents()
+
+	// When the wait ran out, the follower's last stream may have ended inside the drain while the
+	// pod's status lagged: the rule then reads when it ended. A stream that the cut itself ended
+	// did not end before the wait ran out, whatever the clock says. A stop that its context ended
+	// is not judged.
+	stopped := ctxErr == nil && (endedBefore || r.endedAt.Sub(asked) < p.o.Drain) &&
+		(ranOut.IsZero() || r.endedAt.Before(ranOut))
 
 	lines, jsonText := r.follower.counts()
 	r.mu.Lock()

@@ -89,8 +89,11 @@ func (f *follower) counts() (lines, jsonText int) {
 // the whole line. After stopAsked, such a stream is not opened again: run waits until the
 // container has ended (waitEnded), and the stream's end is then the end of the log, because a
 // stream ends only after the container has ended and the pod's status says so a moment later
-// (section 6). When the log has ended for good, the piece is a line before stopAsked and is only
-// kept in raw after it.
+// (section 6). A stream that ended in the moment before stopAsked, and that run reads only after
+// it, is taken the same way; that window is accepted, because a stream ends with io.EOF only
+// after the container has ended (docs/proofs/p11-log-rotation.md), and the container ends before
+// the stop only when the probe exited on its own, which the watcher reports as a fault. When the
+// log has ended for good, the piece is a line before stopAsked and is only kept in raw after it.
 //
 // Where run cannot tell that it read the log to its end, it emits the gap (section 6): when a
 // stream ended while the container ran before stopAsked, with io.EOF or with an error, and no

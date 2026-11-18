@@ -169,24 +169,41 @@ func allEvents(events <-chan Event) []Event {
 	return all
 }
 
-// beforeTheGap is events without the faults of the gap at their end. Where a test's fake log
-// stays open after Stop deleted the pod, the log was not read to its end, and the gap ends
-// Events (section 6); a test about something else reads what came before it.
-func beforeTheGap(events []Event) []Event {
-	for len(events) > 0 {
-		if f := events[len(events)-1].Fault; f == nil || f.Text != gapText {
-			break
-		}
-		events = events[:len(events)-1]
-	}
-	return events
-}
-
 // condition is the Condition that err is, or a zero one.
 func condition(err error) verdict.Condition {
 	var c verdict.Condition
 	errors.As(err, &c)
 	return c
+}
+
+// endsWhenDeleted gives the probe of s one log stream: text, and then nothing until the probe's
+// pod is deleted, by Stop or by anyone else, when the stream ends with io.EOF, as a real pod's
+// log ends when its container does (section 14, point 26). Call it before Start.
+func (s probeSetup) endsWhenDeleted(t *testing.T, text string) {
+	t.Helper()
+	deleted, testEnded := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	pods := corev1.SchemeGroupVersion.WithResource("pods")
+	s.client.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if _, err := s.client.Tracker().Get(pods, cluster.ProbeNamespace, "probe"); err == nil {
+			once.Do(func() { close(deleted) })
+		}
+		return false, nil, nil
+	})
+	pr, pw := io.Pipe()
+	t.Cleanup(func() {
+		close(testEnded)
+		pw.Close()
+	})
+	go func() {
+		io.WriteString(pw, text)
+		select {
+		case <-deleted:
+		case <-testEnded:
+		}
+		pw.Close()
+	}()
+	s.pod.open = (&fakeLog{streams: []io.Reader{pr}}).open
 }
 
 // openStream is a stream that gives the line and then stays open until the
@@ -223,8 +240,8 @@ func TestStartReplacesALeftoverPod(t *testing.T) {
 
 func TestStartReturnsAtTheFirstObservation(t *testing.T) {
 	early := logAt(-1000).Format(time.RFC3339Nano)
-	l := newFakeLog(logLine(logAt(100), "starting") + logLine(logAt(400), `{"ok":true,"t":"`+early+`"}`))
-	s := newProbe(t, l, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s.endsWhenDeleted(t, logLine(logAt(100), "starting")+logLine(logAt(400), `{"ok":true,"t":"`+early+`"}`))
 	s.clock.Set(logAt(700))
 	st, err := s.pod.Start(context.Background())
 	if err != nil {
@@ -237,7 +254,7 @@ func TestStartReturnsAtTheFirstObservation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := beforeTheGap(allEvents(s.pod.Events()))
+	events := allEvents(s.pod.Events())
 	if len(events) != 1 || events[0].Obs == nil || !events[0].Obs.T.Equal(logAt(-1000)) {
 		t.Errorf("events = %+v, want the one observation", events)
 	}
@@ -431,7 +448,9 @@ func TestStopKillsAProbeThatDoesNotStop(t *testing.T) {
 	if took := time.Since(began); took > time.Second {
 		t.Errorf("Stop took %v, want the drain and the margin", took)
 	}
-	allEvents(s.pod.Events()) // returns only when Events is closed
+	// The stream stayed open past the drain, so the log was not read to its end: the gap, which
+	// the follower sends after the stop's cancel, reaches Events while it has room (section 6).
+	checkGap(t, allEvents(s.pod.Events()), 1, []time.Time{logAt(400), logAt(0)}, 0)
 }
 
 func TestStopEndsWithItsContext(t *testing.T) {
@@ -508,7 +527,8 @@ func TestStopReportsAnExitOnce(t *testing.T) {
 		{"the watcher saw it", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			s := newProbe(t, newFakeLog(logLine(logAt(400), `{"ok":true}`)), runningStatus(), 100*time.Millisecond, 5*time.Second)
+			s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+			s.endsWhenDeleted(t, logLine(logAt(400), `{"ok":true}`))
 			if !c.watcherSaw {
 				pollEvery = time.Hour // the watcher reads the pod once, at its start
 			}
@@ -534,7 +554,7 @@ func TestStopReportsAnExitOnce(t *testing.T) {
 			if _, err := s.pod.Stop(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			events = beforeTheGap(append(events, allEvents(s.pod.Events())...))
+			events = append(events, allEvents(s.pod.Events())...)
 			if n := exits(events); n != 1 {
 				t.Fatalf("%d probe-exited faults, want 1: %+v", n, events)
 			}
@@ -667,7 +687,8 @@ func TestAnAPIErrorIsNoExit(t *testing.T) {
 // A pod deleted by someone else is an exit, once; Stop then finds no pod to
 // delete, and that is no error.
 func TestStopWhenThePodIsGone(t *testing.T) {
-	s := newProbe(t, newFakeLog(logLine(logAt(400), `{"ok":true}`)), runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s.endsWhenDeleted(t, logLine(logAt(400), `{"ok":true}`))
 	s.clock.Set(logAt(700))
 	_, err := s.pod.Start(context.Background())
 	if err != nil {
@@ -680,7 +701,7 @@ func TestStopWhenThePodIsGone(t *testing.T) {
 	if _, err := s.pod.Stop(context.Background()); err != nil {
 		t.Errorf("Stop = %v, want no error", err)
 	}
-	events = beforeTheGap(append(events, allEvents(s.pod.Events())...))
+	events = append(events, allEvents(s.pod.Events())...)
 	if n := exits(events); n != 1 {
 		t.Fatalf("%d probe-exited faults, want 1: %+v", n, events)
 	}
@@ -697,8 +718,8 @@ func TestEventsAreReadFromTheStart(t *testing.T) {
 		log.WriteString(logLine(logAt(100+i), `{"ok":"yes"}`))
 	}
 	log.WriteString(logLine(logAt(4000), `{"ok":true}`))
-	l := &fakeLog{streams: []io.Reader{openStream(t, log.String())}}
-	s := newProbe(t, l, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s.endsWhenDeleted(t, log.String())
 	s.clock.Set(logAt(4000))
 	read := make(chan []Event, 1)
 	go func() { read <- allEvents(s.pod.Events()) }()
@@ -713,7 +734,7 @@ func TestEventsAreReadFromTheStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	faults, observations := 0, 0
-	for _, e := range beforeTheGap(<-read) {
+	for _, e := range <-read {
 		if e.Fault != nil {
 			faults++
 		} else {
@@ -983,7 +1004,8 @@ func TestCountsWhileTheProbeRuns(t *testing.T) {
 	}
 }
 
-// Counts survives a Stop that panicked: the run's entry still gives the lines read.
+// Counts survives a Stop that panicked: the run's entry still gives the lines read. The panic
+// leaves nothing of the run behind: the follower has ended and Events is closed.
 func TestCountsAfterAStopThatPanicked(t *testing.T) {
 	l := &fakeLog{streams: []io.Reader{openStream(t, logLine(logAt(100), "starting")+logLine(logAt(400), `{"ok":true}`))}}
 	s := newProbe(t, l, runningStatus(), 100*time.Millisecond, 5*time.Second)
@@ -1010,6 +1032,90 @@ func TestCountsAfterAStopThatPanicked(t *testing.T) {
 	if lines, _ := s.pod.Counts(); lines != 2 {
 		t.Errorf("Counts after a Stop that panicked = %d lines, want 2", lines)
 	}
-	s.pod.run.cancel() // the panic left the follower running
-	<-s.pod.run.followerDone
+	select {
+	case <-s.pod.run.followerDone:
+	default:
+		t.Error("the follower still runs after the Stop that panicked")
+	}
+	closedWithin(t, s.pod.Events(), time.Second)
+}
+
+// The log ends inside the drain, but the pod reads the container as running until after the
+// stop's wait ran out (section 14, point 26): the probe stopped when asked. The log was not read
+// to the end that the pod's status confirms, so the gap still ends Events.
+func TestStopWhileThePodsStatusLags(t *testing.T) {
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pw.Close() })
+	s := newProbe(t, &fakeLog{streams: []io.Reader{pr}}, runningStatus(), 200*time.Millisecond, 5*time.Second)
+	var lagging atomic.Bool
+	deleted := make(chan struct{})
+	var once sync.Once
+	s.client.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if !lagging.Load() {
+			return false, nil, nil
+		}
+		once.Do(func() { close(deleted) })
+		return true, nil, nil // the pod stays, and reads as running
+	})
+	s.client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if lagging.Load() {
+			s.clock.Set(s.clock.Now().Add(time.Second)) // each reading of the pod takes the clock on
+		}
+		return false, nil, nil
+	})
+	s.clock.Set(logAt(700))
+	go io.WriteString(pw, logLine(logAt(400), `{"ok":true}`))
+	if _, err := s.pod.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lagging.Store(true)
+	done := make(chan Facts, 1)
+	go func() {
+		f, _ := s.pod.Stop(context.Background())
+		done <- f
+	}()
+	select {
+	case <-deleted: // the stop was asked
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not delete the pod")
+	}
+	io.WriteString(pw, logLine(logAt(900), `{"ok":true}`))
+	pw.Close() // the stream ends inside the drain, by the clock
+	var facts Facts
+	select {
+	case facts = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return")
+	}
+	if !facts.StoppedWhenAsked {
+		t.Errorf("facts %+v; the log ended inside the drain, so the probe stopped when asked", facts)
+	}
+	events := allEvents(s.pod.Events())
+	if len(events) != 4 || events[0].Obs == nil || events[1].Obs == nil || !events[1].Obs.Written.Equal(logAt(900)) {
+		t.Fatalf("events = %+v, want both observations and the gap's two faults", events)
+	}
+	for i, e := range events[2:] {
+		if f := e.Fault; f == nil || f.Code != verdict.InternalError || f.Text != gapText || (i == 0 && !f.At.Equal(logAt(900))) {
+			t.Errorf("event %d = %+v, want the gap, first at the last line read", i+2, e)
+		}
+	}
+}
+
+// An event goes into Events while it has room, also after the run's context ended: the gap that
+// the follower emits when the stop cuts the log is not lost to a random choice. With no room,
+// the send gives up once the context has ended.
+func TestSendAfterTheContextEnded(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := &probeRun{events: make(chan Event, 1)}
+	for i := range 100 { // one send alone would pass half the time with a plain select
+		if !r.send(ctx, Event{}) {
+			t.Fatalf("send %d gave up with room in the channel", i)
+		}
+		<-r.events
+	}
+	r.events <- Event{}
+	if r.send(ctx, Event{}) {
+		t.Error("send went into a full channel")
+	}
 }
