@@ -222,7 +222,11 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 		}
 		var out bytes.Buffer
 		if err := n.CommandContext(ctx, "sysctl", "-w", unansweredAttempt).SetStdout(&out).SetStderr(&out).Run(); err != nil {
-			return fail("write the node settings", fmt.Errorf("node %s: sysctl -w %s: %w: %s", n, unansweredAttempt, err, bytes.TrimSpace(out.Bytes())))
+			err = fmt.Errorf("node %s: sysctl -w %s: %w", n, unansweredAttempt, err)
+			if said := oneLine(out.Bytes()); said != "" {
+				err = fmt.Errorf("%w: %s", err, said)
+			}
+			return fail("write the node settings", err)
 		}
 	}
 	if c.nodes, err = byRole(listed); err != nil {
@@ -491,4 +495,10 @@ func remove(ctx context.Context, e Engine, name, runDir string) error {
 		errs = append(errs, err)
 	}
 	return join(errs...)
+}
+
+// oneLine is what a command said, on one line, so that a reason that quotes it stays on one line:
+// its fields separated by single spaces, and "" when it said nothing.
+func oneLine(b []byte) string {
+	return strings.Join(strings.Fields(string(b)), " ")
 }
