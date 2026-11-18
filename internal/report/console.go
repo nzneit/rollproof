@@ -13,8 +13,8 @@ import (
 )
 
 // detailWidth is how wide a reason's detail line or an install restart line may be, indent
-// included, before it wraps. It was the widest line of section 10's examples when it was picked;
-// the install's checks line, at 99 characters, is written whole.
+// included, before it wraps. It was the widest line of section 10's examples before the install's
+// lines; the install's checks line, at 99 characters, is written whole.
 const detailWidth = 92
 
 // notExercised is what a pass did not exercise, in the design's order.
