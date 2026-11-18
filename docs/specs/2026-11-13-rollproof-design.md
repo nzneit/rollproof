@@ -261,8 +261,10 @@ makes the run not verified, as in any window (rule 4 of section 10). The report 
 window apart from the other windows, so that nobody adds its failures to theirs (section 10).
 
 The time before the probe's first observation, and the time in which the tool stops the probe,
-belong to no window. A result that the probe writes while it is being stopped still counts, by
-its `t` (section 6).
+belong to no window. A check that began before the first observation was written is counted in
+the install window all the same, so that the install's counts hold every check of the probe's
+start. A result that the probe writes while it is being stopped still counts, by its `t`
+(section 6).
 
 ### When a run passes
 
@@ -489,7 +491,9 @@ that runs in a virtual machine can have a clock of its own.
 
 An observation is assigned to the window that holds its time, the install window included. One
 in the install window is counted there and is not judged (section 7). One whose time is before
-the install window began, or after the last window ended, is not counted; the evidence keeps it.
+the install window began is counted in the install window too: the first observation's own check
+began before its line was written, and so may others that the probe's start met. One whose time
+is after the last window ended is not counted; the evidence keeps it.
 One whose `t` is later than the moment its line was written is a fault of the line, because a
 check cannot begin after its result. Like every such fault, it makes the window in which the line
 was written not verified.
@@ -1904,8 +1908,8 @@ results: /tmp/rollproof-results-7f3a
     settled, and what started its settle time again, if anything did. With them the counts of the
     install window: checks, failures, failures by class, the time of the last failure, the
     slowest check that passed and the furthest lag that the probe reported. They count every
-    observation whose time falls in the install window, a failure whose line was written after it
-    included. The install window is reported here and not in the list of windows, so a wrapper
+    observation whose time is before the install window or falls in it, a failure whose line was
+    written after it included. The install window is reported here and not in the list of windows, so a wrapper
     that adds up the windows' failures does not count these. The steady window's start is the
     moment the install had settled; the time of the probe's first observation is here. A run
     that ended before the install was ready has no install record. One that ended before the
@@ -2610,6 +2614,23 @@ which step proves which point.
       - The other had ended `cluster-failed`. Its `limits.timeout` of 90 s also bounds the
         creation of the cluster, which took longer on the workstation in two of three runs
         that day.
+
+      After the plan's final review and its fixes, the whole suite passed in one run, ten of
+      ten.
+
+25. **The checks before the install window, a ruling of 2026-11-18.** The next plan's final
+    review found that the install's counts missed the probe's first checks. The install window
+    opens when the first observation's line was written, and an observation is placed by its
+    time, when its check began. The first observation's own check therefore always began before
+    the window, and so did every check that the probe's start met before that line: the runs had
+    six refused checks in the probe's log and five in `result.json`. A start whose first checks
+    hang, as in point 24, could leave a whole request timeout of them out of every count, and the
+    report would say less than the log. The maintainer chose that such a check is counted in the
+    install window (sections 4, 6 and 10). The window's start does not move, so silence, the
+    settle time and the steady window's start are as before, and no verdict changes, because the
+    install window judges no failure. What lost: **the same window, with the number of checks
+    counted in no window written into the install record.** It would report the gap instead of
+    closing it, and a reader would have to add two numbers to learn what the start met.
 
 ## 15. Not in the first release
 
