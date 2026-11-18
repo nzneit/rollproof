@@ -48,7 +48,9 @@ func main() {
 
 // runContext gives the run's context. It ends at the first SIGINT or SIGTERM,
 // which it keeps for endProcess; from then on a second one ends the process at
-// once, by the signal's default action. release stops watching for signals.
+// once, by the signal's default action. release stops watching for signals. A
+// signal that came before release is kept too, so the process ends by it after
+// the run has returned.
 func runContext() (ctx context.Context, release func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	// Room for two signals, so that a second one that comes before the first
@@ -73,8 +75,9 @@ func runContext() (ctx context.Context, release func()) {
 		}
 		keptSignal.Store(first.(syscall.Signal))
 		// Stop returns once no signal is on its way to ch. From then on SIGINT
-		// and SIGTERM take their default action, and one that came meanwhile is
-		// on ch. Reset would give no such promise.
+		// and SIGTERM take their default action (a SIGINT that was ignored as
+		// the process started is ignored again: see raise), and one that came
+		// meanwhile is on ch. Reset would give no such promise.
 		signal.Stop(ch)
 		select {
 		case second := <-ch:

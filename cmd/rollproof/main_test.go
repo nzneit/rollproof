@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -420,8 +421,29 @@ func TestProbeHTTPErrorExitsOne(t *testing.T) {
 const (
 	fakeWaits   = "waits"   // prints started, waits until its context ends, prints returned and returns 2
 	fakeLingers = "lingers" // prints started, prints cancelled when its context ends, waits 30 s and prints returned
-	fakeFails   = "fails"   // returns 1 at once
+	fakeFails   = "fails"   // prints fakeFailsLine and returns 1 at once
 )
+
+// fakeFailsLine is the line that the fails fake prints before it returns 1, so
+// that its exit can be told from a child whose test framework failed.
+const fakeFailsLine = "the fake run returns 1"
+
+// sigintIgnored is whether this test process started with SIGINT ignored, as a
+// background job of a script does. A child inherits that. It is read as the
+// package starts: once a test has called signal.Notify for SIGINT,
+// signal.Ignored reports false, though signal.Stop has made SIGINT ignored again.
+var sigintIgnored = signal.Ignored(syscall.SIGINT)
+
+// skipIfSIGINTIgnored skips a test that sends SIGINT to a child that would
+// inherit SIGINT ignored. The tool then ends by the design's fallback, exit 130
+// after 2 s, and not by the signal.
+func skipIfSIGINTIgnored(t *testing.T) {
+	t.Helper()
+	if sigintIgnored {
+		t.Skip("SIGINT was ignored as this test process started: the child inherits it ignored, " +
+			"so the tool ends by the fallback exit 130, not by SIGINT")
+	}
+}
 
 // TestHelperProcess is the child that the signal tests start. Without
 // ROLLPROOF_HELPER it does nothing. With it, it runs `rollproof run` with the
@@ -456,6 +478,7 @@ func TestHelperProcess(t *testing.T) {
 			fmt.Fprintln(o.Stdout, "returned")
 			return 2
 		case fakeFails:
+			fmt.Fprintln(o.Stdout, fakeFailsLine)
 			return 1
 		}
 		fmt.Fprintf(o.Stderr, "no fake run is named %q\n", fake)
@@ -576,6 +599,9 @@ func TestASignalEndsTheToolByIt(t *testing.T) {
 		{"SIGTERM", syscall.SIGTERM},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.sig == syscall.SIGINT {
+				skipIfSIGINTIgnored(t)
+			}
 			c := startChild(t, fakeWaits)
 			c.waitFor(t, "started")
 			c.signal(t, tc.sig)
@@ -591,11 +617,13 @@ func TestASignalEndsTheToolByIt(t *testing.T) {
 }
 
 // TestASecondSignalEndsTheToolAtOnce sends a second signal while the run is
-// still ending after the first: the process ends by the second at once, and the
+// still ending after the first: the process ends by a signal at once, and the
 // run's own end never comes. The back-to-back case sends SIGINT and then
 // SIGTERM, since Linux may merge a second SIGINT into a first one that is still
-// pending.
+// pending. It accepts an end by either: which of two pending signals the tool
+// sees first is not the test's to choose.
 func TestASecondSignalEndsTheToolAtOnce(t *testing.T) {
+	skipIfSIGINTIgnored(t)
 	t.Run("after the run's context ended", func(t *testing.T) {
 		c := startChild(t, fakeLingers)
 		c.waitFor(t, "started")
@@ -616,8 +644,8 @@ func TestASecondSignalEndsTheToolAtOnce(t *testing.T) {
 		c.signal(t, syscall.SIGINT)
 		c.signal(t, syscall.SIGTERM)
 		ws := c.wait(t, 5*time.Second)
-		if !ws.Signaled() || ws.Signal() != syscall.SIGTERM {
-			t.Errorf("the child ended %s, want by %s%s", ending(ws), syscall.SIGTERM, c.output())
+		if !ws.Signaled() || (ws.Signal() != syscall.SIGINT && ws.Signal() != syscall.SIGTERM) {
+			t.Errorf("the child ended %s, want by %s or %s%s", ending(ws), syscall.SIGINT, syscall.SIGTERM, c.output())
 		}
 		if strings.Contains(c.stdout.String(), "returned") {
 			t.Errorf("the run returned before the process ended%s", c.output())
@@ -626,11 +654,18 @@ func TestASecondSignalEndsTheToolAtOnce(t *testing.T) {
 }
 
 // TestNoSignalExitsWithTheCode pins that a run that no signal stopped ends the
-// process with the run's exit code.
+// process with the run's exit code. The fake's line and the absence of the test
+// framework's failure texts tell that exit from a child whose test failed.
 func TestNoSignalExitsWithTheCode(t *testing.T) {
 	c := startChild(t, fakeFails)
 	ws := c.wait(t, 20*time.Second)
 	if ws.Signaled() || ws.ExitStatus() != 1 {
 		t.Errorf("the child ended %s, want with exit 1%s", ending(ws), c.output())
+	}
+	if !strings.Contains(c.stdout.String(), fakeFailsLine+"\n") {
+		t.Errorf("the child did not write %q%s", fakeFailsLine, c.output())
+	}
+	if out := c.stdout.String() + c.stderr.String(); strings.Contains(out, "FAIL") || strings.Contains(out, "panic:") {
+		t.Errorf("the child's test framework reported a failure%s", c.output())
 	}
 }
