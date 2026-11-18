@@ -12,7 +12,9 @@ import (
 	"unicode/utf8"
 )
 
-// detailWidth is the widest line of section 10's examples, indent included.
+// detailWidth is how wide a reason's detail line or an install restart line may be, indent
+// included, before it wraps. It was the widest line of section 10's examples when it was picked;
+// the install's checks line, at 99 characters, is written whole.
 const detailWidth = 92
 
 // notExercised is what a pass did not exercise, in the design's order.
@@ -220,7 +222,7 @@ func windowStarted(r Run) bool {
 	return false
 }
 
-// setUp is the block of releases, images, probe, changed settings and
+// setUp is the block of releases, images, probe, install, changed settings and
 // removed variables. Its first column is 12 characters wide.
 func setUp(r Run) []string {
 	hasProbe := probeStarted(r)

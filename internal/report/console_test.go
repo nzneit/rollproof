@@ -437,9 +437,9 @@ func TestConsoleWrapsDetail(t *testing.T) {
 	}
 }
 
-// A pass with a deploy and no rollback says that the candidate's shutdown was
-// not exercised, first under "not exercised"; a pass with a rollback says
-// nothing new.
+// A pass with a deploy and no rollback says that the candidate's shutdown and the installed
+// release's start-up were not exercised (plan ruling 13), first under "not exercised"; a pass with
+// a rollback says nothing new.
 func TestConsoleDeployWithoutRollback(t *testing.T) {
 	const line = "the candidate's shutdown and the installed release's start-up, because the run has no rollback"
 	r := passRun()

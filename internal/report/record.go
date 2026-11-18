@@ -6,8 +6,9 @@ package report
 import "time"
 
 // Run is the record of one run: everything result.json holds, and Out, the
-// results folder, for the console's last line. It holds no values but strings,
-// numbers, booleans and times.
+// results folder, for the console's last line. Install is the install record,
+// or nil for a run that ended before the install was ready. It holds no values
+// but strings, numbers, booleans and times.
 type Run struct {
 	Schema           int          `json:"schema"`
 	Final            bool         `json:"final"`

@@ -42,7 +42,7 @@ const inotifyHint = "; a cluster of several nodes also fails when the kernel's i
 
 // unansweredAttempt is the kernel setting, as sysctl -w takes it, that Create writes in each node:
 // how long, in seconds, connection tracking keeps an attempt to connect that has had no answer
-// (section 9). Unexported; only Create uses it.
+// (section 9).
 const unansweredAttempt = "net.netfilter.nf_conntrack_tcp_timeout_syn_sent=5"
 
 // Through rootless nerdctl, kind's Create sometimes fails at its 30-second wait for a node's log

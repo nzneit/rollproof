@@ -95,8 +95,8 @@ func NewPod(o PodOptions) *Pod {
 
 // Events gives every observation and every fault of the probe, in the log's order,
 // from its first line on. Read it from before Start is called until it is
-// closed: a send waits for its reader. It is closed when a Start that
-// failed, or Stop, has returned.
+// closed: a send waits for its reader. A Start that failed, or a Stop after
+// Start, closes it.
 func (p *Pod) Events() <-chan Event { return p.events }
 
 // closeEvents closes the channel of Events, once.
