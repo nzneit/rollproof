@@ -41,8 +41,8 @@ out again. The install now settles under the running probe, and the steady windo
 has settled (sections 4, 6, 7 and 10). The maintainer chose that design from six sketches.
 Two reviews of the revision followed the same day, and the maintainer ruled on what they found.
 Section 14, point 23 records the steps, the rulings and what the revision leaves open. The
-revision's text waits for the maintainer's review, and the first plan's code still has the
-warm-up (section 13).
+maintainer approved the revision. Until a second plan brings the code to it, the first plan's
+code still has the warm-up (section 13).
 
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
 Fable model wrote each of the first two reviews. AI agents on an Opus model gathered the evidence,
@@ -227,9 +227,9 @@ verdict    report, evidence, exit code
    changes. The time in which the install settles under the probe is the install window. It lasts
    `limits.settle`, counted from the probe's first observation at the earliest and started again by
    a break (section 7). The probe's failed checks in it are counted and reported, and they are not
-   judged. Silence, a fault of the probe, a signal or a failure of the tool or of the install in it
-   makes the run not verified (rule 4 of section 10). The steady window begins when the install has
-   settled.
+   judged. Silence, a fault of the probe, a watched workload the tool cannot judge, a signal or a
+   failure of the tool or of the install in it makes the run not verified (rule 4 of section 10).
+   The steady window begins when the install has settled.
 4. **Deploy the candidate.** Wait for the transition to finish, under a timeout, and keep the
    probe running for the settle time after it.
 5. **Roll back** to the previous release, with the same wait and the same settle time. This step
@@ -256,9 +256,9 @@ inside it puts the transition back in progress.
 A failed check in the install window is counted and reported, and it does not judge the release. The
 install is not a transition, and a cluster may need a moment before it routes to a Service that the
 install has just created (section 7). Silence, a fault of the probe, an install that failed, a
-signal or a failure of the tool in the install window makes the run not verified, as in any window
-(rule 4 of section 10). The report keeps the install window apart from the other windows, so that
-nobody adds its failures to theirs (section 10).
+watched workload the tool cannot judge, a signal or a failure of the tool in the install window
+makes the run not verified, as in any window (rule 4 of section 10). The report keeps the install
+window apart from the other windows, so that nobody adds its failures to theirs (section 10).
 
 The time before the probe's first observation, and the time in which the tool stops the probe,
 belong to no window. A result that the probe writes while it is being stopped still counts, by
@@ -532,12 +532,13 @@ not judged.
   hangs and never writes again therefore cannot pass, and nor can one that hangs in the install
   window and then writes again. The configuration keeps `limits.silence` shorter than
   `limits.steady` and `limits.settle` (section 8), so a window with no observation at all is
-  always silent. The built-in probe writes a line within one request timeout while it works, so
-  its first moments are not silent for that reason either.
+  always silent. The built-in probe writes a line within one request timeout and one second while
+  it works, so its first moments are not silent for that reason either.
 - **Stop.** The tool stops the probe when the run's last window has ended, whether or not every
-  transition was run, or when the run ends before the probe's first observation. It deletes the
-  probe's pod with a grace period as long as the drain, so the probe gets SIGTERM, and it goes on
-  reading the probe's lines until the container has exited.
+  transition was run, or when the run ends before the probe's first observation, unless a signal
+  ended the run (section 10). It deletes the probe's pod with a grace period as long as the
+  drain, so the probe gets SIGTERM, and it goes on reading the probe's lines until the container
+  has exited.
   The drain is 10 seconds for a custom probe. For the built-in probe it is the request timeout
   plus 5 seconds.
 - **What a probe does on SIGTERM.** It starts no new check, writes the line of every check that
@@ -640,11 +641,12 @@ It speaks the same contract. It is the tool's own binary, started as `rollproof 
   writes their lines and exits.
 - **Names.** It resolves the URL's host for its first request, and for each request after it until
   a lookup succeeds, and then dials that address, so cluster DNS is not on the path of every
-  request. The lookup is part of the request and of its timeout. A request whose lookup fails is
-  a failure of class `other`, so a name that the cluster does not resolve yet falls in the install
-  window like any other failed check, and a name that never resolves makes the steady window not
-  verified (`steady-not-clean`). A
-  Service's cluster address does not change during a rollout.
+  request. The lookup is part of the request and of its timeout. A request whose lookup fails
+  before the request timeout is a failure of class `other`, and one whose timeout passes while
+  its lookup still runs is a failure of class `timeout`, so a name that the cluster does not
+  resolve yet falls in the install window like any other failed check, and a name that never
+  resolves makes the steady window not verified (`steady-not-clean`). A Service's cluster address
+  does not change during a rollout.
 
 **The target check.** Before it starts the probe, the tool reads the URL's host as the name of a
 Service: `NAME.NAMESPACE`, with or without `.svc` and the cluster's domain after it. A single
@@ -1899,7 +1901,7 @@ results: /tmp/rollproof-results-7f3a
   - every transition: whether it stalled, how its command ended, and what started the settle time
     again, if anything did. For each watched workload: the pods at the start, the pods replaced,
     whether it was added or removed, whether it is probed, and the quickest stop;
-  - the probes that judged the run, as a list that has one entry in the first release. Each has
+  - the probes the tool started, as a list that has one entry in the first release. Each has
     its settings and their defaults, the names of its headers or of its `env` entries in place of
     their values, the counts of its `command` and `args`, how many of its lines were JSON objects
     with no `ok` field, whether it ran without a certificate check, and whether it stopped when
