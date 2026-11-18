@@ -48,6 +48,7 @@ The revision implies these and names no test for them. Each has its test in the 
 | `probe` | Events from the probe's first line; a failed start that stops the probe; the built-in probe with no warm-up and a lookup inside the request | The custom probe (step 4) |
 | `run` | The install window, the steady window's start, the reader from the probe's start | The restart-only sequence, `setup` (step 4) |
 | `report` | The install record in `result.json`, the install's lines and the endings of the console text | The job summary (step 6) |
+| `cluster` | Each node keeps an attempt to connect that had no answer for 5 s (section 9, Task 9) | A node of Docker or Podman, not tried (section 14, point 24) |
 | Tests with a cluster | The first four fixtures again, with the install record asserted for the first, and one new row | The other rows (step 4) |
 
 The fixture rows of section 12 that the revision added or changed:
@@ -80,6 +81,8 @@ Each fills a silence of the design, settles two of its sentences that disagree (
 14. **`windows.json` in the evidence gets a mark for the install window,** first in the list, named `install`. Section 10 says that the folder's layout is not a contract. Cost if wrong: step 4's harness reads the marks by name and is not affected.
 15. **A start that failed stops the probe before `Start` returns,** unless a signal ended it: section 6 has the tool stop the probe "when the run ends before the probe's first observation", and section 10 has a signal leave the probe's pod for the next run. The pod of a probe that had exited is deleted too, as it is after a window. The run then asks `Stop` for what that stop left, so the record has the probe's line counts. Cost if wrong: with `--keep-cluster`, the pod of a probe that never started is gone when the developer looks; its state is in the reason's text.
 
+16. **Task 9 was added on 2026-11-18, after Task 8's Step 7 stopped.** That step met timeouts long after the probe's first seconds, and section 14, point 24, records their cause and the maintainer's choice: each node forgets an attempt to connect that had no answer within 5 s. Task 8's commit stays as it is. Task 8 is complete when its Steps 6 and 7 pass again, which Task 9's last step runs. Why: the cause lies in the cluster, which no task of this plan touched, and the change to the fixtures and the README that Task 8 made does not depend on it. Cost if wrong: the README's sentence about the fixtures is ahead of the code for the commits between Task 8 and Task 9, on a branch that nobody else has.
+
 ## Open points this plan names and does not settle
 
 Section 14, point 22. Both rules stand as built: a signal that comes while the tool is stopping the probe makes the run not verified unless a window had already failed, also when the last window was the install window; and a probe that exits before its first observation is `probe-exited` at once.
@@ -88,7 +91,7 @@ Section 14, point 23, in its order:
 
 - **Nothing has been run with the revision.** Task 8 runs five fixtures under both Helm majors on the developer's machine. That is the first run.
 - **Every run is at least `limits.settle` longer.** Built as written. Task 8 logs, for the first fixture, how long before the steady window the last failed check came. That figure is for point 7; this plan changes no default.
-- **Whether the probe's own pod meets a failure of its own that outlasts the settle time.** The first fixture in Task 8 shows it. If its steady window is not clean, the executor stops and reports; the plan tunes nothing.
+- **Whether the probe's own pod meets a failure of its own that outlasts the settle time.** The first fixture in Task 8 shows it. If its steady window is not clean, the executor stops and reports; the plan tunes nothing. Its first runs stopped on failures that came from the nodes, not from the probe's pod (section 14, point 24); Task 9 runs it again.
 - **The install's settle time starts again when a pod stops being ready, and a transition's does not.** Built as section 7 says. The maintainer has not ruled on the difference.
 - **The install settles for `limits.settle` and has no key of its own; a failed check in the install window never changes a verdict.** Built as written.
 - **An installed release that fails only in its first seconds is not seen at the install.** Built as written; ruling 13 is the report's one line about it.
@@ -114,6 +117,7 @@ All paths are under `projects/rollproof/`.
 | `internal/report/testdata/` | Two examples copied again from the design, three new golden files, four made again | 6, 7 |
 | `fixtures/service/main.go`, `fixtures/chart/` | The switch `FAIL_WORK` and the value `failWork` | 8 |
 | `e2e/harness_test.go`, `e2e/fixtures_test.go`, `README.md` | The install record read and asserted; the new row; one sentence of the README | 8 |
+| `internal/cluster/cluster.go` | Each node keeps an attempt to connect that had no answer for 5 s | 9 |
 
 ## The tasks
 
@@ -123,6 +127,7 @@ Read this file first, then the file of the task at hand. Tasks are done in order
 | --- | --- | --- |
 | `01-settle-window-and-probe.md` | 1 to 5 | `watch`, `verdict`, the probe's pod, `run`, the built-in probe |
 | `02-record-report-and-fixtures.md` | 6 to 8 | The install record, the console text, the fixtures |
+| `03-node-settings.md` | 9 | The nodes' setting for an attempt to connect that had no answer, and Task 8's cluster runs again (ruling 16) |
 
 ---
 
