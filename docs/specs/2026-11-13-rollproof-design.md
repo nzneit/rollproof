@@ -41,8 +41,8 @@ out again. The install now settles under the running probe, and the steady windo
 has settled (sections 4, 6, 7 and 10). The maintainer chose that design from six sketches.
 Two reviews of the revision followed the same day, and the maintainer ruled on what they found.
 Section 14, point 23 records the steps, the rulings and what the revision leaves open. The
-maintainer approved the revision. Until a second plan brings the code to it, the first plan's
-code still has the warm-up (section 13).
+maintainer approved the revision. A second plan brought the code to it on 2026-11-18, with one
+more change to the cluster that its runs called for (section 13; section 14, point 24).
 
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
 Fable model wrote each of the first two reviews. AI agents on an Opus model gathered the evidence,
@@ -2325,10 +2325,11 @@ the fourth on gets a plan of its own. The first plan covers steps 1 to 3.
    release. The series settles points 7 and 16.
 
 Step 3 was built on 2026-11-17 with the built-in probe's warm-up, which this text no longer has.
-A plan of its own brings the skeleton to this text before step 4: first the rule for when the
-install has settled, then the install window, in the same step as the built-in probe's changes:
-no warm-up, a schedule that starts when the probe starts, and a failed lookup as a failed check.
-Then the counts and the report (section 14, point 23).
+A plan of its own brought the skeleton to this text on 2026-11-18, before step 4: first the rule
+for when the install has settled, then the install window, in the same step as the built-in
+probe's changes: no warm-up, a schedule that starts when the probe starts, and a failed lookup as
+a failed check. Then the counts and the report, and last the nodes' setting of section 9 for an
+attempt to connect that had no answer (section 14, points 23 and 24).
 
 ## 14. Open points for the plan
 
@@ -2544,8 +2545,8 @@ which step proves which point.
     - In `result.json` the steady window's start is no longer the time of the probe's first
       observation. No release carries the schema yet, so its version stays: a version keeps its
       meaning from the first release that carries it (section 10).
-    - The first plan's built-in probe exits when its host cannot be resolved at its start. The
-      next plan changes that to the failed check that section 6 now describes.
+    - The first plan's built-in probe exited when its host could not be resolved at its start.
+      The next plan changed that to the failed check that section 6 now describes.
     - The report does not say how many ready endpoints the probe's target had when the steady
       window began. It would sharpen the text for a target that passed no check.
 
@@ -2597,8 +2598,18 @@ which step proves which point.
     - A connection whose first answer takes longer than 5 s is believed to wait for the
       kernel's next attempt, about 7 s after the first. Nothing in the fixtures does that.
     - The value was set on nodes of rootless nerdctl only. Docker and Podman are not tried.
-    - Nothing has been run with the setting and the revision's code together. The next plan
-      sets it, and its fixtures run again.
+    - With the setting and the revision's code together, the nine runs of the five fixtures
+      that reached the probe had no late timeout, and every failure of the probe's start came
+      in its first 2 s. In one run every check of the first 0.7 s timed out, 145 of them, and
+      all fell in the install window. In one run of the suite, eight of the ten runs gave their
+      expected verdicts. The other two gave theirs when they were run again:
+      - One had ended `internal-error` in its rollback window, after the probe had stopped as
+        asked: the tool opened the probe's log again and found it removed with the deleted
+        pod. That is a fault of the tool at the end of any run, in code from before the
+        revision, and the next plan has to remove it.
+      - The other had ended `cluster-failed`. Its `limits.timeout` of 90 s also bounds the
+        creation of the cluster, which took longer on the workstation in two of three runs
+        that day.
 
 ## 15. Not in the first release
 
@@ -2820,12 +2831,12 @@ the repository.
 | The first plan's code with no warm-up and a steady window of 60 s, three runs under both Helm majors, then three with the warm-up | That the timeouts came from the probe's start: 5 of 6 runs had them without the warm-up, none of 6 with it |
 | Two captures of the nodes' connection tracking, from the moment the probe's Service existed | That a late timeout made no new entry, and that the only entries alive and not closed then were attempts kept with no answer from the first seconds, on ports beside the one in use; that the kernel kept them 120 s; how often the probe used a source port again |
 | The same copy with no warm-up, the nodes' value set to 5 s, three runs under both Helm majors | That a node of rootless nerdctl takes the value, and that no failure came after the first second in 6 of 6 runs |
+| The revision's end-to-end runs with the setting: the suite once, then its two failed fixtures again | That no late timeout came in the nine runs that reached the probe, and the two failures that section 14, point 24, names |
 
 Still not shown by any run or any page: that 15 s is long enough for an install to settle under
-the probe; that the probe's own pod meets no failure of its own after that time with the
-revision's code; that the setting of section 14, point 24, removes the late timeouts with the
-revision's code, and that a node of Docker or Podman takes it; that a shorter time between the
-proxy's syncs would hide failures that the fixtures catch. And, from before the
+the probe; that a node of Docker or Podman takes the setting of section 14, point 24; that a
+shorter time between the proxy's syncs would hide failures that the fixtures catch. And, from
+before the
 revision: that a node which the tool asks to pull an image uses the
 settings it uses for the kubelet; that nodes behind a proxy reach the run's registry by its
 address; that a shell as the first process of a container ignores SIGTERM; that a pod's status

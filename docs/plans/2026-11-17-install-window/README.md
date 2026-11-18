@@ -8,7 +8,7 @@
 
 **Tech Stack:** As built: Go 1.27, `k8s.io/client-go` v0.37, `sigs.k8s.io/kind` v0.33.0 as a library, `github.com/google/go-cmp` in tests, Helm 3.22.1 and 4.3.2 as binaries for the fixtures. No new dependency.
 
-**Spec:** `projects/rollproof/docs/specs/2026-11-13-rollproof-design.md`. Section numbers in this plan are that document's. The revision this plan builds is the difference between two commits of it: from the repository root, `git diff dd44bab 660cecc -- projects/rollproof/docs/specs/2026-11-13-rollproof-design.md`. An executor reads that difference once, and the sections a task names before it starts the task. The plan that built the skeleton is `docs/plans/2026-11-16-first-plan/`.
+**Spec:** `projects/rollproof/docs/specs/2026-11-13-rollproof-design.md`. Section numbers in this plan are that document's. The revision this plan builds is the difference between two commits of it: from the repository root, `git diff dd44bab d895b92 -- projects/rollproof/docs/specs/2026-11-13-rollproof-design.md` (the review's rulings of `660cecc` and the six text fixes approved with this plan). Task 9 builds the amendment of 2026-11-18, `git diff 54566ed c1c39fa` on the same file. An executor reads that difference once, and the sections a task names before it starts the task. The plan that built the skeleton is `docs/plans/2026-11-16-first-plan/`.
 
 ## Global Constraints
 
