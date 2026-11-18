@@ -44,6 +44,7 @@ func TestInstallSettling(t *testing.T) {
 	cond := func(code verdict.Code, s float64, text string) []verdict.Condition {
 		return []verdict.Condition{{Code: code, At: at(s), Text: text}}
 	}
+	two := func(a, b []verdict.Condition) []verdict.Condition { return append(a, b...) }
 
 	for _, r := range []struct {
 		name     string
@@ -87,6 +88,14 @@ func TestInstallSettling(t *testing.T) {
 			inWindow: cond(verdict.WorkloadUnsupported, 9, agentText)},
 		{name: "and one that appeared before the first observation ends the settling there, with no window",
 			events: []ev{set(3, agent)}, first: 5, now: 5, ended: true, settled: -1, end: 5,
+			before: cond(verdict.WorkloadUnsupported, 3, agentText)},
+		{name: "a workload the tool cannot judge seen before the first observation, and a failure before it",
+			short: true, events: []ev{set(3, agent), set(18, oneDown())}, first: 30, now: 30, ended: true, settled: -1, end: 30,
+			restarts: []string{notComplete(16)},
+			before: two(cond(verdict.InstallFailed, 20, atLimit+notComplete(16)),
+				cond(verdict.WorkloadUnsupported, 3, agentText))},
+		{name: "and a break that began after the first observation is not counted",
+			events: []ev{set(3, agent), set(8, oneDown())}, first: 5, now: 20, ended: true, settled: -1, end: 5,
 			before: cond(verdict.WorkloadUnsupported, 3, agentText)},
 		{name: "the settle time runs past the limit", short: true, first: 10, now: 25, ended: true, settled: 25, end: 25},
 		{name: "a break after the limit, before the install has settled, fails the install",

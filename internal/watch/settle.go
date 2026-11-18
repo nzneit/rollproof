@@ -120,15 +120,23 @@ func (t *Tracker) InstallSettling(first, now time.Time) (Settling, bool) {
 	}
 	s := Settling{First: first}
 	settled, failed, cause, counted := in.outcome(first, now, t.o.Settle, t.o.Timeout)
+	early, earlyAt := in.unsupportedIn(func(seen time.Time) bool { return seen.Before(first) })
+	if len(early) > 0 {
+		// Found before the probe's first observation, it ends the run there (section 7, ruling 5),
+		// so the settling ended at first and the install window has no length. A failure before
+		// first came before the run ended, and is kept; one at or after first did not happen in the
+		// settling. Restarts say only what started the settle time before the settling ended.
+		settled = time.Time{}
+		if !failed.IsZero() && !failed.Before(first) {
+			failed, cause = time.Time{}, nil
+		}
+		counted = slices.DeleteFunc(counted, func(b installBreak) bool { return b.from.After(first) })
+	}
 	for _, b := range counted {
 		s.Restarts = append(s.Restarts, b.sentence)
 	}
-	early, earlyAt := in.unsupportedIn(func(seen time.Time) bool { return seen.Before(first) })
 	switch {
 	case len(early) > 0:
-		// Found before the probe's first observation, it ends the run there (section 7, ruling 5),
-		// so the install window has no length and no failure of the install's own is reported.
-		settled, failed, cause = time.Time{}, time.Time{}, nil
 		s.Ended = first
 	case !settled.IsZero():
 		s.Settled, s.Ended = settled, settled

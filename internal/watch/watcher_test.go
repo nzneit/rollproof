@@ -221,6 +221,21 @@ func TestInstallSettled(t *testing.T) {
 			t.Errorf("settling = %+v; want Settled zero, Ended at the clock's time, and no condition", s)
 		}
 	})
+	t.Run("when ctx ends before the first observation, Ended is the first observation", func(t *testing.T) {
+		w, _, clock := startWatcher(t, nil, base()...)
+		if _, err := w.InstallReady(t.Context(), t0, closed()); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		first := clock.Now().Add(time.Second)
+		res := make(chan Settling, 1)
+		go func() { res <- w.InstallSettled(ctx, first) }()
+		s := receive(t, res)
+		if !s.Settled.IsZero() || !s.Ended.Equal(first) || len(s.Before)+len(s.InWindow) != 0 {
+			t.Errorf("settling = %+v; want Settled zero, Ended at the first observation, and no condition", s)
+		}
+	})
 }
 
 func TestTransition(t *testing.T) {
