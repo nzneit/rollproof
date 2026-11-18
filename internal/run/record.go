@@ -58,6 +58,9 @@ func record(f facts) report.Run {
 		r.Reasons = append(r.Reasons, reasonRecord(reason, f.transitions))
 	}
 	for _, w := range f.decision.Windows {
+		if w.Name == verdict.Install {
+			continue // reported apart from the other windows (section 10)
+		}
 		r.Windows = append(r.Windows, windowRecord(w))
 	}
 	r.Warnings = append(r.Warnings, f.warnings...)
@@ -94,11 +97,11 @@ func record(f facts) report.Run {
 	return r
 }
 
-// started reports whether the steady window has a start: the probe started.
+// started reports whether any window began: the probe started.
 func started(d verdict.Decision) bool {
 	for _, w := range d.Windows {
-		if w.Name == verdict.Steady {
-			return !w.Start.IsZero()
+		if !w.Start.IsZero() {
+			return true
 		}
 	}
 	return false

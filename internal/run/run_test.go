@@ -112,7 +112,7 @@ func TestPass(t *testing.T) {
 		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
 	}
 	want := []string{"load", "check", "create", "store", "deployer", "fetch", "watcher",
-		"install", "install-ready", "target", "probe", "start", "deploy", "transition-deploy",
+		"install", "install-ready", "target", "probe", "start", "install-settled", "deploy", "transition-deploy",
 		"rollback", "transition-rollback", "probe-stop", "end-commands", "watch-stop", "delete"}
 	if diff := cmp.Diff(want, w.calls.list()); diff != "" {
 		t.Errorf("calls (-want +got):\n%s", diff)
@@ -283,7 +283,7 @@ func TestFirstFileBeforeAnything(t *testing.T) {
 
 func TestStall(t *testing.T) {
 	w := newWorld(t)
-	w.probe.events = passes(0, 320)
+	w.probe.events = passes(-15, 320)
 	w.watcher.transitions[verdict.Deploy] = watch.Transition{
 		Stalled:       true,
 		Incomplete:    []string{"deployment/orders: 1 of 3 updated replicas are available"},
@@ -701,17 +701,17 @@ func TestWindowMarks(t *testing.T) {
 	for _, m := range marks {
 		names = append(names, m.Name)
 	}
-	if diff := cmp.Diff([]string{"steady", "deploy", "rollback"}, names); diff != "" {
+	if diff := cmp.Diff([]string{"install", "steady", "deploy", "rollback"}, names); diff != "" {
 		t.Errorf("names (-want +got):\n%s", diff)
 	}
-	if marks[0].Finished != nil {
-		t.Errorf("the steady window's finished is %v, want null", marks[0].Finished)
+	if marks[1].Finished != nil {
+		t.Errorf("the steady window's finished is %v, want null", marks[1].Finished)
 	}
-	if marks[1].Finished == nil || !marks[1].Finished.Equal(t0.Add(25*time.Second)) {
-		t.Errorf("the deploy window's finished is %v, want %v", marks[1].Finished, t0.Add(25*time.Second))
+	if marks[2].Finished == nil || !marks[2].Finished.Equal(t0.Add(25*time.Second)) {
+		t.Errorf("the deploy window's finished is %v, want %v", marks[2].Finished, t0.Add(25*time.Second))
 	}
-	if marks[2].End == nil || !marks[2].End.Equal(t0.Add(70*time.Second)) {
-		t.Errorf("the rollback window's end is %v, want %v", marks[2].End, t0.Add(70*time.Second))
+	if marks[3].End == nil || !marks[3].End.Equal(t0.Add(70*time.Second)) {
+		t.Errorf("the rollback window's end is %v, want %v", marks[3].End, t0.Add(70*time.Second))
 	}
 }
 
@@ -988,14 +988,14 @@ func TestNoGapBetweenWindows(t *testing.T) {
 		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
 	}
 	marks := w.windowMarks()
-	if len(marks) != 3 {
-		t.Fatalf("marks %d, want 3", len(marks))
-	}
-	if marks[0].End == nil || marks[1].Start == nil || !marks[1].Start.Equal(*marks[0].End) {
-		t.Errorf("the deploy window starts at %v, want the steady window's end %v", marks[1].Start, marks[0].End)
+	if len(marks) != 4 || marks[0].Name != "install" {
+		t.Fatalf("marks %+v, want four, install first", marks)
 	}
 	if marks[1].End == nil || marks[2].Start == nil || !marks[2].Start.Equal(*marks[1].End) {
-		t.Errorf("the rollback window starts at %v, want the deploy window's end %v", marks[2].Start, marks[1].End)
+		t.Errorf("the deploy window starts at %v, want the steady window's end %v", marks[2].Start, marks[1].End)
+	}
+	if marks[2].End == nil || marks[3].Start == nil || !marks[3].Start.Equal(*marks[2].End) {
+		t.Errorf("the rollback window starts at %v, want the deploy window's end %v", marks[3].Start, marks[2].End)
 	}
 }
 
@@ -1311,8 +1311,8 @@ func TestTheReaderStartsWithTheProbe(t *testing.T) {
 	for _, x := range w.result().Windows {
 		checks += x.Checks
 	}
-	if checks != 19000 { // 5,000 early, and 200 a second for the 70 s of the three windows
-		t.Errorf("the windows hold %d checks, want 19000: none may be lost", checks)
+	if checks != 14000 { // 200 a second for the 70 s of the three windows; the 5,000 early ones fall in the install window
+		t.Errorf("the windows hold %d checks, want 14000: none may be lost", checks)
 	}
 }
 
@@ -1340,5 +1340,199 @@ func TestFaultsBeforeAFailedStartAreReasons(t *testing.T) {
 	}
 	if n := w.calls.count("probe-stop"); n != 1 {
 		t.Errorf("the probe's Stop was called %d times after a failed start, want 1", n)
+	}
+}
+
+// lateClock is the fake clock except that it runs before once, ahead of the run's first wait,
+// which is the steady window's.
+type lateClock struct {
+	*fakeClock
+	before func()
+	once   sync.Once
+}
+
+func (c *lateClock) After(d time.Duration) <-chan time.Time {
+	c.once.Do(c.before)
+	return c.fakeClock.After(d)
+}
+
+// when reports whether a mark's time is there and is want.
+func when(got *time.Time, want time.Time) bool { return got != nil && got.Equal(want) }
+
+// The install window runs from the first observation until the install has settled, the steady
+// window begins there, and result.json's windows do not list it (sections 4 and 10).
+func TestTheSteadyWindowBeginsWhenTheInstallHasSettled(t *testing.T) {
+	w := newWorld(t)
+	w.watcher.late = 3 * time.Second // the tool looks 3 s after the install settled
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	marks := w.windowMarks()
+	if len(marks) != 4 || marks[0].Name != "install" || marks[1].Name != "steady" {
+		t.Fatalf("marks %+v, want install, steady, deploy, rollback", marks)
+	}
+	if !when(marks[0].Start, t0.Add(-15*time.Second)) || !when(marks[0].End, t0) {
+		t.Errorf("the install window is [%v, %v), want [%v, %v)", marks[0].Start, marks[0].End, t0.Add(-15*time.Second), t0)
+	}
+	if !when(marks[1].Start, t0) || !when(marks[1].End, t0.Add(10*time.Second)) {
+		t.Errorf("the steady window is [%v, %v), want [%v, %v)", marks[1].Start, marks[1].End, t0, t0.Add(10*time.Second))
+	}
+	if !when(marks[2].Start, t0.Add(10*time.Second)) {
+		t.Errorf("the deploy's window starts at %v, want the steady window's end, %v", marks[2].Start, t0.Add(10*time.Second))
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"pass", "pass", "pass"}, r.results()); diff != "" {
+		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+	if r.Windows[0].Name != "steady" || r.Windows[0].Start == nil || !r.Windows[0].Start.Equal(t0) {
+		t.Errorf("result.json's first window is %+v, want steady from %v", r.Windows[0], t0)
+	}
+}
+
+func TestAFailedCheckInTheInstallWindowDecidesNothing(t *testing.T) {
+	w := newWorld(t)
+	w.probe.events = append(w.probe.events, failureAt(-10*time.Second, -10*time.Second))
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if r := w.result(); len(r.Reasons) != 0 {
+		t.Errorf("reasons %v, want none", r.codes())
+	}
+}
+
+// Rule 4, and Review Focus 4: a run that ends in the install window stops the probe, deletes the
+// cluster and writes a final result.
+func TestTheInstallWindowNotVerified(t *testing.T) {
+	first := t0.Add(-15 * time.Second)
+	failed := verdict.Condition{Code: verdict.InstallFailed, Text: "the install was not ready when limits.timeout passed"}
+	agent := verdict.Condition{Code: verdict.WorkloadUnsupported, At: t0.Add(-6 * time.Second),
+		Text: "daemonset/agent updates with OnDelete; the tool judges only a workload that updates by rolling"}
+	settling := func(s watch.Settling) func(*world) {
+		return func(w *world) { w.watcher.settle = func(time.Time) watch.Settling { return s } }
+	}
+	for _, row := range []struct {
+		name         string
+		script       func(w *world)
+		code, window string
+		end          time.Time // the install window's end in windows.json
+	}{
+		{"the probe exits", func(w *world) {
+			w.probe.events = append(w.probe.events, probe.Event{Fault: &verdict.Condition{Code: verdict.ProbeExited,
+				Text: "the probe exited with exit code 1 (Error)", At: t0.Add(-5 * time.Second)}})
+		}, "probe-exited", "install", t0},
+		{"the probe is silent and then writes again", func(w *world) {
+			w.probe.events = append(passes(-15, -12), passes(-5, 70)...)
+		}, "probe-silent", "install", t0},
+		{"the install fails while it settles",
+			settling(watch.Settling{First: first, Ended: t0.Add(25 * time.Second), InWindow: []verdict.Condition{failed}}),
+			"install-failed", "install", t0.Add(25 * time.Second)},
+		{"a workload the tool cannot judge appears",
+			settling(watch.Settling{First: first, Settled: t0, Ended: t0, InWindow: []verdict.Condition{agent}}),
+			"workload-unsupported", "install", t0},
+		{"the install had failed before the first observation",
+			settling(watch.Settling{First: first, Ended: first, Before: []verdict.Condition{failed}}),
+			"install-failed", "", first},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			w := newWorld(t)
+			row.script(w)
+			if code := w.run(context.Background()); code != 2 {
+				t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+			}
+			r := w.result()
+			if !r.Final || r.Verdict != "not-verified" {
+				t.Errorf("final %v, verdict %q; want a final not-verified", r.Final, r.Verdict)
+			}
+			if diff := cmp.Diff([]string{row.code}, r.codes()); diff != "" {
+				t.Errorf("reasons (-want +got):\n%s", diff)
+			}
+			if window, _ := r.windowOf(row.code); window != row.window {
+				t.Errorf("%s in window %q, want %q", row.code, window, row.window)
+			}
+			if marks := w.windowMarks(); len(marks) < 2 || !when(marks[0].End, row.end) || marks[1].Start != nil {
+				t.Errorf("marks %+v; want the install window to end at %v, and no steady window", marks, row.end)
+			}
+			if diff := cmp.Diff([]string{"not-run", "not-run", "not-run"}, r.results()); diff != "" {
+				t.Errorf("window results (-want +got):\n%s", diff)
+			}
+			for name, want := range map[string]int{"deploy": 0, "probe-stop": 1, "delete": 1} {
+				if n := w.calls.count(name); n != want {
+					t.Errorf("%s was called %d times, want %d", name, n, want)
+				}
+			}
+		})
+	}
+}
+
+func TestSignalInTheInstallWindow(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.hooks["install-settled"] = func() {
+		w.clock.Advance(4 * time.Second)
+		cancel()
+	}
+	if code := w.run(ctx); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if window, _ := r.windowOf("interrupted"); window != "install" || !r.Final {
+		t.Errorf("interrupted in window %q, final %v; want install and final", window, r.Final)
+	}
+	if marks := w.windowMarks(); marks[0].End == nil || !marks[0].End.Equal(t0.Add(-11*time.Second)) || marks[1].Start != nil {
+		t.Errorf("marks %+v; want the install window cut at the signal and no steady window", marks)
+	}
+}
+
+func TestAToolFailureInTheInstallWindow(t *testing.T) {
+	w := newWorld(t)
+	w.hooks["install-settled"] = func() { panic("the watch unit broke") }
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if window, text := w.result().windowOf("internal-error"); window != "install" || text != "the watch unit broke" {
+		t.Errorf("internal-error in window %q with text %q", window, text)
+	}
+}
+
+func TestASettlingWithNoResultIsTheToolsFailure(t *testing.T) {
+	w := newWorld(t)
+	w.watcher.settle = func(first time.Time) watch.Settling {
+		return watch.Settling{First: first, Ended: first.Add(time.Second)}
+	}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if window, _ := w.result().windowOf("internal-error"); window != "install" {
+		t.Errorf("internal-error in window %q, want install", window)
+	}
+}
+
+// Rule 8: a condition of the install window that the tool learns of only after the steady window
+// began is placed late. The steady window runs to its end, and the run stops there.
+func TestAnInstallWindowJudgedLate(t *testing.T) {
+	w := newWorld(t)
+	u := w.units()
+	u.Clock = &lateClock{fakeClock: w.clock, before: func() {
+		w.probe.send(probe.Event{Fault: &verdict.Condition{Code: verdict.ProbeLineInvalid,
+			Text: "the line is not one JSON object", At: t0.Add(-5 * time.Second)}})
+	}}
+	code := Run(context.Background(), Options{ConfigPath: filepath.Join(w.cfg.Dir, "rollproof.yaml"), Out: w.out,
+		Stdout: &w.stdout, Stderr: &w.stderr, Version: "test", Getenv: func(string) string { return "" }}, u)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if window, _ := r.windowOf("probe-line-invalid"); window != "install" {
+		t.Errorf("probe-line-invalid in window %q, want install", window)
+	}
+	if diff := cmp.Diff([]string{"not-judged", "not-run", "not-run"}, r.results()); diff != "" {
+		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+	if end := r.Windows[0].End; end == nil || !end.Equal(t0.Add(10*time.Second)) {
+		t.Errorf("the steady window ended at %v, want its whole length, %v", end, t0.Add(10*time.Second))
+	}
+	if n := w.calls.count("deploy"); n != 0 {
+		t.Errorf("deploy was called %d times, want 0", n)
 	}
 }
