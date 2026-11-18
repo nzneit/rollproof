@@ -83,6 +83,8 @@ Each fills a silence of the design, settles two of its sentences that disagree (
 
 16. **Task 9 was added on 2026-11-18, after Task 8's Step 7 stopped.** That step met timeouts long after the probe's first seconds, and section 14, point 24, records their cause and the maintainer's choice: each node forgets an attempt to connect that had no answer within 5 s. Task 8's commit stays as it is. Task 8 is complete when its Steps 6 and 7 pass again, which Task 9's last step runs. Why: the cause lies in the cluster, which no task of this plan touched, and the change to the fixtures and the README that Task 8 made does not depend on it. Cost if wrong: the README's sentence about the fixtures is ahead of the code for the commits between Task 8 and Task 9, on a branch that nobody else has.
 
+17. **Task 10 was added on 2026-11-18, after the final review.** The review found that the install's counts missed the probe's first checks, because the first observation's check began before the window it opens; the maintainer chose to count such checks in the install window (section 14, point 25). Only `verdict` changes. Why: the counts are what the report says the probe's start met, and the log held one more failure than `result.json` in every run. Cost if wrong: the install's counts hold checks from before its window; no verdict reads them.
+
 ## Open points this plan names and does not settle
 
 Section 14, point 22. Both rules stand as built: a signal that comes while the tool is stopping the probe makes the run not verified unless a window had already failed, also when the last window was the install window; and a probe that exits before its first observation is `probe-exited` at once.
@@ -118,6 +120,7 @@ All paths are under `projects/rollproof/`.
 | `fixtures/service/main.go`, `fixtures/chart/` | The switch `FAIL_WORK` and the value `failWork` | 8 |
 | `e2e/harness_test.go`, `e2e/fixtures_test.go`, `README.md` | The install record read and asserted; the new row; one sentence of the README | 8 |
 | `internal/cluster/cluster.go` | Each node keeps an attempt to connect that had no answer for 5 s | 9 |
+| `internal/verdict/observe.go`, `decide.go` | A check that began before the install window is counted in it | 10 |
 
 ## The tasks
 
@@ -128,6 +131,7 @@ Read this file first, then the file of the task at hand. Tasks are done in order
 | `01-settle-window-and-probe.md` | 1 to 5 | `watch`, `verdict`, the probe's pod, `run`, the built-in probe |
 | `02-record-report-and-fixtures.md` | 6 to 8 | The install record, the console text, the fixtures |
 | `03-node-settings.md` | 9 | The nodes' setting for an attempt to connect that had no answer, and Task 8's cluster runs again (ruling 16) |
+| `04-install-counts.md` | 10 | The install window counts the checks that began before it (ruling 17) |
 
 ---
 
