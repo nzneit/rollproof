@@ -169,6 +169,35 @@ func (w *Watcher) InstallReady(ctx context.Context, began time.Time, exited <-ch
 	}
 }
 
+// InstallSettled returns when the settling has ended, as InstallSettling says. When ctx ends
+// first, it returns what it has: Settled zero, Ended that moment, and no condition. Call it once,
+// after InstallReady has returned with no error.
+func (w *Watcher) InstallSettled(ctx context.Context, first time.Time) Settling {
+	tick := time.NewTicker(pollEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			w.mu.Lock()
+			now := w.o.Now()
+			s, ended := w.tr.InstallSettling(first, now)
+			w.mu.Unlock()
+			if !ended {
+				s.Ended = now
+			}
+			return s
+		case <-tick.C:
+		case <-w.wake:
+		}
+		w.mu.Lock()
+		s, ended := w.tr.InstallSettling(first, w.o.Now())
+		w.mu.Unlock()
+		if ended {
+			return s
+		}
+	}
+}
+
 // Transition follows one transition from began and returns when its window has ended. exited is
 // closed when the transition's command has exited. When ctx ends first it returns what it has,
 // with Ended set to that moment. Finished is then zero, whatever the transition did before, so

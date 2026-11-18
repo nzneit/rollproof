@@ -288,7 +288,7 @@ func TestInstallState(t *testing.T) {
 		text        string
 	}{
 		{name: "ready", objs: installed, exited: 3, now: 3, ready: true,
-			install: Install{Workloads: []Count{{Workload: orders, Digests: []string{"sha256:old"}}}}},
+			install: Install{Ready: at(3), Workloads: []Count{{Workload: orders, Digests: []string{"sha256:old"}}}}},
 		{name: "the command still runs", objs: installed, exited: running, now: 3},
 		{name: "nothing watched, one second before the settle time has passed",
 			selector: labels.SelectorFromSet(labels.Set{"app": "order"}), objs: installed, exited: 2, now: 16},
@@ -1143,7 +1143,7 @@ func TestInstallStateFromItsRecords(t *testing.T) {
 			events: append(installed, set(2, stoppingA1)), exited: 3, now: 3},
 		{name: "ready once that pod is gone, with the digests of the pods left",
 			events: append(installed, set(2, stoppingA1), gone(4, stoppingA1)), exited: 3, now: 4, ready: true,
-			install: Install{Workloads: []Count{{Workload: orders, Digests: []string{"sha256:two"}}}}},
+			install: Install{Ready: at(4), Workloads: []Count{{Workload: orders, Digests: []string{"sha256:two"}}}}},
 		{name: "the timeout names a pod that is stopping",
 			events: append(installed, set(2, stoppingA1)), exited: 3, now: 300,
 			code: verdict.InstallFailed,
