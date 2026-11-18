@@ -335,8 +335,9 @@ func TestRunHTTPResolvesOnce(t *testing.T) {
 		return []string{"127.0.0.1"}, nil
 	}
 	obs := runFor(t, testOptions("https://probe-target.test:"+port+"/"), time.Second).observations(t)
-	if n := calls.Load(); n != 1 {
-		t.Errorf("the host was looked up %d times, want 1", n)
+	// Each request looks the host up until one lookup has succeeded. The stub answers at once and requests are 20 ms apart, so a second lookup comes only from a request that began before the first had its answer.
+	if n := calls.Load(); n < 1 || n > 2 {
+		t.Errorf("the host was looked up %d times, want 1 or 2", n)
 	}
 	if checks(obs) < 40 {
 		t.Errorf("%d checks, want about 50", checks(obs))
@@ -352,18 +353,6 @@ func TestRunHTTPResolvesOnce(t *testing.T) {
 		if n != "probe-target.test" {
 			t.Errorf("TLS server name %q, want probe-target.test", n)
 		}
-	}
-}
-
-func TestRunHTTPUnresolvableHost(t *testing.T) {
-	defer func(saved func(context.Context, string) ([]string, error)) { lookupHost = saved }(lookupHost)
-	lookupHost = func(context.Context, string) ([]string, error) { return nil, errors.New("no such host") }
-	out := &capture{}
-	if err := RunHTTP(t.Context(), testOptions("http://nowhere.test/"), out); err == nil {
-		t.Error("RunHTTP returned nil for a host that does not resolve")
-	}
-	if len(out.got) != 0 {
-		t.Errorf("RunHTTP wrote %d lines", len(out.got))
 	}
 }
 
@@ -385,160 +374,6 @@ func TestRunHTTPDrainsOnCancel(t *testing.T) {
 	}
 	if n := checks(obs); int64(n) != started.Load() {
 		t.Errorf("the lines stand for %d checks, %d requests started", n, started.Load())
-	}
-}
-
-func TestRunHTTPWarmupBeginsWhenTheTargetAnswers(t *testing.T) {
-	var requests atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if requests.Add(1) <= 5 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-	}))
-	defer srv.Close()
-	o := testOptions(srv.URL)
-	o.Warmup = 100 * time.Millisecond
-	out := runFor(t, o, 500*time.Millisecond)
-	// The five failures of the warm-up must not be among the lines: every line written is a pass.
-	obs := out.observations(t)
-	if len(obs) == 0 {
-		t.Fatal("no observation after the warm-up")
-	}
-	for i, ob := range obs {
-		if !ob.OK {
-			t.Fatalf("line %d is a failure (%s); the warm-up's failures must not be written", i, ob.Class)
-		}
-	}
-	if n := requests.Load(); n < 6 {
-		t.Errorf("the server saw %d requests, want the warm-up's five failures and the checks after them", n)
-	}
-}
-
-func TestRunHTTPWarmupWritesNothingWhenTheTargetNeverAnswers(t *testing.T) {
-	seen := make(chan struct{}, 64)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		seen <- struct{}{}
-	}))
-	defer srv.Close()
-	o := testOptions(srv.URL)
-	o.Warmup = 100 * time.Millisecond
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	out := &capture{}
-	done := make(chan error, 1)
-	go func() { done <- RunHTTP(ctx, o, out) }()
-	for i := 0; i < 5; i++ {
-		select {
-		case <-seen:
-		case <-time.After(5 * time.Second):
-			t.Fatal("the warm-up sent fewer than five checks")
-		}
-	}
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("RunHTTP: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("RunHTTP did not return within 5 s of the cancel")
-	}
-	if len(out.got) != 0 {
-		t.Errorf("%d lines were written during the warm-up, want none", len(out.got))
-	}
-}
-
-func TestRunHTTPWarmupRestartsItsCountAfterAFailure(t *testing.T) {
-	var requests, failedAt atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if requests.Add(1) == 3 {
-			failedAt.Store(time.Now().UnixNano())
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-	}))
-	defer srv.Close()
-	o := testOptions(srv.URL)
-	o.Rate = 20
-	o.Warmup = 120 * time.Millisecond
-	obs := runFor(t, o, 600*time.Millisecond).observations(t)
-	if len(obs) == 0 {
-		t.Fatal("no line")
-	}
-	if failedAt.Load() == 0 {
-		t.Fatal("the warm-up did not reach the failing check")
-	}
-	failed := time.Unix(0, failedAt.Load())
-	if delay := obs[0].T.Sub(failed); delay < o.Warmup {
-		t.Errorf("the first observation came %v after the failed check, want at least the warm-up %v",
-			delay, o.Warmup)
-	}
-}
-
-func TestRunHTTPWarmupPacesItsChecks(t *testing.T) {
-	starts := make(chan time.Time, 64)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		starts <- time.Now()
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer srv.Close()
-	o := testOptions(srv.URL)
-	o.Rate = 20
-	o.Warmup = 100 * time.Millisecond
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- RunHTTP(ctx, o, &capture{}) }()
-	var got []time.Time
-	for len(got) < 5 {
-		select {
-		case at := <-starts:
-			got = append(got, at)
-		case <-time.After(5 * time.Second):
-			t.Fatalf("the warm-up sent %d checks in 5 s, want 5", len(got))
-		}
-	}
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("RunHTTP: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("RunHTTP did not return within 5 s of the cancel")
-	}
-	interval := time.Second / time.Duration(o.Rate)
-	for i := 1; i < len(got); i++ {
-		if gap := got[i].Sub(got[i-1]); gap < interval/2 {
-			t.Errorf("checks %d and %d started %v apart, want at least %v", i-1, i, gap, interval/2)
-		}
-	}
-}
-
-func TestRunHTTPWarmupTimesFromAReturnedSuccess(t *testing.T) {
-	var requests, sentAt atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		if requests.Add(1) == 1 {
-			// The server's own delay, not the test's wait: the first answer is a success that
-			// takes longer than the warm-up.
-			time.Sleep(300 * time.Millisecond)
-			sentAt.Store(time.Now().UnixNano())
-		}
-	}))
-	defer srv.Close()
-	o := testOptions(srv.URL)
-	o.Warmup = 100 * time.Millisecond
-	obs := runFor(t, o, 800*time.Millisecond).observations(t)
-	if len(obs) == 0 {
-		t.Fatal("no observation after the warm-up")
-	}
-	if sentAt.Load() == 0 {
-		t.Fatal("the slow first answer was not sent")
-	}
-	sent := time.Unix(0, sentAt.Load())
-	if delay := obs[0].T.Sub(sent); delay < o.Warmup {
-		t.Errorf("the first observation started %v after the slow answer was sent, want at least the warm-up %v",
-			delay, o.Warmup)
 	}
 }
 
@@ -687,5 +522,125 @@ func TestRunHTTPBadURL(t *testing.T) {
 		if len(out.got) != 0 {
 			t.Errorf("%q: RunHTTP wrote %d lines", tc.url, len(out.got))
 		}
+	}
+}
+
+// replaceLookup puts f in place of lookupHost until the test ends.
+func replaceLookup(t *testing.T, f func(ctx context.Context, host string) ([]string, error)) {
+	t.Helper()
+	saved := lookupHost
+	lookupHost = f
+	t.Cleanup(func() { lookupHost = saved })
+}
+
+// The probe reports from its first request on, and its schedule starts when it starts
+// (section 6): the server's first five answers are failures, and every one of them is a line.
+func TestRunHTTPReportsFromItsFirstRequest(t *testing.T) {
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) <= 5 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	defer srv.Close()
+	began := time.Now()
+	obs := runFor(t, testOptions(srv.URL), time.Second).observations(t)
+	if n := checks(obs); int64(n) != requests.Load() {
+		t.Errorf("the lines stand for %d checks, the server saw %d: every request is reported", n, requests.Load())
+	}
+	if len(obs) < 5 {
+		t.Fatalf("%d lines, want the five failures and more", len(obs))
+	}
+	for i, o := range obs[:5] {
+		if o.OK || o.Class != "503" {
+			t.Errorf("line %d is %+v, want a failure of class 503", i, o)
+		}
+	}
+	if d := obs[0].T.Sub(began); d > 100*time.Millisecond {
+		t.Errorf("the first check began %v after the probe started, want at once", d)
+	}
+}
+
+// A host that does not resolve at first and then does (section 12): a request whose lookup fails
+// is a failed check of class other, and no request looks the name up once one lookup succeeded.
+func TestRunHTTPHostResolvesLater(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer srv.Close()
+	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	var calls atomic.Int64
+	replaceLookup(t, func(context.Context, string) ([]string, error) {
+		switch n := calls.Add(1); {
+		case n <= 2:
+			return nil, &net.DNSError{Err: "no such host", Name: "probe-target.test", IsNotFound: true}
+		case n == 3:
+			return nil, nil // no address, and no error
+		}
+		return []string{"127.0.0.1"}, nil
+	})
+	obs := runFor(t, testOptions("http://probe-target.test:"+port+"/"), time.Second).observations(t)
+	failed := 0
+	for _, o := range obs {
+		if !o.OK {
+			failed++
+			if o.Class != "other" {
+				t.Errorf("a failed lookup has the class %q, want other", o.Class)
+			}
+		}
+	}
+	if failed != 3 {
+		t.Errorf("%d checks failed, want the 3 whose lookup failed", failed)
+	}
+	if n := calls.Load(); n < 4 || n > 8 {
+		t.Errorf("the host was looked up %d times, want 4, or a few more for requests that began together; about 50 means every request looked it up", n)
+	}
+	if n := checks(obs); n < 40 {
+		t.Errorf("%d checks, want about 50", n)
+	}
+}
+
+// A name that never resolves does not end the probe: it writes a failed check for each request on
+// its schedule, and returns nil when it is stopped.
+func TestRunHTTPHostNeverResolves(t *testing.T) {
+	replaceLookup(t, func(context.Context, string) ([]string, error) {
+		return nil, &net.DNSError{Err: "no such host", Name: "nowhere.test", IsNotFound: true}
+	})
+	obs := runFor(t, testOptions("http://nowhere.test/"), time.Second).observations(t)
+	if len(obs) < 40 {
+		t.Errorf("%d lines in 1 s at rate 50, want 45 to 55", len(obs))
+	}
+	for _, o := range obs {
+		if o.OK || o.Class != "other" {
+			t.Fatalf("got %+v, want a failure of class other", o)
+		}
+	}
+}
+
+// Review Focus 3, and ruling 9: a lookup that hangs does not hold the schedule, and a request
+// whose timeout passes during its lookup is a timeout, written within that timeout.
+func TestRunHTTPLookupsThatHang(t *testing.T) {
+	var started atomic.Int64
+	replaceLookup(t, func(ctx context.Context, _ string) ([]string, error) {
+		started.Add(1)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	o := testOptions("http://slow-dns.test/")
+	o.Timeout = 300 * time.Millisecond
+	began := time.Now()
+	out := runFor(t, o, time.Second)
+	if n := started.Load(); n < 40 {
+		t.Errorf("%d lookups started in 1 s at rate 50, want 45 to 55: a lookup must not hold the schedule", n)
+	}
+	obs := out.observations(t)
+	if len(obs) == 0 {
+		t.Fatal("no line")
+	}
+	for _, ob := range obs {
+		if ob.OK || ob.Class != "timeout" {
+			t.Fatalf("got %+v, want a failure of class timeout", ob)
+		}
+	}
+	if d := obs[0].Written.Sub(began); d > o.Timeout+200*time.Millisecond {
+		t.Errorf("the first line came %v after the probe started, want within the request timeout", d)
 	}
 }

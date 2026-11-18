@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"maps"
 	"math"
@@ -20,9 +19,20 @@ import (
 	"time"
 )
 
-// lookupHost resolves the URL's host once, at the start of a run. Tests replace it.
+// lookupHost resolves the host for a request until one lookup has succeeded. Tests replace it.
 var lookupHost = func(ctx context.Context, host string) ([]string, error) {
 	return net.DefaultResolver.LookupHost(ctx, host)
+}
+
+// lookupError is a lookup that failed before the request's timeout, or that gave no address. The
+// probe's class for it is other.
+type lookupError struct{ err error }
+
+func (e lookupError) Error() string {
+	if e.err == nil {
+		return "the probe's host resolved to no address"
+	}
+	return "the probe's host cannot be resolved: " + e.err.Error()
 }
 
 // httpLine is one line of the probe's output. The fields are written in this order. N is left
@@ -56,17 +66,13 @@ type httpRun struct {
 	gathered map[int]*secondOfPasses
 }
 
-// RunHTTP sends GET requests to o.URL on an open schedule, each on a new connection, and writes
-// contract lines to out until ctx ends. Then it starts no new request, waits for those in flight,
-// writes their lines and returns nil. It returns an error only before the first request: the URL
-// does not parse or names no host, or the host cannot be resolved.
+// RunHTTP sends GET requests to o.URL on an open schedule that starts when it is called, each on
+// a new connection, and writes a line for every request, the first included, until ctx ends.
+// Each request looks the host up until one lookup has succeeded; a failed lookup is a failed
+// check of class other. The error is only for a URL that does not parse or names no host.
 //
-// When o.Warmup is above zero, RunHTTP first sends one check at a time, leaving no more than the
-// rate's interval between two of them, and writes nothing for them. The observations begin once
-// its checks have kept passing for o.Warmup, timed from when the first of them returned; a failed
-// check starts that time again. A target that never answers leaves the probe with no observation
-// at all, so the tool ends the run not verified when its wait for the first observation
-// (limits.timeout) runs out. A ctx that ends during the warm-up returns nil with nothing written.
+// When ctx ends, RunHTTP starts no new request, waits for those in flight to write their lines,
+// and returns nil.
 //
 // A write to out that fails is not reported: RunHTTP's caller has nothing to act on. A reader of
 // the log sees the silence; on a pipe, a failed write ends the process with SIGPIPE.
@@ -85,19 +91,35 @@ func RunHTTP(ctx context.Context, o HTTPOptions, out io.Writer) error {
 			port = "443"
 		}
 	}
-	addrs, err := lookupHost(ctx, u.Hostname())
-	if err != nil {
-		return fmt.Errorf("the probe's host cannot be resolved: %w", err)
-	}
-	if len(addrs) == 0 {
-		return errors.New("the probe's host resolved to no address")
-	}
-	target := net.JoinHostPort(addrs[0], port)
+	// The address a lookup gave, empty until one has. Each request looks the host up until a
+	// lookup has succeeded; the first address any of them gets is kept, and every later dial
+	// uses it.
+	var addrMu sync.Mutex
+	var addr string
 	dialer := &net.Dialer{Timeout: o.Timeout}
 	tr := &http.Transport{
-		// The address the transport asks for is the URL's host; the probe dials the one it
-		// resolved at the start.
+		// The address the transport asks for is the URL's host; the probe dials the address a
+		// lookup gave, and the lookup is inside the request's own timeout.
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			addrMu.Lock()
+			target := addr
+			addrMu.Unlock()
+			if target == "" {
+				addrs, err := lookupHost(ctx, u.Hostname())
+				if err != nil && ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				if err != nil || len(addrs) == 0 {
+					return nil, lookupError{err: err}
+				}
+				target = net.JoinHostPort(addrs[0], port)
+				addrMu.Lock()
+				if addr == "" {
+					addr = target
+				}
+				target = addr
+				addrMu.Unlock()
+			}
 			return dialer.DialContext(ctx, network, target)
 		},
 		Proxy:              nil,
@@ -115,10 +137,6 @@ func RunHTTP(ctx context.Context, o HTTPOptions, out io.Writer) error {
 		},
 		out:      out,
 		gathered: map[int]*secondOfPasses{},
-	}
-
-	if o.Warmup > 0 && !r.warmUp(ctx) {
-		return nil
 	}
 
 	var wg sync.WaitGroup
@@ -162,47 +180,6 @@ func RunHTTP(ctx context.Context, o HTTPOptions, out io.Writer) error {
 			}()
 			i++
 			timer.Reset(time.Until(r.start.Add(time.Duration(i) * time.Second / time.Duration(o.Rate))))
-		}
-	}
-}
-
-// warmUp sends one request at a time until the checks have passed without a failure for
-// o.Warmup, and reports whether that happened. The time is measured from when the first check of a
-// run of passes returned, so that one slow success does not stand for the whole warm-up. It writes
-// nothing: a failed check only starts the time again. No more than the rate's interval is left
-// between two checks.
-func (r *httpRun) warmUp(ctx context.Context) bool {
-	interval := time.Second / time.Duration(r.o.Rate)
-	var since time.Time // when the first successful check of the run returned; zero before that
-	for {
-		if ctx.Err() != nil {
-			return false
-		}
-		began := time.Now()
-		rctx, cancel := context.WithTimeout(ctx, r.o.Timeout)
-		class, err := r.get(rctx)
-		returned := time.Now()
-		cancel()
-		if err != nil || class != "" {
-			since = time.Time{}
-		} else {
-			if since.IsZero() {
-				since = returned
-			}
-			if returned.Sub(since) >= r.o.Warmup {
-				return true
-			}
-		}
-		wait := interval - returned.Sub(began)
-		if wait <= 0 {
-			continue
-		}
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return false
-		case <-timer.C:
 		}
 	}
 }
@@ -313,8 +290,11 @@ func millis(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
 // classify names how a request failed. It comes from the file RESEARCH/2026-11-12/L5/src/
 // loadgen/main.go of the host repository, the load generator of the experiment L5.
 func classify(err error) string {
+	var le lookupError
 	var ne net.Error
 	switch {
+	case errors.As(err, &le):
+		return "other"
 	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
 		return "timeout"
 	case errors.Is(err, syscall.ECONNREFUSED):
