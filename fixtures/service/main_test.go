@@ -78,6 +78,18 @@ func TestWorkAndReadyz(t *testing.T) {
 	}
 }
 
+// With FAIL_WORK the handler fails every request while the pod still reports ready.
+func TestWorkFailsWhenAsked(t *testing.T) {
+	ready, _, done := launch(t, map[string]string{"ADDR": "127.0.0.1:0", "SHUTDOWN": "drain-now", "FAIL_WORK": "true"})
+	addr := listening(t, ready, done)
+	if code, _, err := get(addr, "/work?ms=20"); err != nil || code != 500 {
+		t.Errorf("/work?ms=20: %d, %v; want 500", code, err)
+	}
+	if code, _, err := get(addr, "/readyz"); err != nil || code != 200 {
+		t.Errorf("/readyz: %d, %v; want 200", code, err)
+	}
+}
+
 func TestStartDelay(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

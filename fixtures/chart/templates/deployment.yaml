@@ -52,6 +52,8 @@ spec:
               value: {{ .Values.serveAfterTerm | quote }}
             - name: DRAIN_DEADLINE
               value: {{ .Values.drainDeadline | quote }}
+            - name: FAIL_WORK
+              value: {{ .Values.failWork | quote }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
