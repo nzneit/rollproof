@@ -1936,10 +1936,10 @@ results: /tmp/rollproof-results-7f3a
     its settings and their defaults, the names of its headers or of its `env` entries in place of
     their values, the counts of its `command` and `args`, how many lines it wrote and how many of
     them were JSON objects with no `ok` field, whether it ran without a certificate check, and
-    whether it stopped when asked. When the tool did not ask it to stop, because a signal stopped
-    the run, or did not finish asking, because the tool failed while it stopped the probe,
-    `stopped_when_asked` is null, the counts are those of the lines read until then, and a note
-    says which (section 14, point 27);
+    whether it stopped when asked. When the tool did not ask it to stop, or stopped waiting for
+    it, because a signal stopped the run, or did not finish asking, because the tool failed while
+    it stopped the probe, `stopped_when_asked` is null, the counts are those of the lines read
+    until then, and a note says which (section 14, point 27);
   - for the Helm driver, for each release: the chart's name, the version that Helm resolved,
     where the chart came from, and the names of the values files and the top-level keys of the
     inline maps that the tool passed, and never a value. Helm keeps the merged values and not
@@ -2696,8 +2696,9 @@ which step proves which point.
     - **The probe's record after a signal.** The tool does not ask the probe to stop after a
       signal, and `result.json` said that the probe had written no line and had stopped when
       asked. It now gives the lines read until then, `stopped_when_asked` null, and a note. The
-      same holds after a failure of the tool while it stopped the probe, which the report had
-      blamed on the probe (section 10). No release carries schema 1 yet, so the field's change
+      same holds when a signal comes while the tool waits for the probe to stop, and after a
+      failure of the tool while it stopped the probe, which the report had blamed on the probe
+      (section 10). No release carries schema 1 yet, so the field's change
       breaks no wrapper. What lost: **`false` with a note**, which a reader takes for a probe
       that ignored SIGTERM; and **counts of zero, documented**.
     - **Commands after a failure of the tool.** The tool stopped the probe, and only then a
