@@ -17,15 +17,18 @@ import (
 
 // facts is everything the run has learned, in the units' own types, at the
 // moment it writes a record. probeStopped says that the probe was asked to
-// stop and that probe holds what its Stop returned.
+// stop and that probe holds what its Stop returned; probeBegun says that the
+// tool started the probe. settling is the install as watch reported it.
 type facts struct {
 	cfg          *config.Config
 	decision     verdict.Decision
 	transitions  []transitionFacts
 	install      watch.Install
+	settling     watch.Settling
 	releases     []deploy.Release
 	probe        probe.Facts
 	probeStopped bool
+	probeBegun   bool
 	target       probe.Target
 	images       map[string]config.ImageRef
 	removed      []string
@@ -63,6 +66,7 @@ func record(f facts) report.Run {
 		}
 		r.Windows = append(r.Windows, windowRecord(w))
 	}
+	r.Install = installRecord(f)
 	r.Warnings = append(r.Warnings, f.warnings...)
 	for _, c := range f.decision.Ignored {
 		r.Warnings = append(r.Warnings, "after the last window: "+c.Error())
@@ -90,21 +94,36 @@ func record(f facts) report.Run {
 		}
 		r.Settings = append(r.Settings, x)
 	}
-	if h := f.cfg.Probe.HTTP; h != nil && started(f.decision) {
+	if h := f.cfg.Probe.HTTP; h != nil && f.probeBegun {
 		r.Probes = []report.Probe{probeRecord(f, h, probeSettings)}
 	}
 	r.Images = imageRecords(f)
 	return r
 }
 
-// started reports whether any window began: the probe started.
-func started(d verdict.Decision) bool {
-	for _, w := range d.Windows {
-		if !w.Start.IsZero() {
-			return true
-		}
+// installRecord returns the install's record: nil before the install was ready, its counts from
+// the install window once that began, and its settling when it came.
+func installRecord(f facts) *report.Install {
+	if f.install.Ready.IsZero() {
+		return nil
 	}
-	return false
+	in := report.Install{Ready: f.install.Ready, Settled: timePtr(f.settling.Settled),
+		SettleRestartedBy: f.settling.Restarts}
+	for _, w := range f.decision.Windows {
+		if w.Name != verdict.Install || w.Start.IsZero() {
+			continue
+		}
+		in.FirstObservation, in.Checks, in.Failed = timePtr(w.Start), w.Checks, w.Failed
+		in.LastFailure, in.SlowestMs, in.LagMs = timePtr(w.LastFailure), w.SlowestMs, w.LagMs
+		if w.ByClass != nil {
+			in.FailedByClass = make(map[string]int, len(w.ByClass))
+			for k, v := range w.ByClass {
+				in.FailedByClass[k] = v
+			}
+		}
+		break
+	}
+	return &in
 }
 
 func reasonRecord(reason verdict.Reason, trs []transitionFacts) report.Reason {

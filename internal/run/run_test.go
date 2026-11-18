@@ -43,9 +43,18 @@ type resultFile struct {
 		End    *time.Time `json:"end"`
 		Checks int        `json:"checks"`
 	} `json:"windows"`
+	Install *struct {
+		Ready            time.Time  `json:"ready"`
+		FirstObservation *time.Time `json:"first_observation"`
+		Settled          *time.Time `json:"settled"`
+		Checks           int        `json:"checks"`
+		Failed           int        `json:"failed"`
+		LastFailure      *time.Time `json:"last_failure"`
+	} `json:"install"`
 	Warnings []string `json:"warnings"`
 	Probes   []struct {
 		Target string `json:"target"`
+		Lines  int    `json:"lines"`
 	} `json:"probes"`
 	Transitions []struct {
 		Name    string `json:"name"`
@@ -1314,6 +1323,65 @@ func TestTheReaderStartsWithTheProbe(t *testing.T) {
 	if checks != 14000 { // 200 a second for the 70 s of the three windows; the 5,000 early ones fall in the install window
 		t.Errorf("the windows hold %d checks, want 14000: none may be lost", checks)
 	}
+	if in := w.result().Install; in == nil || in.Checks != 8000 {
+		t.Errorf("install %+v, want 8000 checks: the 5000 early ones and the 3000 of the install window", in)
+	}
+}
+
+// result.json's install at each ending of a run (section 12).
+func TestTheInstallRecordAtEachEnding(t *testing.T) {
+	first, ready := t0.Add(-15*time.Second), t0.Add(-21*time.Second)
+	t.Run("before the install was ready", func(t *testing.T) {
+		w := newWorld(t)
+		w.watcher.installErr = verdict.Condition{Code: verdict.InstallFailed, Text: "the install was not ready within limits.timeout"}
+		w.run(context.Background())
+		if r := w.result(); r.Install != nil || len(r.Probes) != 0 {
+			t.Errorf("install %+v and %d probes; want neither", r.Install, len(r.Probes))
+		}
+	})
+	t.Run("before the probe's first observation", func(t *testing.T) {
+		w := newWorld(t)
+		w.probe.startErr = verdict.Condition{Code: verdict.ProbeNotStarted, Text: "no observation within limits.timeout"}
+		w.probe.facts = probe.Facts{Lines: 12, JSONTextLines: 12, StoppedWhenAsked: true}
+		w.run(context.Background())
+		r := w.result()
+		if r.Install == nil || !r.Install.Ready.Equal(ready) || r.Install.FirstObservation != nil || r.Install.Settled != nil || r.Install.Checks != 0 {
+			t.Errorf("install %+v; want ready at %v, no first observation, no settling and no counts", r.Install, ready)
+		}
+		if len(r.Probes) != 1 || r.Probes[0].Lines != 12 {
+			t.Errorf("probes %+v; want the probe that was started, with its 12 lines", r.Probes)
+		}
+	})
+	t.Run("before the install had settled", func(t *testing.T) {
+		w := newWorld(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		w.hooks["install-settled"] = func() {
+			w.clock.Advance(4 * time.Second)
+			cancel()
+		}
+		w.run(ctx)
+		in := w.result().Install
+		if in == nil || in.FirstObservation == nil || !in.FirstObservation.Equal(first) || in.Settled != nil || in.Checks != 800 {
+			t.Errorf("install %+v; want the first observation at %v, no settling, and the 800 checks of 4 s", in, first)
+		}
+	})
+	t.Run("after the install had settled", func(t *testing.T) {
+		w := newWorld(t)
+		w.probe.events = append(w.probe.events, failureAt(-14900*time.Millisecond, -14900*time.Millisecond))
+		if code := w.run(context.Background()); code != 0 {
+			t.Fatalf("exit %d, want 0: a failed check in the install window decides nothing", code)
+		}
+		r := w.result()
+		in := r.Install
+		if in == nil || in.Settled == nil || !in.Settled.Equal(t0) || in.Checks != 3001 || in.Failed != 1 ||
+			in.LastFailure == nil || !in.LastFailure.Equal(t0.Add(-14900*time.Millisecond)) {
+			t.Errorf("install %+v; want settled at %v, 3001 checks, 1 failed, the last 14.9 s before", in, t0)
+		}
+		if r.Windows[0].Start == nil || !r.Windows[0].Start.Equal(*in.Settled) {
+			t.Errorf("the steady window starts at %v, want the moment the install had settled", r.Windows[0].Start)
+		}
+	})
 }
 
 // Rule 9: a fault of the probe before its first observation makes the run not verified, also when

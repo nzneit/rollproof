@@ -454,7 +454,7 @@ func newWorld(t *testing.T) *world {
 		{Role: "previous", Chart: "orders", Version: "0.1.0", Source: "./chart"},
 		{Role: "candidate", Chart: "orders", Version: "0.1.0", Source: "./chart", InlineKeys: []string{"image"}}}}
 	w.watcher = &fakeWatcher{w: w,
-		install: watch.Install{Workloads: []watch.Count{{Workload: orders, Created: 2, Probed: "yes",
+		install: watch.Install{Ready: t0.Add(-21 * time.Second), Workloads: []watch.Count{{Workload: orders, Created: 2, Probed: "yes",
 			Digests: []string{"sha256:aaa"}}}},
 		transitions: map[verdict.WindowName]watch.Transition{verdict.Deploy: replaced, verdict.Rollback: replaced}}
 	w.probe = &fakeProbe{w: w, events: passes(-15, 70), facts: probe.Facts{Lines: 86, StoppedWhenAsked: true}}

@@ -106,6 +106,9 @@ func passRun() Run {
 			{Name: "deploy", Start: at(10_000), End: at(43_400), Result: "pass", Checks: 6680, SlowestMs: 212, LagMs: 38},
 			{Name: "rollback", Start: at(43_400), End: at(77_300), Result: "pass", Checks: 6780, SlowestMs: 187, LagMs: 35},
 		},
+		Install: &Install{Ready: *at(-21_000), FirstObservation: at(-15_000), Settled: at(0),
+			Checks: 3000, Failed: 6, FailedByClass: map[string]int{"refused": 5, "timeout": 1},
+			LastFailure: at(-14_900), SlowestMs: 44, LagMs: 9},
 		Transitions: []Transition{
 			{Name: "deploy", Command: "ok", Workloads: []Workload{ordersReplaced(5300)}},
 			{Name: "rollback", Command: "ok", Workloads: []Workload{ordersReplaced(5200)}},
@@ -310,12 +313,13 @@ func nulls(v any, key string, found *[]string) {
 }
 
 func TestNoNulls(t *testing.T) {
-	timesAndCluster := []string{"cluster", "end", "first_failure", "quickest_stop_ms", "start"}
+	timesAndCluster := []string{"cluster", "end", "first_failure", "first_observation", "install", "last_failure", "quickest_stop_ms", "settled", "start"}
 	for _, r := range []Run{
 		{},
 		{
 			Reasons:     []Reason{{Code: "internal-error"}},
 			Windows:     []Window{{Name: "steady"}},
+			Install:     &Install{},
 			Transitions: []Transition{{Name: "deploy", Workloads: []Workload{{Workload: "deployment/orders"}}}},
 			Probes:      []Probe{{Kind: "http"}},
 			Releases:    []Release{{Role: "candidate"}},
@@ -343,6 +347,46 @@ func TestNoNulls(t *testing.T) {
 		if len(r.Windows) > 0 && !strings.Contains(string(b), `"failed_by_class": {}`) {
 			t.Errorf("failed_by_class is not {} in\n%s", b)
 		}
+	}
+}
+
+// The install record at each ending of a run (section 12): no record before the install was
+// ready; no time of the first observation and no counts before it; no time of settling before it.
+func TestInstallRecordAtEachEnding(t *testing.T) {
+	counts := Install{Ready: *at(-21_000), FirstObservation: at(-15_000), Checks: 1200, Failed: 6,
+		FailedByClass: map[string]int{"refused": 5, "timeout": 1}, LastFailure: at(-14_900), SlowestMs: 44, LagMs: 9}
+	for _, c := range []struct {
+		name    string
+		install *Install
+		want    string // the install's value in result.json, with no white space
+	}{
+		{"before the install was ready", nil, `null`},
+		{"before the probe's first observation", &Install{Ready: *at(-21_000)},
+			`{"ready":"2026-11-13T09:59:31.000Z","first_observation":null,"settled":null,"settle_restarted_by":[],` +
+				`"checks":0,"failed":0,"failed_by_class":{},"last_failure":null,"slowest_ms":0,"lag_ms":0}`},
+		{"before the install had settled", &counts,
+			`{"ready":"2026-11-13T09:59:31.000Z","first_observation":"2026-11-13T09:59:37.000Z","settled":null,"settle_restarted_by":[],` +
+				`"checks":1200,"failed":6,"failed_by_class":{"refused":5,"timeout":1},"last_failure":"2026-11-13T09:59:37.100Z","slowest_ms":44,"lag_ms":9}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b, err := encode(Run{Verdict: "not-verified", Install: c.install})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var file struct {
+				Install json.RawMessage `json:"install"`
+			}
+			if err := json.Unmarshal(b, &file); err != nil {
+				t.Fatal(err)
+			}
+			var got bytes.Buffer
+			if err := json.Compact(&got, file.Install); err != nil {
+				t.Fatal(err)
+			}
+			if got.String() != c.want {
+				t.Errorf("install is\n%s\nwant\n%s", got.String(), c.want)
+			}
+		})
 	}
 }
 

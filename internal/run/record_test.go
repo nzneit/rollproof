@@ -95,6 +95,7 @@ func sampleFacts(t *testing.T) facts {
 		},
 		probe:        probe.Facts{Lines: 78, JSONTextLines: 2, StoppedWhenAsked: true, ClockDifference: 300 * time.Millisecond},
 		probeStopped: true,
+		probeBegun:   true,
 		target:       probe.Target{Service: &types.NamespacedName{Namespace: "orders", Name: "orders"}},
 		images: map[string]config.ImageRef{
 			"previous":  {Repository: "rollproof.test/previous", Digest: "sha256:aaa"},
@@ -333,14 +334,70 @@ func TestRecordProbe(t *testing.T) {
 	if !record(f).Probes[0].CertificateChecked {
 		t.Error("certificate_checked is false for an http URL")
 	}
+}
 
-	f.decision.Windows = []verdict.WindowResult{
-		{Name: verdict.Steady, Result: verdict.NotRun},
-		{Name: verdict.Deploy, Result: verdict.NotRun},
-		{Name: verdict.Rollback, Result: verdict.NotRun},
+// settled gives f an install that was ready 21 s before t0, a first observation 15 s before t0,
+// and an install window that ended at t0 with the counts of section 10's example.
+func settled(f facts) facts {
+	f.install.Ready = ms(-21000)
+	f.settling = watch.Settling{First: ms(-15000), Settled: ms(0), Ended: ms(0)}
+	f.decision.Windows = append([]verdict.WindowResult{{Name: verdict.Install, Start: ms(-15000), End: ms(0),
+		Result: verdict.ResultPass, Checks: 3000, Failed: 6, ByClass: map[string]int{"refused": 5, "timeout": 1},
+		FirstFailure: ms(-14990), LastFailure: ms(-14900), SlowestMs: 44, LagMs: 9}}, f.decision.Windows...)
+	return f
+}
+
+func TestRecordInstall(t *testing.T) {
+	whole := report.Install{Ready: ms(-21000), FirstObservation: ptr(ms(-15000)), Settled: ptr(ms(0)),
+		Checks: 3000, Failed: 6, FailedByClass: map[string]int{"refused": 5, "timeout": 1},
+		LastFailure: ptr(ms(-14900)), SlowestMs: 44, LagMs: 9}
+	t.Run("a run that reached its steady window", func(t *testing.T) {
+		r := record(settled(sampleFacts(t)))
+		if diff := cmp.Diff(&whole, r.Install, cmpopts.EquateEmpty()); diff != "" {
+			t.Errorf("install (-want +got):\n%s", diff)
+		}
+		if len(r.Windows) != 3 || r.Windows[0].Name != "steady" {
+			t.Errorf("windows %+v; the install window is never among them", r.Windows)
+		}
+	})
+	t.Run("a run that ended before the install had settled", func(t *testing.T) {
+		f := settled(sampleFacts(t))
+		f.settling = watch.Settling{First: ms(-15000), Ended: ms(-9000),
+			Restarts: []string{"no workload was watched 8.0 s after the install was ready"}}
+		want := whole
+		want.Settled, want.SettleRestartedBy = nil, f.settling.Restarts
+		if diff := cmp.Diff(&want, record(f).Install, cmpopts.EquateEmpty()); diff != "" {
+			t.Errorf("install (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("a run that ended before the probe's first observation", func(t *testing.T) {
+		f := sampleFacts(t)
+		f.install.Ready = ms(-21000)
+		f.decision = verdict.Decision{Verdict: verdict.NotVerified}
+		if diff := cmp.Diff(&report.Install{Ready: ms(-21000)}, record(f).Install, cmpopts.EquateEmpty()); diff != "" {
+			t.Errorf("install (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("a run that ended before the install was ready", func(t *testing.T) {
+		f := sampleFacts(t)
+		f.decision = verdict.Decision{Verdict: verdict.NotVerified}
+		if got := record(f).Install; got != nil {
+			t.Errorf("install = %+v, want none", got)
+		}
+	})
+}
+
+// Ruling 3: the probe is in the record from the moment the tool starts it, whether or not an
+// observation came.
+func TestRecordProbeOnceTheToolStartedIt(t *testing.T) {
+	f := sampleFacts(t)
+	f.decision = verdict.Decision{Verdict: verdict.NotVerified}
+	if n := len(record(f).Probes); n != 1 {
+		t.Errorf("%d probes in the record of a run whose probe was started, want 1", n)
 	}
-	if got := record(f).Probes; len(got) != 0 {
-		t.Errorf("probes %+v, want none when the steady window has no start", got)
+	f.probeBegun = false
+	if n := len(record(f).Probes); n != 0 {
+		t.Errorf("%d probes in the record of a run that never started its probe, want 0", n)
 	}
 }
 
