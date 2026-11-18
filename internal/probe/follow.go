@@ -68,7 +68,8 @@ func newFollower(open logSource, running func(ctx context.Context) bool, raw io.
 }
 
 // stopAsked tells the follower that Stop was asked: from then on a last
-// piece with no line end is kept in raw and not read as a line.
+// piece with no line end is kept in raw and not read as a line, and a stream
+// that ends is the end of the log once the container has ended (see run).
 func (f *follower) stopAsked() { f.asked.Store(true) }
 
 // counts gives how many lines were read, and how many of them were JSON
@@ -77,19 +78,28 @@ func (f *follower) counts() (lines, jsonText int) {
 	return int(f.lines.Load()), int(f.jsonText.Load())
 }
 
-// run follows the log until it has ended for good or ctx ends.
+// run follows the log until it has ended for good or ctx ends. It returns the moment the last
+// stream ended, read with now when that stream returned: never later because of a wait for the
+// pod's status. It is zero when no stream opened.
 //
 // It opens the log from its start until a line has been read, and after that from the second of
 // the last line read; a failed opening is tried again after pollEvery while the container runs.
-// A stream that ends while the container runs is opened again at once. A last piece with no line
-// end that came with that end is dropped, because the next stream gives the whole line; when the
-// log has ended for good, the piece is a line before stopAsked and is only kept in raw after it.
-// Where run cannot tell that it read the log to its end, it emits the gap: when a stream ended
-// while the container ran, with io.EOF or with an error, and no stream opened before the container
-// ended or the context did; when a stream ended with an error other than io.EOF after the container
-// had ended; and when a stream opened again ended, with the container ended, before as many lines
-// of the last timestamp as were read had come back.
-func (f *follower) run(ctx context.Context) {
+// Before stopAsked, a stream that ends while the container runs is opened again at once, and a
+// last piece with no line end that came with that end is dropped, because the next stream gives
+// the whole line. After stopAsked, such a stream is not opened again: run waits until the
+// container has ended (waitEnded), and the stream's end is then the end of the log, because a
+// stream ends only after the container has ended and the pod's status says so a moment later
+// (section 6). When the log has ended for good, the piece is a line before stopAsked and is only
+// kept in raw after it.
+//
+// Where run cannot tell that it read the log to its end, it emits the gap (section 6): when a
+// stream ended while the container ran before stopAsked, with io.EOF or with an error, and no
+// stream opened before the container ended or the context did; after stopAsked, when the context
+// ended while a stream was open (the stop's bound ran out, or a signal ended it), or before the
+// container had ended after a stream ended; when a stream ended with an error other than io.EOF
+// and the container had ended; and when a stream opened again ended, with the container ended,
+// before as many lines of the last timestamp as were read had come back.
+func (f *follower) run(ctx context.Context) (ended time.Time) {
 	reopen := false // a stream ended while the container ran, and none has opened since
 	for {
 		var since *time.Time
@@ -104,47 +114,70 @@ func (f *follower) run(ctx context.Context) {
 				if reopen {
 					f.gap(time.Time{})
 				}
-				return
+				return ended
 			case !f.running(ctx):
 				if reopen {
 					f.gap(time.Time{})
 				}
-				return
+				return ended
 			case !pause(ctx, pollEvery):
 				if reopen {
 					f.gap(time.Time{})
 				}
-				return
+				return ended
 			}
 			continue
 		}
 		reopen = false
 		s := &stream{skipping: since != nil}
 		piece, err := f.follow(ctx, rc, s)
+		ended = f.now()
 		switch {
 		case ctx.Err() != nil:
 			f.keep(s, piece)
-			return
-		case f.running(ctx):
+			if f.asked.Load() {
+				f.gap(time.Time{})
+			}
+			return ended
+		case !f.running(ctx):
+			// The container had ended when the stream ended.
+		case !f.asked.Load():
 			// A stream that ended while the container runs, with io.EOF or with an error, may
 			// have left lines unread: a reopen is owed until one opens.
 			reopen = true
-		case !errors.Is(err, io.EOF):
+			continue
+		case !f.waitEnded(ctx):
 			f.keep(s, piece)
 			f.gap(time.Time{})
-			return
-		default:
-			if piece != "" && !f.asked.Load() {
-				f.take(s, piece, piece+"\n")
-			} else {
-				f.keep(s, piece)
-			}
-			if s.skipping && s.skipped < f.atLast {
-				f.gap(time.Time{})
-			}
-			return
+			return ended
+		}
+		// The container has ended, so this stream's end is the end of the log.
+		if !errors.Is(err, io.EOF) {
+			f.keep(s, piece)
+			f.gap(time.Time{})
+			return ended
+		}
+		if piece != "" && !f.asked.Load() {
+			f.take(s, piece, piece+"\n")
+		} else {
+			f.keep(s, piece)
+		}
+		if s.skipping && s.skipped < f.atLast {
+			f.gap(time.Time{})
+		}
+		return ended
+	}
+}
+
+// waitEnded waits until running says the container has ended, asking every pollEvery.
+// True when it has; false when ctx ended first.
+func (f *follower) waitEnded(ctx context.Context) bool {
+	for f.running(ctx) {
+		if !pause(ctx, pollEvery) {
+			return false
 		}
 	}
+	return true
 }
 
 // follow reads one stream to its end and closes it, also when ctx ends while a read waits. It

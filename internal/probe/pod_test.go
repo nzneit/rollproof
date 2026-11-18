@@ -7,6 +7,7 @@ import (
 	"flag"
 	"io"
 	"os"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -18,7 +19,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
 
@@ -166,6 +169,19 @@ func allEvents(events <-chan Event) []Event {
 	return all
 }
 
+// beforeTheGap is events without the faults of the gap at their end. Where a test's fake log
+// stays open after Stop deleted the pod, the log was not read to its end, and the gap ends
+// Events (section 6); a test about something else reads what came before it.
+func beforeTheGap(events []Event) []Event {
+	for len(events) > 0 {
+		if f := events[len(events)-1].Fault; f == nil || f.Text != gapText {
+			break
+		}
+		events = events[:len(events)-1]
+	}
+	return events
+}
+
 // condition is the Condition that err is, or a zero one.
 func condition(err error) verdict.Condition {
 	var c verdict.Condition
@@ -221,7 +237,7 @@ func TestStartReturnsAtTheFirstObservation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := allEvents(s.pod.Events())
+	events := beforeTheGap(allEvents(s.pod.Events()))
 	if len(events) != 1 || events[0].Obs == nil || !events[0].Obs.T.Equal(logAt(-1000)) {
 		t.Errorf("events = %+v, want the one observation", events)
 	}
@@ -518,7 +534,7 @@ func TestStopReportsAnExitOnce(t *testing.T) {
 			if _, err := s.pod.Stop(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			events = append(events, allEvents(s.pod.Events())...)
+			events = beforeTheGap(append(events, allEvents(s.pod.Events())...))
 			if n := exits(events); n != 1 {
 				t.Fatalf("%d probe-exited faults, want 1: %+v", n, events)
 			}
@@ -664,7 +680,7 @@ func TestStopWhenThePodIsGone(t *testing.T) {
 	if _, err := s.pod.Stop(context.Background()); err != nil {
 		t.Errorf("Stop = %v, want no error", err)
 	}
-	events = append(events, allEvents(s.pod.Events())...)
+	events = beforeTheGap(append(events, allEvents(s.pod.Events())...))
 	if n := exits(events); n != 1 {
 		t.Fatalf("%d probe-exited faults, want 1: %+v", n, events)
 	}
@@ -697,7 +713,7 @@ func TestEventsAreReadFromTheStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	faults, observations := 0, 0
-	for _, e := range <-read {
+	for _, e := range beforeTheGap(<-read) {
 		if e.Fault != nil {
 			faults++
 		} else {
@@ -789,4 +805,211 @@ func TestAStartThatCreatedNoPodStoppedWhenAsked(t *testing.T) {
 	if f, _ := s.pod.Stop(context.Background()); !f.StoppedWhenAsked {
 		t.Errorf("facts %+v; a probe whose pod was never created stopped when asked", f)
 	}
+}
+
+// closedWithin reads events until it is closed, and fails the test when that takes longer than d.
+func closedWithin(t *testing.T, events <-chan Event, d time.Duration) {
+	t.Helper()
+	timeout := time.After(d)
+	for {
+		select {
+		case _, ok := <-events:
+			if !ok {
+				return
+			}
+		case <-timeout:
+			t.Fatalf("Events was not closed within %v", d)
+		}
+	}
+}
+
+// A Stop before Start closes Events, so that its reader ends, and ends the Pod: a later Start
+// gives an error and creates no pod.
+func TestStopBeforeStartClosesEvents(t *testing.T) {
+	s := newProbe(t, newFakeLog(logLine(logAt(400), `{"ok":true}`)), runningStatus(), 100*time.Millisecond, 5*time.Second)
+	if f, err := s.pod.Stop(context.Background()); err != nil || f != (Facts{}) {
+		t.Errorf("Stop before Start = %+v, %v; want no facts and no error", f, err)
+	}
+	closedWithin(t, s.pod.Events(), time.Second)
+	if f, err := s.pod.Stop(context.Background()); err != nil || f != (Facts{}) {
+		t.Errorf("second Stop = %+v, %v; want no facts and no error", f, err)
+	}
+	if _, err := s.pod.Start(context.Background()); err == nil {
+		t.Error("Start after Stop succeeded, want an error")
+	}
+	for _, a := range s.client.Actions() {
+		if a.GetVerb() == "create" {
+			t.Errorf("Start after Stop created %s", a.GetResource().Resource)
+		}
+	}
+}
+
+func TestEventsClosedWhenNoPodWasCreated(t *testing.T) {
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 300*time.Millisecond)
+	s.client.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("the API server refused the pod")
+	})
+	if _, err := s.pod.Start(context.Background()); err == nil {
+		t.Fatal("Start succeeded although the API server refused the pod")
+	}
+	closedWithin(t, s.pod.Events(), time.Second)
+}
+
+// A Start that panics once the follower and the watcher run leaves them to Stop, which stops
+// them as it stops a started probe, and closes Events.
+func TestStopAfterAStartThatPanicked(t *testing.T) {
+	const drain = 100 * time.Millisecond
+	s := newProbe(t, newFakeLog(logLine(logAt(400), `{"ok":true}`)), runningStatus(), drain, 5*time.Second)
+	old := afterRunStarted
+	afterRunStarted = func() { panic("a fault of Start") }
+	t.Cleanup(func() { afterRunStarted = old })
+	before := goruntime.NumGoroutine()
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Start did not panic")
+			}
+		}()
+		s.pod.Start(context.Background())
+	}()
+	began := time.Now()
+	s.pod.Stop(context.Background())
+	if took, limit := time.Since(began), drain+stopMargin+time.Second; took > limit {
+		t.Errorf("Stop took %v, want at most %v", took, limit)
+	}
+	closedWithin(t, s.pod.Events(), time.Second)
+	for deadline := time.Now().Add(2 * time.Second); goruntime.NumGoroutine() > before; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutines 2 s after Stop, %d before Start", goruntime.NumGoroutine(), before)
+		}
+	}
+}
+
+// slowClient is a client whose pod gets and deletes, once slow is set, wait until their context
+// ends. client-go's fake gives its reactors no context, and holds its lock while one runs.
+type slowClient struct {
+	kubernetes.Interface
+	slow *atomic.Bool
+}
+
+func (c slowClient) CoreV1() typedcorev1.CoreV1Interface {
+	return slowCore{c.Interface.CoreV1(), c.slow}
+}
+
+type slowCore struct {
+	typedcorev1.CoreV1Interface
+	slow *atomic.Bool
+}
+
+func (c slowCore) Pods(namespace string) typedcorev1.PodInterface {
+	return slowPods{c.CoreV1Interface.Pods(namespace), c.slow}
+}
+
+type slowPods struct {
+	typedcorev1.PodInterface
+	slow *atomic.Bool
+}
+
+func (p slowPods) Get(ctx context.Context, name string, o metav1.GetOptions) (*corev1.Pod, error) {
+	if p.slow.Load() {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return p.PodInterface.Get(ctx, name, o)
+}
+
+func (p slowPods) Delete(ctx context.Context, name string, o metav1.DeleteOptions) error {
+	if p.slow.Load() {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return p.PodInterface.Delete(ctx, name, o)
+}
+
+// An API server that hangs does not hold the stop: the last reading of the pod and the delete
+// each wait at most stopMargin, and the log is read for at most the drain and stopMargin.
+func TestStopBoundsItsAPICalls(t *testing.T) {
+	const drain = 200 * time.Millisecond
+	l := &fakeLog{streams: []io.Reader{openStream(t, logLine(logAt(400), `{"ok":true}`))}}
+	s := newProbe(t, l, runningStatus(), drain, 5*time.Second)
+	old := stopMargin
+	stopMargin = 100 * time.Millisecond
+	t.Cleanup(func() { stopMargin = old })
+	var slow atomic.Bool
+	s.pod.o.Client = slowClient{Interface: s.client, slow: &slow}
+	s.clock.Set(logAt(700))
+	if _, err := s.pod.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	slow.Store(true) // after Start, so that neither Start nor the watcher's first reading waits
+	limit := drain + 3*stopMargin + 500*time.Millisecond
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.pod.Stop(context.Background())
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("Stop = %v, want the error of the delete that ran out of time", err)
+		}
+	case <-time.After(limit):
+		t.Fatalf("Stop did not return within %v", limit)
+	}
+	closedWithin(t, s.pod.Events(), time.Second)
+}
+
+// Counts gives the lines read so far: zeros before Start, the lines read while the probe runs,
+// and after Stop the counts of its Facts.
+func TestCountsWhileTheProbeRuns(t *testing.T) {
+	l := &fakeLog{streams: []io.Reader{openStream(t, logLine(logAt(100), `{"level":"info"}`)+logLine(logAt(400), `{"ok":true}`))}}
+	s := newProbe(t, l, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s.clock.Set(logAt(700))
+	if lines, jsonText := s.pod.Counts(); lines != 0 || jsonText != 0 {
+		t.Errorf("Counts before Start = %d, %d; want zeros", lines, jsonText)
+	}
+	if _, err := s.pod.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if lines, jsonText := s.pod.Counts(); lines != 2 || jsonText != 1 {
+		t.Errorf("Counts while the probe runs = %d, %d; want 2 lines, 1 JSON text", lines, jsonText)
+	}
+	facts, err := s.pod.Stop(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines, jsonText := s.pod.Counts(); lines != facts.Lines || jsonText != facts.JSONTextLines || lines != 2 {
+		t.Errorf("Counts after Stop = %d, %d; want the Facts' %d, %d, and 2 lines", lines, jsonText, facts.Lines, facts.JSONTextLines)
+	}
+}
+
+// Counts survives a Stop that panicked: the run's entry still gives the lines read.
+func TestCountsAfterAStopThatPanicked(t *testing.T) {
+	l := &fakeLog{streams: []io.Reader{openStream(t, logLine(logAt(100), "starting")+logLine(logAt(400), `{"ok":true}`))}}
+	s := newProbe(t, l, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	var armed atomic.Bool
+	s.client.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if armed.Load() {
+			panic("a fault of the API client")
+		}
+		return false, nil, nil
+	})
+	s.clock.Set(logAt(700))
+	if _, err := s.pod.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	armed.Store(true)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Stop did not panic")
+			}
+		}()
+		s.pod.Stop(context.Background())
+	}()
+	if lines, _ := s.pod.Counts(); lines != 2 {
+		t.Errorf("Counts after a Stop that panicked = %d lines, want 2", lines)
+	}
+	s.pod.run.cancel() // the panic left the follower running
+	<-s.pod.run.followerDone
 }

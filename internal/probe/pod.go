@@ -33,7 +33,7 @@ type Facts struct {
 	ClockDifference      time.Duration
 }
 
-// Probe is one probe of a run, as run holds it: the three operations of Pod, with
+// Probe is one probe of a run, as run holds it: Events, Start and Stop of Pod, with
 // the same contracts.
 type Probe interface {
 	Events() <-chan Event
@@ -95,8 +95,8 @@ func NewPod(o PodOptions) *Pod {
 
 // Events gives every observation and every fault of the probe, in the log's order,
 // from its first line on. Read it from before Start is called until it is
-// closed: a send waits for its reader. A Start that failed, or a Stop after
-// Start, closes it.
+// closed: a send waits for its reader. A Start that failed closes it, and so
+// does Stop, also before Start and after a Start that panicked.
 func (p *Pod) Events() <-chan Event { return p.events }
 
 // closeEvents closes the channel of Events, once.
@@ -219,7 +219,7 @@ type probeRun struct {
 
 	follower     *follower
 	followerDone chan struct{}
-	endedAt      time.Time // o.Now() when the follower ended; read after followerDone
+	endedAt      time.Time // what the follower's run gave: when its last stream ended; read after followerDone
 	watcherDone  chan struct{}
 
 	firstCh, exitCh chan struct{} // closed when the first observation, or an exit before it, is noted
@@ -235,14 +235,37 @@ type probeRun struct {
 }
 
 // send puts e into events, waiting while the channel is full; it gives up when ctx ends, and
-// reports whether e went in.
+// reports whether e went in. While the channel has room e goes in, also after ctx ended, so that
+// what the follower emits when the stop cuts the log, the gap included, reaches the reader.
 func (r *probeRun) send(ctx context.Context, e Event) bool {
+	select {
+	case r.events <- e:
+		return true
+	default:
+	}
 	select {
 	case r.events <- e:
 		return true
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// afterRunStarted is called by Start right after it started the follower and the watcher. A
+// test replaces it to make Start panic there.
+var afterRunStarted = func() {}
+
+// Counts gives how many lines of the probe's log were read so far, and how many of them were
+// JSON objects with no ok field. Safe at any moment, from any goroutine, also while Start or Stop
+// runs or after either panicked. Zeros before Start.
+func (p *Pod) Counts() (lines, jsonText int) {
+	p.mu.Lock()
+	r := p.run
+	p.mu.Unlock()
+	if r == nil {
+		return 0, 0
+	}
+	return r.follower.counts()
 }
 
 // Start creates the probe's pod and returns at its first observation. The error
@@ -254,6 +277,10 @@ func (r *probeRun) send(ctx context.Context, e Event) bool {
 // A pod named probe that an earlier run left is deleted first. When the probe's pod was never
 // created, the error is the API's or ctx's, and the Facts kept say that the probe stopped when
 // asked, because nothing ran to stop.
+//
+// Start is called once, and before Stop: a Start after either gives an error and creates no
+// pod. The probe's run is kept from the moment it exists, so that Counts reads it and a Stop
+// after a Start that panicked stops the follower and the watcher that Start started.
 func (p *Pod) Start(ctx context.Context) (Started, error) {
 	p.mu.Lock()
 	if p.state != stageNew {
@@ -279,15 +306,18 @@ func (p *Pod) Start(ctx context.Context) (Started, error) {
 		firstCh: make(chan struct{}), exitCh: make(chan struct{}),
 	}
 	r.follower = newFollower(p.open, p.running, p.o.Raw, p.o.Now, func(e Event) { p.emit(r, e) })
+	p.mu.Lock()
+	p.run = r
+	p.mu.Unlock()
 	go func() {
-		r.follower.run(runCtx)
-		r.endedAt = p.o.Now()
+		r.endedAt = r.follower.run(runCtx)
 		close(r.followerDone)
 	}()
 	go func() {
 		defer close(r.watcherDone)
 		p.watch(watchCtx, r)
 	}()
+	afterRunStarted()
 
 	var err error
 	select {
@@ -311,14 +341,14 @@ func (p *Pod) Start(ctx context.Context) (Started, error) {
 		return Started{}, err
 	}
 	if err := p.judgeStart(r); err != nil {
-		p.halt(ctx, r, false)
+		p.halt(ctx, r)
 		return Started{}, err
 	}
 	r.mu.Lock()
 	first := r.first
 	r.mu.Unlock()
 	p.mu.Lock()
-	p.state, p.run = stageStarted, r
+	p.state = stageStarted
 	p.mu.Unlock()
 	return Started{First: first}, nil
 }
@@ -439,28 +469,44 @@ func (p *Pod) end(f Facts, err error) {
 // that failed, and at a second call, it gives the Facts and the error
 // that the stop already made left.
 //
-// It reads the log for at most the drain and stopMargin. Before it asks the probe to stop, it
-// reads the pod once more, so that an exit since the watcher's last reading is still a fault.
-// Before Start it gives no Facts and no error.
+// It reads the log for at most the drain and stopMargin, and each call it makes to the API waits
+// at most stopMargin. After Start, before it asks the probe to stop, it reads the pod once more,
+// so that an exit since the watcher's last reading is still a fault. Before Start it closes
+// Events, gives no Facts and no error, and ends the Pod, so that a later Start gives an error.
+// After a Start that panicked once its follower and watcher ran, it stops them and the pod as
+// after Start, without that last reading.
 func (p *Pod) Stop(ctx context.Context) (Facts, error) {
 	p.mu.Lock()
-	if p.state != stageStarted {
+	stage, r := p.state, p.run
+	if stage == stageEnded {
 		f, err := p.facts, p.stopErr
 		p.mu.Unlock()
 		return f, err
 	}
-	r := p.run
 	p.state = stageEnded
 	p.mu.Unlock()
-	return p.halt(ctx, r, true)
+	switch {
+	case r == nil:
+		// Before Start, or after a Start that panicked before its run existed: nothing runs.
+		p.closeEvents()
+		return Facts{}, nil
+	case stage == stageStarted:
+		r.stopWatcher()
+		<-r.watcherDone
+		p.lastExitCheck(ctx, r)
+	}
+	return p.halt(ctx, r)
 }
 
-// halt is the stop of a probe whose pod was created, for Stop and for a Start that failed other
-// than by its context: it ends the watcher, reads the pod once more when lastCheck is set, deletes
-// the pod with the drain as its grace period, reads the log until it ends or the drain and
-// stopMargin have passed, closes Events, and keeps the Facts and the error for a later Stop. A
-// Start that failed has its own error for an exit, so it does not read the pod once more.
-func (p *Pod) halt(ctx context.Context, r *probeRun, lastCheck bool) (Facts, error) {
+// halt is the stop of a run whose follower and watcher were started: it ends the watcher,
+// deletes the pod with the drain as grace, reads the log until it ends or the drain and
+// stopMargin pass, closes Events, keeps the Facts and the error. Each call to the API waits at
+// most stopMargin.
+//
+// It serves Stop, a Start that failed other than by its context, and a Stop after a Start that
+// panicked; ending the watcher again after Stop ended it is harmless. The probe stopped when
+// asked when its log ended before the ask, or within the drain after it.
+func (p *Pod) halt(ctx context.Context, r *probeRun) (Facts, error) {
 	endedBefore := false
 	select {
 	case <-r.followerDone:
@@ -470,14 +516,13 @@ func (p *Pod) halt(ctx context.Context, r *probeRun, lastCheck bool) (Facts, err
 
 	r.stopWatcher()
 	<-r.watcherDone
-	if lastCheck {
-		p.lastExitCheck(ctx, r)
-	}
 
 	r.follower.stopAsked()
 	asked := p.o.Now()
 	grace := wholeSeconds(p.o.Drain)
-	delErr := p.pods().Delete(ctx, "probe", metav1.DeleteOptions{GracePeriodSeconds: &grace})
+	delCtx, cancelDel := context.WithTimeout(ctx, stopMargin)
+	delErr := p.pods().Delete(delCtx, "probe", metav1.DeleteOptions{GracePeriodSeconds: &grace})
+	cancelDel()
 	if apierrors.IsNotFound(delErr) {
 		delErr = nil
 	}
@@ -511,7 +556,8 @@ func (p *Pod) halt(ctx context.Context, r *probeRun, lastCheck bool) (Facts, err
 }
 
 // lastExitCheck reads the pod once, after the watcher has ended, and puts the fault of an exit
-// into events when the watcher had not. The send waits at most stopMargin, or until ctx ends.
+// into events when the watcher had not. The reading and the send each wait at most stopMargin,
+// or until ctx ends.
 func (p *Pod) lastExitCheck(ctx context.Context, r *probeRun) {
 	r.mu.Lock()
 	reported := r.exitReported
@@ -519,7 +565,9 @@ func (p *Pod) lastExitCheck(ctx context.Context, r *probeRun) {
 	if reported {
 		return
 	}
-	x, ended, _ := p.readExit(ctx)
+	readCtx, cancelRead := context.WithTimeout(ctx, stopMargin)
+	x, ended, _ := p.readExit(readCtx)
+	cancelRead()
 	if !ended || ctx.Err() != nil {
 		return
 	}
