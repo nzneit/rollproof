@@ -6,11 +6,45 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// startRegistry's wait for the registry counts limit from its own call: a registry that answers
+// nothing is given the whole limit, and no more than one poll beyond it.
+func TestStartRegistryCountsItsOwnLimit(t *testing.T) {
+	// The fake engine starts no container: it exits 0 for every command, and its inspect names an
+	// address for the nodes. The port that startRegistry picked on the runner stays free, so
+	// nothing answers there.
+	script := filepath.Join(t.TempDir(), "engine")
+	body := "#!/bin/sh\n" +
+		"if [ \"$1\" = inspect ]; then\n" +
+		"  echo '[{\"NetworkSettings\":{\"Networks\":{\"kind\":{\"IPAddress\":\"10.0.0.2\"}}}}]'\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	const limit = 300 * time.Millisecond
+	start := time.Now()
+	push, node, err := startRegistry(context.Background(), Engine{Binary: script},
+		"rollproof-test-registry", "registry:3", limit)
+	took := time.Since(start)
+	if err == nil {
+		t.Fatalf("startRegistry = %q, %q, nil; want an error", push, node)
+	}
+	if !strings.Contains(err.Error(), "the registry did not answer") {
+		t.Errorf("error %q, want it to say that the registry did not answer", err)
+	}
+	if took < limit || took >= limit+registryPoll+time.Second {
+		t.Errorf("startRegistry took %v, want at least %v and less than %v", took, limit, limit+registryPoll+time.Second)
+	}
+}
 
 // The registry wait reports the last answer the registry gave, not the deadline's end of a request
 // in flight; it names the deadline only when no answer came at all.

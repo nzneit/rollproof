@@ -140,8 +140,6 @@ type Cluster struct {
 // the text says so. An error is a Condition with ClusterFailed. A name without the prefix
 // rollproof- is an InternalError.
 func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
-	deadline := time.Now().Add(s.Timeout)
-
 	if err := remove(ctx, e, s.Name, s.RunDir); err != nil {
 		var c verdict.Condition
 		if errors.As(err, &c) && c.Code == verdict.InternalError {
@@ -208,7 +206,7 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	if image == "" {
 		image = DefaultRegistryImage
 	}
-	if c.PushRegistry, c.NodeRegistry, err = startRegistry(ctx, e, s.Name, image, deadline); err != nil {
+	if c.PushRegistry, c.NodeRegistry, err = startRegistry(ctx, e, s.Name, image, s.Timeout); err != nil {
 		return fail("start the registry", err)
 	}
 
@@ -235,7 +233,7 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 
 	client, err := c.Client()
 	if err == nil {
-		err = waitReady(ctx, client, 1+s.Workers, deadline)
+		err = waitReady(ctx, client, 1+s.Workers, s.Timeout)
 	}
 	if err != nil {
 		return fail("wait until ready", fmt.Errorf("%w%s", err, inotifyHint))
@@ -300,11 +298,11 @@ func byRole(listed []nodes.Node) ([]nodes.Node, error) {
 	return sorted, nil
 }
 
-// waitReady polls once a second, until deadline, until the cluster has want nodes, each Ready,
-// and kube-system/coredns has all its replicas available. The error at the deadline gives both
-// counts.
-func waitReady(ctx context.Context, client kubernetes.Interface, want int, deadline time.Time) error {
-	waitCtx, cancel := context.WithDeadline(ctx, deadline)
+// waitReady polls once a second, for at most limit from its own call, until the cluster has want
+// nodes, each Ready, and kube-system/coredns has all its replicas available. The error at the
+// deadline gives both counts.
+func waitReady(ctx context.Context, client kubernetes.Interface, want int, limit time.Duration) error {
+	waitCtx, cancel := context.WithDeadline(ctx, time.Now().Add(limit))
 	defer cancel()
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()

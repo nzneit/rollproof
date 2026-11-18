@@ -100,6 +100,24 @@ func TestCreateKindRetries(t *testing.T) {
 	}
 }
 
+// Step 6 of Create: the wait for the nodes counts limits.timeout from its own start, so a cluster
+// whose creation was slow does not shorten it.
+func TestWaitReadyCountsItsOwnLimit(t *testing.T) {
+	const limit = 1500 * time.Millisecond
+	start := time.Now()
+	err := waitReady(context.Background(), k8sfake.NewClientset(), 1, limit)
+	took := time.Since(start)
+	if err == nil {
+		t.Fatal("waitReady gave no error")
+	}
+	if !strings.Contains(err.Error(), "at the deadline 0 of 1 nodes were Ready") {
+		t.Errorf("error %q, want it to give the counts at the deadline", err)
+	}
+	if took < limit || took >= 3*time.Second {
+		t.Errorf("waitReady took %v, want at least %v and less than 3s", took, limit)
+	}
+}
+
 // Step 7 of Create: a namespace that exists already, such as default, counts as made; any other
 // failure is the step's.
 func TestEnsureNamespaces(t *testing.T) {

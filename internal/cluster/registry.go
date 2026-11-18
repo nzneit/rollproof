@@ -29,9 +29,10 @@ const (
 // startRegistry starts the container NAME-registry from image on the engine's network for kind,
 // published on a free port of the runner's loopback, and returns when GET /v2/ answers 200. push
 // is the registry as the runner reaches it, 127.0.0.1:PORT; node is the same registry as the
-// nodes reach it, ADDRESS:5000. Past deadline it returns an error that says the registry did not
-// answer.
-func startRegistry(ctx context.Context, e Engine, name, image string, deadline time.Time) (push, node string, err error) {
+// nodes reach it, ADDRESS:5000. It waits at most limit, counted from its own call, for the
+// registry to answer; past it, it returns an error that says the registry did not answer.
+func startRegistry(ctx context.Context, e Engine, name, image string, limit time.Duration) (push, node string, err error) {
+	deadline := time.Now().Add(limit)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", "", err
