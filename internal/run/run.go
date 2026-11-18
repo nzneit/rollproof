@@ -39,6 +39,10 @@ type Clock interface {
 // Watcher is what the run needs of the watch unit.
 type Watcher interface {
 	InstallReady(ctx context.Context, began time.Time, exited <-chan struct{}) (watch.Install, error)
+	// InstallSettled returns when the install window has ended, or, sooner, when ctx does; the
+	// Settling says how it ended. Run calls it once, when the probe's first observation has
+	// arrived.
+	InstallSettled(ctx context.Context, first time.Time) watch.Settling
 	Transition(ctx context.Context, name verdict.WindowName, began time.Time, exited <-chan struct{}) watch.Transition
 	// UseService names the Service whose endpoints Transition reads.
 	UseService(service *types.NamespacedName)
@@ -82,7 +86,13 @@ const (
 
 // Run runs one test from the results folder to the exit code: 0 for a pass, 1
 // for a fail, 2 for not verified. When ctx ends, the run is interrupted: it
-// writes its final result first and leaves the cluster.
+// writes its final result first and leaves the cluster, with the probe's pod in
+// it unless a stop of the probe had already begun. The windows of a run are the
+// install window, the steady window and one for each transition. The run begins
+// a window only when verdict says that it goes on. Once the probe was created,
+// the run stops it before the final verdict, whether the run's last window
+// ended, the run ended before the probe's first observation or the tool failed,
+// unless a signal ended the run.
 func Run(ctx context.Context, o Options, u Units) int {
 	s := &runState{o: o, u: u, warnings: &warnings{}}
 	s.parent = ctx
@@ -107,6 +117,7 @@ func Run(ctx context.Context, o Options, u Units) int {
 	}
 	if caught != nil {
 		s.toolFailed(caught)
+		s.stopAfterFailure()
 	}
 	s.cancel()
 	s.endReading()
@@ -129,7 +140,8 @@ type writer interface {
 
 // runState is everything one run knows: the units it has, what each returned,
 // and the timeline of its windows. Only the goroutine that reads the probe's
-// events and the goroutine of a command touch it besides the run itself.
+// events, from just before the probe starts, the goroutine of a command, and
+// the goroutine that asks the probe to stop touch it besides the run itself.
 type runState struct {
 	o        Options
 	u        Units
@@ -153,6 +165,7 @@ type runState struct {
 	removed    []string
 	probeFacts probe.Facts
 	probeStart probe.Started
+	settling   watch.Settling // the install window as watch reported it, for the record
 	stopped    bool
 	names      []verdict.WindowName
 
@@ -175,13 +188,13 @@ func (s *runState) sequence(ctx context.Context) (caught any) {
 		s.stopProbe(ctx)
 		return nil
 	}
-	// The run stopped before the probe was stopped: a step before the steady
+	// The run stopped before the probe was stopped: a step before the install
 	// window failed, or a signal came. The verdict is still written.
 	s.decide(true)
 	return nil
 }
 
-// setUp performs steps 1 to 9: everything before the steady window.
+// setUp performs steps 1 to 9: everything before the install window.
 func (s *runState) setUp(ctx context.Context) bool {
 	cfg, err := s.u.Load(s.o.ConfigPath)
 	if err != nil {
@@ -300,12 +313,19 @@ func (s *runState) installStep(ctx context.Context) bool {
 	return false
 }
 
-// startProbe performs step 9: the probe and its first observation.
+// startProbe performs step 9: the probe and its first observation. The goroutine that reads the
+// probe's events starts before the probe does, so that no event waits for a reader; it is the
+// only reader of them until the probe is stopped. A start that failed has stopped the probe,
+// unless a signal ended the run, and Stop is asked for what that stop left.
 func (s *runState) startProbe(ctx context.Context) bool {
 	p := s.cluster.Probe(s.cfg, s.probeImage, s.ev.file("probe.log"))
 	s.probe = p
+	s.readEvents(p.Events())
 	st, err := p.Start(ctx)
 	if err != nil {
+		if ctx.Err() == nil {
+			s.takeStop(ctx)
+		}
 		return s.beforeFail(ctx, err)
 	}
 	if s.interrupted(ctx) {
@@ -315,23 +335,44 @@ func (s *runState) startProbe(ctx context.Context) bool {
 	return true
 }
 
-// windows performs steps 10 to 12: the windows of the run, each judged as it
-// ends. It reports false when a signal ended the run.
+// windows performs steps 10 to 12: the windows of the run, the install window first, each
+// judged as it ends. It reports false when a signal ended the run, and true when the probe is to
+// be stopped.
 func (s *runState) windows(ctx context.Context) bool {
 	s.names = s.deployer.Transitions()
-	s.tl.Windows = make([]verdict.Window, 1, len(s.names)+1)
-	s.tl.Windows[0] = verdict.Window{Name: verdict.Steady, Start: s.probeStart.First}
+	first := s.probeStart.First
+	s.tl.Windows = make([]verdict.Window, 2, len(s.names)+2)
+	s.tl.Windows[0] = verdict.Window{Name: verdict.Install, Start: first}
+	s.tl.Windows[1] = verdict.Window{Name: verdict.Steady}
 	for _, name := range s.names {
 		s.tl.Windows = append(s.tl.Windows, verdict.Window{Name: name})
 	}
-	// Step 10: the windows are fixed, and the goroutine that reads the probe's events starts here.
-	// It is the only reader of them until the probe is stopped.
-	s.readEvents(s.probeStart.Events)
+	// Step 10: the windows are fixed. The goroutine that reads the probe's events has run since
+	// the probe started, and the events it took before are judged against these windows.
 
-	// Step 11: the steady window runs to its end, whatever happened in it, unless a signal
-	// comes first: a signal stops the run at once (section 10), and limits.steady has no upper
-	// bound.
-	end := s.probeStart.First.Add(s.cfg.Limits.Steady)
+	// Step 11: the install window runs from the first observation until the install has settled
+	// or failed, whatever the probe reports meanwhile (section 7). A signal ends the run there,
+	// as it does in a transition: the settling's own conditions are not placed.
+	st := s.watcher.InstallSettled(ctx, first)
+	s.settling = st
+	if s.interrupted(ctx) {
+		return false
+	}
+	s.tl.Before = append(s.tl.Before, st.Before...)
+	s.tl.Windows[0].Conditions = append(s.tl.Windows[0].Conditions, st.InWindow...)
+	s.tl.Windows[0].End = st.Ended
+	if st.Settled.IsZero() && len(st.Before) == 0 && len(st.InWindow) == 0 {
+		panic("the install neither settled nor failed")
+	}
+	if !s.decide(false).GoOn {
+		return true
+	}
+
+	// The steady window begins when the install has settled, not when the tool looked, and runs
+	// to its end, whatever happened in it, unless a signal comes first: a signal stops the run at
+	// once (section 10), and limits.steady has no upper bound.
+	s.tl.Windows[1].Start = st.Settled
+	end := st.Settled.Add(s.cfg.Limits.Steady)
 	select {
 	case <-s.u.Clock.After(end.Sub(s.u.Clock.Now())):
 	case <-ctx.Done():
@@ -339,7 +380,7 @@ func (s *runState) windows(ctx context.Context) bool {
 	if s.interrupted(ctx) {
 		return false
 	}
-	s.tl.Windows[0].End = end
+	s.tl.Windows[1].End = end
 	if !s.decide(false).GoOn {
 		return true
 	}
@@ -350,7 +391,10 @@ func (s *runState) windows(ctx context.Context) bool {
 // until one of them does not pass.
 func (s *runState) transitionsStep(ctx context.Context) bool {
 	for i, name := range s.names {
-		began := s.tl.Windows[i].End // no gap between windows (section 4)
+		// Transition i's window follows the install window, the steady window and the
+		// transitions before it.
+		w := i + 2
+		began := s.tl.Windows[w-1].End // no gap between windows (section 4)
 		if name != verdict.Deploy && name != verdict.Rollback {
 			// This build has no way to start any other transition: the config
 			// rejects the runs that would have one (carry-in T31-2).
@@ -358,7 +402,7 @@ func (s *runState) transitionsStep(ctx context.Context) bool {
 				Text: "the tool cannot start a " + string(name) + " transition"})
 			return true
 		}
-		s.tl.Windows[i+1].Start = began
+		s.tl.Windows[w].Start = began
 		s.transitions = append(s.transitions, transitionFacts{tr: watch.Transition{Name: name}})
 		s.podsKept = append(s.podsKept, false)
 		fn := func(ctx context.Context) deploy.Result { return s.deployer.Deploy(ctx) }
@@ -379,7 +423,7 @@ func (s *runState) transitionsStep(ctx context.Context) bool {
 		if o.panicked != nil {
 			panic(o.panicked)
 		}
-		s.placeTransition(i+1, tr, o.result)
+		s.placeTransition(w, tr, o.result)
 		if !s.decide(false).GoOn {
 			return true
 		}
@@ -406,17 +450,15 @@ func (s *runState) placeTransition(i int, tr watch.Transition, res deploy.Result
 	}
 }
 
-// stopProbe performs step 13: the probe is stopped, its last lines are read,
-// and the verdict is decided. A signal that comes while the probe is stopping
-// belongs to the last window that began.
+// stopProbe performs step 13 when the run's last window has ended, whether or
+// not every transition was run: the probe is stopped, its last lines are read, and the
+// verdict is decided. A signal that comes while the probe is stopping belongs to
+// the last window that began. After a failure of the tool, stopAfterFailure
+// stops the probe in the same way.
 func (s *runState) stopProbe(ctx context.Context) {
 	if s.probe != nil {
-		f, err := s.probe.Stop(ctx)
-		s.probeFacts = f
-		s.stopped = true
-		if err != nil {
-			// Stop's error is the pod delete's, or the context's: the probe's pod may still run.
-			s.warnings.add("the probe could not be stopped: " + err.Error() + "; its pod may still be there")
+		if p := s.haltProbe(ctx); p != nil {
+			panic(p)
 		}
 	}
 	if s.reader != nil {
@@ -427,7 +469,82 @@ func (s *runState) stopProbe(ctx context.Context) {
 	s.decide(true)
 }
 
-// beforeFail places the condition of a step that failed before the steady
+// stopAfterFailure stops the probe after a failure of the tool, as stopProbe does, when the
+// probe was created and not yet asked to stop and no signal ended the run: section 6 stops the
+// probe at every end of a run but a signal. The stop's context is the caller's, so the run's own
+// cancel does not cut it short and a signal does; Stop bounds its own wait by the drain and
+// stopMargin. Its last lines are read while the stop runs, or dropped when the event reader is
+// gone, as haltProbe says. A signal that came meanwhile is placed as stopProbe places one, and
+// the verdict is decided again with the internal-error that the failure placed. A panic in the
+// stop, or one of the reader, is the tool's failure too: it is placed as one more internal-error
+// beside the first.
+func (s *runState) stopAfterFailure() {
+	if s.probe == nil || s.stopped || s.parent.Err() != nil {
+		return
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			// A panic of the last decision; a reader's panic that it met was taken by then.
+			s.place(verdict.Condition{Code: verdict.InternalError, Text: panicText(p)})
+			s.decide(true)
+		}
+	}()
+	p := s.haltProbe(s.parent)
+	if p == nil {
+		p = s.readerPanic()
+	}
+	if p != nil {
+		s.place(verdict.Condition{Code: verdict.InternalError, Text: panicText(p)})
+	}
+	s.interrupted(s.parent) // a signal that came while the probe was stopped
+	s.decide(true)
+}
+
+// haltProbe asks the probe to stop and returns when Stop has returned, with the value of a panic
+// in Stop, if one came. The event reader reads the probe's last lines meanwhile. When the reader
+// is gone before Stop has returned, because a panic stopped it, the lines are taken here and
+// dropped, so that the probe never waits on a channel that nobody reads.
+func (s *runState) haltProbe(ctx context.Context) any {
+	stopped := make(chan any, 1)
+	go func() {
+		defer func() { stopped <- recover() }()
+		s.takeStop(ctx)
+	}()
+	events := s.probe.Events()
+	var gone <-chan struct{} // the reader's end, until it has come
+	if s.reader != nil {
+		gone = s.reader.done
+	}
+	var drop <-chan probe.Event // the probe's events, once no reader takes them
+	for {
+		select {
+		case p := <-stopped:
+			return p
+		case <-gone:
+			gone, drop = nil, events
+		case _, open := <-drop:
+			if !open {
+				drop = nil
+			}
+		}
+	}
+}
+
+// takeStop asks the probe to stop, keeps the Facts it gives, marks the probe as stopped, and
+// warns when Stop gave an error. After a start that failed, Stop gives what that stop left. The
+// probe counts as stopped from the moment it was asked, so that a Stop that panicked is not asked
+// again.
+func (s *runState) takeStop(ctx context.Context) {
+	s.stopped = true
+	f, err := s.probe.Stop(ctx)
+	s.probeFacts = f
+	if err != nil {
+		// Stop's error is the pod delete's, or the context's: the probe's pod may still run.
+		s.warnings.add("the probe could not be stopped: " + err.Error() + "; its pod may still be there")
+	}
+}
+
+// beforeFail places the condition of a step that failed before the install
 // window, unless a signal ended the run first, and reports false for the
 // caller.
 func (s *runState) beforeFail(ctx context.Context, err error) bool {
@@ -636,9 +753,11 @@ func (s *runState) record() report.Run {
 		decision:     s.decision,
 		transitions:  s.transitions,
 		install:      s.install,
+		settling:     s.settling,
 		releases:     s.releases,
 		probe:        s.probeFacts,
 		probeStopped: s.stopped,
+		probeBegun:   s.probe != nil,
 		target:       s.target,
 		images:       s.images,
 		removed:      s.removed,
@@ -972,12 +1091,25 @@ type reader struct {
 	caught any // the value of a panic that stopped the reader
 }
 
-// readEvents starts the goroutine that reads the probe's events.
+// eventHook, when a test sets it, runs in the event reader on each event before the event is put
+// into the timeline: a test's way to make the reader fail, as only a runtime fault could. It is nil
+// in the tool.
+var eventHook func(probe.Event)
+
+// readEvents starts the goroutine that reads the probe's events. startProbe calls it before the
+// probe starts, so that the probe's sends have a reader from its first line on.
 func (s *runState) readEvents(events <-chan probe.Event) {
 	if events == nil {
 		return
 	}
-	r := &reader{events: events, add: s.addEvent, ask: make(chan chan struct{}),
+	add := s.addEvent
+	if h := eventHook; h != nil {
+		add = func(ev probe.Event) {
+			h(ev)
+			s.addEvent(ev)
+		}
+	}
+	r := &reader{events: events, add: add, ask: make(chan chan struct{}),
 		stop: make(chan struct{}), done: make(chan struct{})}
 	s.reader = r
 	go s.read(r)

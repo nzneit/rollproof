@@ -19,6 +19,7 @@
     "serveAfterTerm": { "type": "string" },
     "drainDeadline": { "type": "string" },
     "spread": { "type": "boolean" },
-    "gracePeriod": { "type": "integer", "minimum": 0 }
+    "gracePeriod": { "type": "integer", "minimum": 0 },
+    "failWork": { "type": "boolean" }
   }
 }

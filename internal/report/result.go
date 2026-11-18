@@ -12,17 +12,20 @@ import (
 // timeLayout is RFC 3339 with milliseconds; it is used on a time in UTC.
 const timeLayout = "2006-01-02T15:04:05.000Z07:00"
 
+// stamp writes a time of the record in UTC as RFC 3339 with milliseconds, and
+// a nil time as null.
+func stamp(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.UTC().Format(timeLayout)
+	return &s
+}
+
 // MarshalJSON writes the window's keys in the order of its fields, each time in
 // UTC as RFC 3339 with milliseconds, a nil time as null, and a nil
 // FailedByClass as {}.
 func (w Window) MarshalJSON() ([]byte, error) {
-	stamp := func(t *time.Time) *string {
-		if t == nil {
-			return nil
-		}
-		s := t.UTC().Format(timeLayout)
-		return &s
-	}
 	byClass := w.FailedByClass
 	if byClass == nil {
 		byClass = map[string]int{}
@@ -47,6 +50,32 @@ func (w Window) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// MarshalJSON writes the install's keys in the order of its fields, each time
+// in UTC as RFC 3339 with milliseconds, a nil time as null, a nil
+// FailedByClass as {} and a nil SettleRestartedBy as [].
+func (i Install) MarshalJSON() ([]byte, error) {
+	byClass := i.FailedByClass
+	if byClass == nil {
+		byClass = map[string]int{}
+	}
+	return json.Marshal(struct {
+		Ready             string         `json:"ready"`
+		FirstObservation  *string        `json:"first_observation"`
+		Settled           *string        `json:"settled"`
+		SettleRestartedBy []string       `json:"settle_restarted_by"`
+		Checks            int            `json:"checks"`
+		Failed            int            `json:"failed"`
+		FailedByClass     map[string]int `json:"failed_by_class"`
+		LastFailure       *string        `json:"last_failure"`
+		SlowestMs         float64        `json:"slowest_ms"`
+		LagMs             float64        `json:"lag_ms"`
+	}{
+		i.Ready.UTC().Format(timeLayout), stamp(i.FirstObservation), stamp(i.Settled),
+		list(i.SettleRestartedBy), i.Checks, i.Failed, byClass, stamp(i.LastFailure),
+		i.SlowestMs, i.LagMs,
+	})
+}
+
 // list returns s, or an empty list when s is nil, so that it is written as [].
 func list[T any](s []T) []T {
 	if s == nil {
@@ -64,6 +93,10 @@ func encode(r Run) ([]byte, error) {
 		r.Reasons[i].Detail = list(r.Reasons[i].Detail)
 	}
 	r.Windows = list(r.Windows)
+	if r.Install != nil {
+		install := *r.Install
+		r.Install = &install
+	}
 	r.Transitions = append([]Transition{}, r.Transitions...)
 	for i := range r.Transitions {
 		t := &r.Transitions[i]

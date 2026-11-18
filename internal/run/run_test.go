@@ -39,11 +39,22 @@ type resultFile struct {
 	Windows []struct {
 		Name   string     `json:"name"`
 		Result string     `json:"result"`
+		Start  *time.Time `json:"start"`
 		End    *time.Time `json:"end"`
+		Checks int        `json:"checks"`
 	} `json:"windows"`
+	Install *struct {
+		Ready            time.Time  `json:"ready"`
+		FirstObservation *time.Time `json:"first_observation"`
+		Settled          *time.Time `json:"settled"`
+		Checks           int        `json:"checks"`
+		Failed           int        `json:"failed"`
+		LastFailure      *time.Time `json:"last_failure"`
+	} `json:"install"`
 	Warnings []string `json:"warnings"`
 	Probes   []struct {
 		Target string `json:"target"`
+		Lines  int    `json:"lines"`
 	} `json:"probes"`
 	Transitions []struct {
 		Name    string `json:"name"`
@@ -110,7 +121,7 @@ func TestPass(t *testing.T) {
 		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
 	}
 	want := []string{"load", "check", "create", "store", "deployer", "fetch", "watcher",
-		"install", "install-ready", "target", "probe", "start", "deploy", "transition-deploy",
+		"install", "install-ready", "target", "probe", "start", "install-settled", "deploy", "transition-deploy",
 		"rollback", "transition-rollback", "probe-stop", "end-commands", "watch-stop", "delete"}
 	if diff := cmp.Diff(want, w.calls.list()); diff != "" {
 		t.Errorf("calls (-want +got):\n%s", diff)
@@ -204,7 +215,7 @@ func TestEachBeforeFailure(t *testing.T) {
 		}, "nothing-watched", then("watcher", "install", "install-ready", "end-commands", "watch-stop", "delete")},
 		{"probe not started", func(w *world) {
 			w.probe.startErr = verdict.Condition{Code: verdict.ProbeNotStarted, Text: "no observation within limits.timeout"}
-		}, "probe-not-started", then("watcher", "install", "install-ready", "target", "probe", "start", "end-commands", "watch-stop", "delete")},
+		}, "probe-not-started", then("watcher", "install", "install-ready", "target", "probe", "start", "probe-stop", "end-commands", "watch-stop", "delete")},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -281,7 +292,7 @@ func TestFirstFileBeforeAnything(t *testing.T) {
 
 func TestStall(t *testing.T) {
 	w := newWorld(t)
-	w.probe.events = passes(0, 320)
+	w.probe.events = passes(-15, 320)
 	w.watcher.transitions[verdict.Deploy] = watch.Transition{
 		Stalled:       true,
 		Incomplete:    []string{"deployment/orders: 1 of 3 updated replicas are available"},
@@ -546,9 +557,7 @@ func TestPanicInAUnit(t *testing.T) {
 			if window, text := r.windowOf("internal-error"); window != "deploy" || text != "the watcher broke" {
 				t.Errorf("internal-error in window %q with text %q", window, text)
 			}
-			if n := w.calls.count("delete"); n != 1 {
-				t.Errorf("Delete called %d times, want 1", n)
-			}
+			w.probeWasStopped()
 		})
 	}
 }
@@ -699,17 +708,17 @@ func TestWindowMarks(t *testing.T) {
 	for _, m := range marks {
 		names = append(names, m.Name)
 	}
-	if diff := cmp.Diff([]string{"steady", "deploy", "rollback"}, names); diff != "" {
+	if diff := cmp.Diff([]string{"install", "steady", "deploy", "rollback"}, names); diff != "" {
 		t.Errorf("names (-want +got):\n%s", diff)
 	}
-	if marks[0].Finished != nil {
-		t.Errorf("the steady window's finished is %v, want null", marks[0].Finished)
+	if marks[1].Finished != nil {
+		t.Errorf("the steady window's finished is %v, want null", marks[1].Finished)
 	}
-	if marks[1].Finished == nil || !marks[1].Finished.Equal(t0.Add(25*time.Second)) {
-		t.Errorf("the deploy window's finished is %v, want %v", marks[1].Finished, t0.Add(25*time.Second))
+	if marks[2].Finished == nil || !marks[2].Finished.Equal(t0.Add(25*time.Second)) {
+		t.Errorf("the deploy window's finished is %v, want %v", marks[2].Finished, t0.Add(25*time.Second))
 	}
-	if marks[2].End == nil || !marks[2].End.Equal(t0.Add(70*time.Second)) {
-		t.Errorf("the rollback window's end is %v, want %v", marks[2].End, t0.Add(70*time.Second))
+	if marks[3].End == nil || !marks[3].End.Equal(t0.Add(70*time.Second)) {
+		t.Errorf("the rollback window's end is %v, want %v", marks[3].End, t0.Add(70*time.Second))
 	}
 }
 
@@ -913,9 +922,7 @@ func TestAPanicInACommandGoroutine(t *testing.T) {
 	if window, text := r.windowOf("internal-error"); window != "deploy" || text != "the deploy driver broke" {
 		t.Errorf("internal-error in window %q with text %q", window, text)
 	}
-	if n := w.calls.count("delete"); n != 1 {
-		t.Errorf("Delete called %d times, want 1", n)
-	}
+	w.probeWasStopped()
 	if n := w.calls.count("rollback"); n != 0 {
 		t.Errorf("rollback called %d times, want 0", n)
 	}
@@ -986,14 +993,14 @@ func TestNoGapBetweenWindows(t *testing.T) {
 		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
 	}
 	marks := w.windowMarks()
-	if len(marks) != 3 {
-		t.Fatalf("marks %d, want 3", len(marks))
-	}
-	if marks[0].End == nil || marks[1].Start == nil || !marks[1].Start.Equal(*marks[0].End) {
-		t.Errorf("the deploy window starts at %v, want the steady window's end %v", marks[1].Start, marks[0].End)
+	if len(marks) != 4 || marks[0].Name != "install" {
+		t.Fatalf("marks %+v, want four, install first", marks)
 	}
 	if marks[1].End == nil || marks[2].Start == nil || !marks[2].Start.Equal(*marks[1].End) {
-		t.Errorf("the rollback window starts at %v, want the deploy window's end %v", marks[2].Start, marks[1].End)
+		t.Errorf("the deploy window starts at %v, want the steady window's end %v", marks[2].Start, marks[1].End)
+	}
+	if marks[2].End == nil || marks[3].Start == nil || !marks[3].Start.Equal(*marks[2].End) {
+		t.Errorf("the rollback window starts at %v, want the deploy window's end %v", marks[3].Start, marks[2].End)
 	}
 }
 
@@ -1279,5 +1286,413 @@ func TestTheProbesStopErrorIsAWarning(t *testing.T) {
 	}
 	if !strings.Contains(w.stdout.String(), "the pod delete was refused") {
 		t.Errorf("the console does not print the warning:\n%s", w.stdout.String())
+	}
+}
+
+// The run reads the probe's events from before the probe starts (section 5). Start sends 5,000
+// observations and the scripted ones on a channel with no buffer, so it returns only while a
+// reader takes them.
+func TestTheReaderStartsWithTheProbe(t *testing.T) {
+	w := newWorld(t)
+	w.probe.unbuffered = true
+	first := w.clock.Now()
+	var early []probe.Event
+	for i := range 5000 { // one check every 2 ms for the probe's first 10 s
+		at := first.Add(time.Duration(i) * 2 * time.Millisecond)
+		early = append(early, probe.Event{Obs: &verdict.Observation{Written: at, T: at, OK: true, N: 1, Ms: 30, Lag: 2}})
+	}
+	w.probe.events = append(early, w.probe.events...)
+	done := make(chan int, 1)
+	go func() { done <- w.run(context.Background()) }()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start is waiting for a reader of the probe's events: the run must read them from the moment the probe starts")
+	}
+	checks := 0
+	for _, x := range w.result().Windows {
+		checks += x.Checks
+	}
+	if checks != 14000 { // 200 a second for the 70 s of the three windows; the 5,000 early ones fall in the install window
+		t.Errorf("the windows hold %d checks, want 14000: none may be lost", checks)
+	}
+	if in := w.result().Install; in == nil || in.Checks != 8000 {
+		t.Errorf("install %+v, want 8000 checks: the 5000 early ones and the 3000 of the install window", in)
+	}
+}
+
+// result.json's install at each ending of a run (section 12).
+func TestTheInstallRecordAtEachEnding(t *testing.T) {
+	first, ready := t0.Add(-15*time.Second), t0.Add(-21*time.Second)
+	t.Run("before the install was ready", func(t *testing.T) {
+		w := newWorld(t)
+		w.watcher.installErr = verdict.Condition{Code: verdict.InstallFailed, Text: "the install was not ready within limits.timeout"}
+		w.run(context.Background())
+		if r := w.result(); r.Install != nil || len(r.Probes) != 0 {
+			t.Errorf("install %+v and %d probes; want neither", r.Install, len(r.Probes))
+		}
+	})
+	t.Run("before the probe's first observation", func(t *testing.T) {
+		w := newWorld(t)
+		w.probe.startErr = verdict.Condition{Code: verdict.ProbeNotStarted, Text: "no observation within limits.timeout"}
+		w.probe.facts = probe.Facts{Lines: 12, JSONTextLines: 12, StoppedWhenAsked: true}
+		w.run(context.Background())
+		r := w.result()
+		if r.Install == nil || !r.Install.Ready.Equal(ready) || r.Install.FirstObservation != nil || r.Install.Settled != nil || r.Install.Checks != 0 {
+			t.Errorf("install %+v; want ready at %v, no first observation, no settling and no counts", r.Install, ready)
+		}
+		if len(r.Probes) != 1 || r.Probes[0].Lines != 12 {
+			t.Errorf("probes %+v; want the probe that was started, with its 12 lines", r.Probes)
+		}
+	})
+	t.Run("before the install had settled", func(t *testing.T) {
+		w := newWorld(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		w.hooks["install-settled"] = func() {
+			w.clock.Advance(4 * time.Second)
+			cancel()
+		}
+		w.run(ctx)
+		in := w.result().Install
+		if in == nil || in.FirstObservation == nil || !in.FirstObservation.Equal(first) || in.Settled != nil || in.Checks != 800 {
+			t.Errorf("install %+v; want the first observation at %v, no settling, and the 800 checks of 4 s", in, first)
+		}
+	})
+	t.Run("after the install had settled", func(t *testing.T) {
+		w := newWorld(t)
+		w.probe.events = append(w.probe.events, failureAt(-14900*time.Millisecond, -14900*time.Millisecond))
+		if code := w.run(context.Background()); code != 0 {
+			t.Fatalf("exit %d, want 0: a failed check in the install window decides nothing", code)
+		}
+		r := w.result()
+		in := r.Install
+		if in == nil || in.Settled == nil || !in.Settled.Equal(t0) || in.Checks != 3001 || in.Failed != 1 ||
+			in.LastFailure == nil || !in.LastFailure.Equal(t0.Add(-14900*time.Millisecond)) {
+			t.Errorf("install %+v; want settled at %v, 3001 checks, 1 failed, the last 14.9 s before", in, t0)
+		}
+		if r.Windows[0].Start == nil || !r.Windows[0].Start.Equal(*in.Settled) {
+			t.Errorf("the steady window starts at %v, want the moment the install had settled", r.Windows[0].Start)
+		}
+	})
+}
+
+// Rule 9: a fault of the probe before its first observation makes the run not verified, also when
+// the probe then never starts. Both reasons are listed, and neither has a window.
+func TestFaultsBeforeAFailedStartAreReasons(t *testing.T) {
+	w := newWorld(t)
+	w.probe.events = []probe.Event{{Fault: &verdict.Condition{Code: verdict.ProbeLineInvalid,
+		Text: "the line is not one JSON object", At: w.clock.Now()}}}
+	w.probe.startErr = verdict.Condition{Code: verdict.ProbeNotStarted, Text: "no observation within limits.timeout"}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"probe-not-started", "probe-line-invalid"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	for _, x := range r.Reasons {
+		if x.Window != "" {
+			t.Errorf("%s has the window %q, want none", x.Code, x.Window)
+		}
+	}
+	if r.decided() != "probe-not-started" {
+		t.Errorf("decided by %q, want probe-not-started", r.decided())
+	}
+	if n := w.calls.count("probe-stop"); n != 1 {
+		t.Errorf("the probe's Stop was called %d times after a failed start, want 1", n)
+	}
+}
+
+// lateClock is the fake clock except that it runs before once, ahead of the run's first wait,
+// which is the steady window's.
+type lateClock struct {
+	*fakeClock
+	before func()
+	once   sync.Once
+}
+
+func (c *lateClock) After(d time.Duration) <-chan time.Time {
+	c.once.Do(c.before)
+	return c.fakeClock.After(d)
+}
+
+// when reports whether a mark's time is there and is want.
+func when(got *time.Time, want time.Time) bool { return got != nil && got.Equal(want) }
+
+// The install window runs from the first observation until the install has settled, the steady
+// window begins there, and result.json's windows do not list it (sections 4 and 10).
+func TestTheSteadyWindowBeginsWhenTheInstallHasSettled(t *testing.T) {
+	w := newWorld(t)
+	w.watcher.late = 3 * time.Second // the tool looks 3 s after the install settled
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	marks := w.windowMarks()
+	if len(marks) != 4 || marks[0].Name != "install" || marks[1].Name != "steady" {
+		t.Fatalf("marks %+v, want install, steady, deploy, rollback", marks)
+	}
+	if !when(marks[0].Start, t0.Add(-15*time.Second)) || !when(marks[0].End, t0) {
+		t.Errorf("the install window is [%v, %v), want [%v, %v)", marks[0].Start, marks[0].End, t0.Add(-15*time.Second), t0)
+	}
+	if !when(marks[1].Start, t0) || !when(marks[1].End, t0.Add(10*time.Second)) {
+		t.Errorf("the steady window is [%v, %v), want [%v, %v)", marks[1].Start, marks[1].End, t0, t0.Add(10*time.Second))
+	}
+	if !when(marks[2].Start, t0.Add(10*time.Second)) {
+		t.Errorf("the deploy's window starts at %v, want the steady window's end, %v", marks[2].Start, t0.Add(10*time.Second))
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"pass", "pass", "pass"}, r.results()); diff != "" {
+		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+	if r.Windows[0].Name != "steady" || r.Windows[0].Start == nil || !r.Windows[0].Start.Equal(t0) {
+		t.Errorf("result.json's first window is %+v, want steady from %v", r.Windows[0], t0)
+	}
+}
+
+func TestAFailedCheckInTheInstallWindowDecidesNothing(t *testing.T) {
+	w := newWorld(t)
+	w.probe.events = append(w.probe.events, failureAt(-10*time.Second, -10*time.Second))
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if r := w.result(); len(r.Reasons) != 0 {
+		t.Errorf("reasons %v, want none", r.codes())
+	}
+}
+
+// Rule 4, and Review Focus 4: a run that ends in the install window stops the probe, deletes the
+// cluster and writes a final result.
+func TestTheInstallWindowNotVerified(t *testing.T) {
+	first := t0.Add(-15 * time.Second)
+	failed := verdict.Condition{Code: verdict.InstallFailed, Text: "the install was not ready when limits.timeout passed"}
+	agent := verdict.Condition{Code: verdict.WorkloadUnsupported, At: t0.Add(-6 * time.Second),
+		Text: "daemonset/agent updates with OnDelete; the tool judges only a workload that updates by rolling"}
+	settling := func(s watch.Settling) func(*world) {
+		return func(w *world) { w.watcher.settle = func(time.Time) watch.Settling { return s } }
+	}
+	for _, row := range []struct {
+		name         string
+		script       func(w *world)
+		code, window string
+		end          time.Time // the install window's end in windows.json
+	}{
+		{"the probe exits", func(w *world) {
+			w.probe.events = append(w.probe.events, probe.Event{Fault: &verdict.Condition{Code: verdict.ProbeExited,
+				Text: "the probe exited with exit code 1 (Error)", At: t0.Add(-5 * time.Second)}})
+		}, "probe-exited", "install", t0},
+		{"the probe is silent and then writes again", func(w *world) {
+			w.probe.events = append(passes(-15, -12), passes(-5, 70)...)
+		}, "probe-silent", "install", t0},
+		{"the install fails while it settles",
+			settling(watch.Settling{First: first, Ended: t0.Add(25 * time.Second), InWindow: []verdict.Condition{failed}}),
+			"install-failed", "install", t0.Add(25 * time.Second)},
+		{"a workload the tool cannot judge appears",
+			settling(watch.Settling{First: first, Settled: t0, Ended: t0, InWindow: []verdict.Condition{agent}}),
+			"workload-unsupported", "install", t0},
+		{"the install had failed before the first observation",
+			settling(watch.Settling{First: first, Ended: first, Before: []verdict.Condition{failed}}),
+			"install-failed", "", first},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			w := newWorld(t)
+			row.script(w)
+			if code := w.run(context.Background()); code != 2 {
+				t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+			}
+			r := w.result()
+			if !r.Final || r.Verdict != "not-verified" {
+				t.Errorf("final %v, verdict %q; want a final not-verified", r.Final, r.Verdict)
+			}
+			if diff := cmp.Diff([]string{row.code}, r.codes()); diff != "" {
+				t.Errorf("reasons (-want +got):\n%s", diff)
+			}
+			if window, _ := r.windowOf(row.code); window != row.window {
+				t.Errorf("%s in window %q, want %q", row.code, window, row.window)
+			}
+			if marks := w.windowMarks(); len(marks) < 2 || !when(marks[0].End, row.end) || marks[1].Start != nil {
+				t.Errorf("marks %+v; want the install window to end at %v, and no steady window", marks, row.end)
+			}
+			if diff := cmp.Diff([]string{"not-run", "not-run", "not-run"}, r.results()); diff != "" {
+				t.Errorf("window results (-want +got):\n%s", diff)
+			}
+			for name, want := range map[string]int{"deploy": 0, "probe-stop": 1, "delete": 1} {
+				if n := w.calls.count(name); n != want {
+					t.Errorf("%s was called %d times, want %d", name, n, want)
+				}
+			}
+		})
+	}
+}
+
+func TestSignalInTheInstallWindow(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.hooks["install-settled"] = func() {
+		w.clock.Advance(4 * time.Second)
+		cancel()
+	}
+	if code := w.run(ctx); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if window, _ := r.windowOf("interrupted"); window != "install" || !r.Final {
+		t.Errorf("interrupted in window %q, final %v; want install and final", window, r.Final)
+	}
+	if marks := w.windowMarks(); marks[0].End == nil || !marks[0].End.Equal(t0.Add(-11*time.Second)) || marks[1].Start != nil {
+		t.Errorf("marks %+v; want the install window cut at the signal and no steady window", marks)
+	}
+}
+
+func TestAToolFailureInTheInstallWindow(t *testing.T) {
+	w := newWorld(t)
+	w.hooks["install-settled"] = func() { panic("the watch unit broke") }
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if window, text := w.result().windowOf("internal-error"); window != "install" || text != "the watch unit broke" {
+		t.Errorf("internal-error in window %q with text %q", window, text)
+	}
+	w.probeWasStopped()
+}
+
+func TestASettlingWithNoResultIsTheToolsFailure(t *testing.T) {
+	w := newWorld(t)
+	w.watcher.settle = func(first time.Time) watch.Settling {
+		return watch.Settling{First: first, Ended: first.Add(time.Second)}
+	}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if window, _ := w.result().windowOf("internal-error"); window != "install" {
+		t.Errorf("internal-error in window %q, want install", window)
+	}
+	w.probeWasStopped()
+}
+
+// probeWasStopped fails the test unless the run stopped the probe once, kept the Facts its Stop
+// gave in the probe's entry, and deleted the cluster (section 6, "Stop").
+func (w *world) probeWasStopped() {
+	w.t.Helper()
+	for name, want := range map[string]int{"probe-stop": 1, "delete": 1} {
+		if n := w.calls.count(name); n != want {
+			w.t.Errorf("%s was called %d times, want %d", name, n, want)
+		}
+	}
+	r := w.result()
+	if len(r.Probes) != 1 || r.Probes[0].Lines != w.probe.facts.Lines {
+		w.t.Errorf("probes %+v, want one whose lines are the %d that Stop gave", r.Probes, w.probe.facts.Lines)
+	}
+}
+
+// A failure of the tool stops the probe, as the end of the windows does (section 6, "Stop"). When
+// the failure was a panic of the event reader, nothing reads the probe's events any more, and the
+// drain's lines come on a channel with no buffer: the stop must not wait for a reader.
+func TestTheProbeStopsAfterTheReaderPanics(t *testing.T) {
+	w := newWorld(t)
+	w.probe.unbuffered = true
+	w.probe.events = passes(-15, -15)
+	w.probe.last = passes(-14, -10)
+	defer func(h func(probe.Event)) { eventHook = h }(eventHook)
+	eventHook = func(probe.Event) { panic("the timeline broke") }
+	done := make(chan int, 1)
+	go func() { done <- w.run(context.Background()) }()
+	select {
+	case code := <-done:
+		if code != 2 {
+			t.Fatalf("exit %d, want 2", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the run did not end: the probe's stop waits for a reader that has failed")
+	}
+	r := w.result()
+	if window, text := r.windowOf("internal-error"); window != "install" || text != "the timeline broke" {
+		t.Errorf("internal-error in window %q with text %q", window, text)
+	}
+	w.probeWasStopped()
+}
+
+// A panic or a signal while the probe stops after a failure of the tool: the panic is one more
+// internal-error and the first stays, and a signal is placed as stopProbe places one.
+func TestWhileTheProbeStopsAfterAToolFailure(t *testing.T) {
+	t.Run("a panic", func(t *testing.T) {
+		w := newWorld(t)
+		w.hooks["install-settled"] = func() { panic("the watch unit broke") }
+		w.hooks["probe-stop"] = func() { panic("the probe unit broke") }
+		if code := w.run(context.Background()); code != 2 {
+			t.Fatalf("exit %d, want 2", code)
+		}
+		r := w.result()
+		var texts []string
+		for _, x := range r.Reasons {
+			texts = append(texts, x.Code+" in "+x.Window+": "+x.Text)
+		}
+		want := []string{"internal-error in install: the watch unit broke", "internal-error in install: the probe unit broke"}
+		if diff := cmp.Diff(want, texts); diff != "" {
+			t.Errorf("reasons (-want +got):\n%s", diff)
+		}
+		for name, want := range map[string]int{"probe-stop": 1, "delete": 1} {
+			if n := w.calls.count(name); n != want {
+				t.Errorf("%s was called %d times, want %d", name, n, want)
+			}
+		}
+	})
+	t.Run("a signal", func(t *testing.T) {
+		w := newWorld(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		w.hooks["install-settled"] = func() { panic("the watch unit broke") }
+		w.hooks["probe-stop"] = cancel
+		if code := w.run(ctx); code != 2 {
+			t.Fatalf("exit %d, want 2", code)
+		}
+		r := w.result()
+		if diff := cmp.Diff([]string{"interrupted", "internal-error"}, r.codes()); diff != "" {
+			t.Errorf("reasons (-want +got):\n%s", diff)
+		}
+		if window, _ := r.windowOf("interrupted"); window != "install" {
+			t.Errorf("interrupted in window %q, want install", window)
+		}
+		for name, want := range map[string]int{"probe-stop": 1, "delete": 0} {
+			if n := w.calls.count(name); n != want {
+				t.Errorf("%s was called %d times, want %d", name, n, want)
+			}
+		}
+		if len(r.Probes) != 1 || r.Probes[0].Lines != w.probe.facts.Lines {
+			t.Errorf("probes %+v, want one whose lines are the %d that Stop gave", r.Probes, w.probe.facts.Lines)
+		}
+	})
+}
+
+// Rule 8: a condition of the install window that the tool learns of only after the steady window
+// began is placed late. The steady window runs to its end, and the run stops there.
+func TestAnInstallWindowJudgedLate(t *testing.T) {
+	w := newWorld(t)
+	u := w.units()
+	u.Clock = &lateClock{fakeClock: w.clock, before: func() {
+		w.probe.send(probe.Event{Fault: &verdict.Condition{Code: verdict.ProbeLineInvalid,
+			Text: "the line is not one JSON object", At: t0.Add(-5 * time.Second)}})
+	}}
+	code := Run(context.Background(), Options{ConfigPath: filepath.Join(w.cfg.Dir, "rollproof.yaml"), Out: w.out,
+		Stdout: &w.stdout, Stderr: &w.stderr, Version: "test", Getenv: func(string) string { return "" }}, u)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if window, _ := r.windowOf("probe-line-invalid"); window != "install" {
+		t.Errorf("probe-line-invalid in window %q, want install", window)
+	}
+	if diff := cmp.Diff([]string{"not-judged", "not-run", "not-run"}, r.results()); diff != "" {
+		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+	if end := r.Windows[0].End; end == nil || !end.Equal(t0.Add(10*time.Second)) {
+		t.Errorf("the steady window ended at %v, want its whole length, %v", end, t0.Add(10*time.Second))
+	}
+	if n := w.calls.count("deploy"); n != 0 {
+		t.Errorf("deploy was called %d times, want 0", n)
 	}
 }

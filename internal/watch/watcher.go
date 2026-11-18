@@ -18,8 +18,8 @@ import (
 	"rollproof/internal/verdict"
 )
 
-// pollEvery is how often InstallReady and Transition look again when no change wakes them, so
-// that a settle time or a timeout that passes with no change is noticed.
+// pollEvery is how often InstallReady, InstallSettled and Transition look again when no change
+// wakes them, so that a settle time or a timeout that passes with no change is noticed.
 const pollEvery = 200 * time.Millisecond
 
 // Options is what a Watcher needs. Selector is a label selector as text, empty for every
@@ -58,8 +58,8 @@ type Watcher struct {
 	// streams counts the watch streams whose events are still passed on.
 	streams atomic.Int32
 
-	// wake holds a signal when tr has been told a change since InstallReady or Transition last
-	// looked; one signal stands for any number of changes.
+	// wake holds a signal when tr has been told a change since InstallReady, InstallSettled or
+	// Transition last looked; one signal stands for any number of changes.
 	wake     chan struct{}
 	stop     chan struct{} // closed by Stop; the informers run until then
 	done     chan struct{} // closed when Stop has returned and no goroutine of the Watcher runs
@@ -165,6 +165,36 @@ func (w *Watcher) InstallReady(ctx context.Context, began time.Time, exited <-ch
 		w.mu.Unlock()
 		if ready || err != nil {
 			return inst, err
+		}
+	}
+}
+
+// InstallSettled returns when the settling has ended, as InstallSettling says. When ctx ends
+// first, it returns what it has: the settling as it ended, when it had ended by the Tracker's
+// times, or else Settled zero, Ended that moment, and no condition. Call it once, after
+// InstallReady has returned with no error.
+func (w *Watcher) InstallSettled(ctx context.Context, first time.Time) Settling {
+	tick := time.NewTicker(pollEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			w.mu.Lock()
+			now := w.o.Now()
+			s, ended := w.tr.InstallSettling(first, now)
+			w.mu.Unlock()
+			if !ended {
+				s.Ended = later(now, first)
+			}
+			return s
+		case <-tick.C:
+		case <-w.wake:
+		}
+		w.mu.Lock()
+		s, ended := w.tr.InstallSettling(first, w.o.Now())
+		w.mu.Unlock()
+		if ended {
+			return s
 		}
 	}
 }
@@ -334,8 +364,8 @@ func (w *Watcher) gone(kind string, obj any) {
 	w.signal()
 }
 
-// signal wakes InstallReady or Transition without blocking: a signal already waiting stands for
-// this change too, because the Tracker was told it before.
+// signal wakes InstallReady, InstallSettled or Transition without blocking: a signal already
+// waiting stands for this change too, because the Tracker was told it before.
 func (w *Watcher) signal() {
 	select {
 	case w.wake <- struct{}{}:

@@ -386,3 +386,47 @@ func readTransitions(t *testing.T, out string) []transitionResult {
 	}
 	return r.Transitions
 }
+
+// installResult is result.json's install, the steady window's times, and each reason's detail,
+// as far as the fixtures read them.
+type installResult struct {
+	Install *struct {
+		Ready            time.Time      `json:"ready"`
+		FirstObservation *time.Time     `json:"first_observation"`
+		Settled          *time.Time     `json:"settled"`
+		Checks           int            `json:"checks"`
+		Failed           int            `json:"failed"`
+		FailedByClass    map[string]int `json:"failed_by_class"`
+		LastFailure      *time.Time     `json:"last_failure"`
+	} `json:"install"`
+	Windows []struct {
+		Name  string     `json:"name"`
+		Start *time.Time `json:"start"`
+		End   *time.Time `json:"end"`
+	} `json:"windows"`
+	Reasons []struct {
+		Code   string   `json:"code"`
+		Detail []string `json:"detail"`
+	} `json:"reasons"`
+}
+
+// readInstall reads out/result.json as an installResult, and fails the test when the file has no
+// install, or no steady window first in its list.
+func readInstall(t *testing.T, out string) installResult {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(out, "result.json"))
+	if err != nil {
+		t.Fatalf("result.json: %v", err)
+	}
+	var r installResult
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatalf("result.json: %v", err)
+	}
+	if r.Install == nil {
+		t.Fatalf("result.json has no install")
+	}
+	if len(r.Windows) == 0 || r.Windows[0].Name != "steady" {
+		t.Fatalf("result.json's windows do not begin with the steady window: %+v", r.Windows)
+	}
+	return r
+}

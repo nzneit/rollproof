@@ -49,6 +49,21 @@
       "lag_ms": 35
     }
   ],
+  "install": {
+    "ready": "2026-11-13T09:59:31.000Z",
+    "first_observation": "2026-11-13T09:59:37.000Z",
+    "settled": "2026-11-13T09:59:52.000Z",
+    "settle_restarted_by": [],
+    "checks": 3000,
+    "failed": 6,
+    "failed_by_class": {
+      "refused": 5,
+      "timeout": 1
+    },
+    "last_failure": "2026-11-13T09:59:37.100Z",
+    "slowest_ms": 44,
+    "lag_ms": 9
+  },
   "transitions": [
     {
       "name": "deploy",

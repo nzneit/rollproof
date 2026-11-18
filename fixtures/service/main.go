@@ -9,6 +9,7 @@
 // SHUTDOWN          exit | drain-now | helper
 // SERVE_AFTER_TERM  helper: keep serving this long after SIGTERM
 // DRAIN_DEADLINE    drain-now, helper: deadline given to http.Server.Shutdown
+// FAIL_WORK         true: GET /work answers 500 with "failing" and does nothing else
 // version is built in: -ldflags "-X main.version=…" (default dev), so that two builds are two images.
 package main
 
@@ -69,12 +70,17 @@ func serve(ctx context.Context, env func(string) string, ready chan<- string) er
 	if addr == "" {
 		addr = ":8080"
 	}
+	failWork := env("FAIL_WORK") == "true"
 
-	log.Printf("pod=%s version=%s shutdown=%s start_delay=%s serve_after_term=%s drain_deadline=%s",
-		pod, version, mode, startDelay, serveAfter, drain)
+	log.Printf("pod=%s version=%s shutdown=%s start_delay=%s serve_after_term=%s drain_deadline=%s fail_work=%t",
+		pod, version, mode, startDelay, serveAfter, drain, failWork)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /work", func(w http.ResponseWriter, r *http.Request) {
+		if failWork {
+			http.Error(w, "failing", http.StatusInternalServerError)
+			return
+		}
 		ms, _ := strconv.Atoi(r.URL.Query().Get("ms"))
 		if ms > 0 {
 			time.Sleep(time.Duration(ms) * time.Millisecond)

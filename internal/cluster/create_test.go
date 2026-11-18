@@ -249,3 +249,18 @@ func TestCreateFailureTexts(t *testing.T) {
 		})
 	}
 }
+
+// What a node said when it refused a setting goes into a reason on one line.
+func TestOneLine(t *testing.T) {
+	for _, c := range []struct{ name, in, want string }{
+		{"nothing said", "", ""},
+		{"one line with a line end", "sysctl: permission denied on key \"net.netfilter.x\"\n", "sysctl: permission denied on key \"net.netfilter.x\""},
+		{"two lines", "sysctl: cannot stat /proc/sys/net/x:\n  No such file or directory\n", "sysctl: cannot stat /proc/sys/net/x: No such file or directory"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := oneLine([]byte(c.in)); got != c.want {
+				t.Errorf("oneLine(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}

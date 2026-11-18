@@ -217,6 +217,13 @@ func TestCreateAndDelete(t *testing.T) {
 		t.Error("Exec of a command that exits 1 gave no error")
 	}
 
+	for _, n := range nodes {
+		out, err := c.Exec(ctx, n, "sysctl", "-n", "net.netfilter.nf_conntrack_tcp_timeout_syn_sent")
+		if err != nil || strings.TrimSpace(string(out)) != "5" {
+			t.Errorf("node %s keeps an attempt with no answer for %q s, %v; want 5", n, strings.TrimSpace(string(out)), err)
+		}
+	}
+
 	if got := fileHash(t, callers); got != before {
 		t.Errorf("the caller's kubeconfig changed: %s before, %s after", before, got)
 	}

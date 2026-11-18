@@ -40,6 +40,11 @@ const namePrefix = "rollproof-"
 // ready.
 const inotifyHint = "; a cluster of several nodes also fails when the kernel's inotify limits are low (fs.inotify.max_user_watches, fs.inotify.max_user_instances)"
 
+// unansweredAttempt is the kernel setting, as sysctl -w takes it, that Create writes in each node:
+// how long, in seconds, connection tracking keeps an attempt to connect that has had no answer
+// (section 9).
+const unansweredAttempt = "net.netfilter.nf_conntrack_tcp_timeout_syn_sent=5"
+
 // Through rootless nerdctl, kind's Create sometimes fails at its 30-second wait for a node's log
 // line, although the log holds the line (proof p08). Step 3 of Create tries kind's Create again
 // for that failure alone, createAttempts times in all.
@@ -129,10 +134,11 @@ type Cluster struct {
 }
 
 // Create removes whatever an earlier run of this name left, then creates the cluster and its
-// registry and returns when every node is ready, DNS runs and both namespaces exist. On an error
-// it removes the run, unless s.Keep is set or ctx has ended; when that removal fails too, parts
-// stay behind and the text says so. An error is a Condition with ClusterFailed. A name without
-// the prefix rollproof- is an InternalError.
+// registry and returns when every node is ready, DNS runs and both namespaces exist. Each node
+// keeps an attempt to connect that had no answer for 5 s (section 9). On an error it removes the
+// run, unless s.Keep is set or ctx has ended; when that removal fails too, parts stay behind and
+// the text says so. An error is a Condition with ClusterFailed. A name without the prefix
+// rollproof- is an InternalError.
 func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	deadline := time.Now().Add(s.Timeout)
 
@@ -213,6 +219,14 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	for _, n := range listed {
 		if err := nodeutils.WriteFile(n, "/etc/containerd/certs.d/"+TestHost+"/hosts.toml", HostsTOML(c.NodeRegistry)); err != nil {
 			return fail("write the node settings", fmt.Errorf("node %s: %w", n, err))
+		}
+		var out bytes.Buffer
+		if err := n.CommandContext(ctx, "sysctl", "-w", unansweredAttempt).SetStdout(&out).SetStderr(&out).Run(); err != nil {
+			err = fmt.Errorf("node %s: sysctl -w %s: %w", n, unansweredAttempt, err)
+			if said := oneLine(out.Bytes()); said != "" {
+				err = fmt.Errorf("%w: %s", err, said)
+			}
+			return fail("write the node settings", err)
 		}
 	}
 	if c.nodes, err = byRole(listed); err != nil {
@@ -481,4 +495,10 @@ func remove(ctx context.Context, e Engine, name, runDir string) error {
 		errs = append(errs, err)
 	}
 	return join(errs...)
+}
+
+// oneLine is what a command said, on one line, so that a reason that quotes it stays on one line:
+// its fields separated by single spaces, and "" when it said nothing.
+func oneLine(b []byte) string {
+	return strings.Join(strings.Fields(string(b)), " ")
 }

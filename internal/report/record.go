@@ -6,8 +6,9 @@ package report
 import "time"
 
 // Run is the record of one run: everything result.json holds, and Out, the
-// results folder, for the console's last line. It holds no values but strings,
-// numbers, booleans and times.
+// results folder, for the console's last line. Install is the install record,
+// or nil for a run that ended before the install was ready. It holds no values
+// but strings, numbers, booleans and times.
 type Run struct {
 	Schema           int          `json:"schema"`
 	Final            bool         `json:"final"`
@@ -16,6 +17,7 @@ type Run struct {
 	Name             string       `json:"name"`
 	Reasons          []Reason     `json:"reasons"`
 	Windows          []Window     `json:"windows"`
+	Install          *Install     `json:"install"`
 	Transitions      []Transition `json:"transitions"`
 	Probes           []Probe      `json:"probes"`
 	Releases         []Release    `json:"releases"`
@@ -54,6 +56,22 @@ type Window struct {
 	CrossedStart      int            `json:"crossed_start"`
 	FailedByClass     map[string]int `json:"failed_by_class"`
 	FirstFailure      *time.Time     `json:"first_failure"`
+	SlowestMs         float64        `json:"slowest_ms"`
+	LagMs             float64        `json:"lag_ms"`
+}
+
+// Install is the install as the report states it, apart from the windows. A
+// nil time is one that never came. The counts are the install window's, all
+// zero when the probe gave no observation.
+type Install struct {
+	Ready             time.Time      `json:"ready"`
+	FirstObservation  *time.Time     `json:"first_observation"`
+	Settled           *time.Time     `json:"settled"`
+	SettleRestartedBy []string       `json:"settle_restarted_by"`
+	Checks            int            `json:"checks"`
+	Failed            int            `json:"failed"`
+	FailedByClass     map[string]int `json:"failed_by_class"`
+	LastFailure       *time.Time     `json:"last_failure"`
 	SlowestMs         float64        `json:"slowest_ms"`
 	LagMs             float64        `json:"lag_ms"`
 }

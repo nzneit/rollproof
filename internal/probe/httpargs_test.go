@@ -41,22 +41,9 @@ func TestHTTPArgsRoundTrip(t *testing.T) {
 			t.Errorf("ParseHTTPArgs(HTTPArgs(%+v)): %v", o, err)
 			continue
 		}
-		// No flag carries the warm-up: parsing gives the built-in probe one second of it.
-		o.Warmup = time.Second
 		if !reflect.DeepEqual(got, o) {
 			t.Errorf("round trip:\ngot  %+v\nwant %+v", got, o)
 		}
-	}
-}
-
-func TestParseHTTPArgsGivesTheWarmup(t *testing.T) {
-	o, err := ParseHTTPArgs([]string{"probe", "http", "--url", "http://orders.orders.svc/",
-		"--rate", "200", "--timeout", "2s", "--expect-status", "200-299"})
-	if err != nil {
-		t.Fatalf("ParseHTTPArgs: %v", err)
-	}
-	if o.Warmup != time.Second {
-		t.Errorf("Warmup is %v, want %v", o.Warmup, time.Second)
 	}
 }
 

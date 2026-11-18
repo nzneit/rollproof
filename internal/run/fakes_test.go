@@ -280,6 +280,29 @@ type fakeWatcher struct {
 	// before, when set, runs at the start of Transition, before it waits for the
 	// command: a test's way to fail while the command is still running.
 	before func(verdict.WindowName)
+	// settle, when set, gives what InstallSettled returns for the first observation it is handed.
+	settle func(first time.Time) watch.Settling
+	// late is how far the clock runs past the settling's end before InstallSettled returns, as
+	// when the tool looks at the cluster a moment after the install settled.
+	late time.Duration
+}
+
+// InstallSettled records "install-settled" and runs its hook. When ctx has ended it gives a
+// settling cut at the clock's time. Otherwise it gives the scripted settling, or one that settles
+// limits.settle after first, and moves the clock to the settling's end and late past it.
+func (f *fakeWatcher) InstallSettled(ctx context.Context, first time.Time) watch.Settling {
+	f.w.calls.add("install-settled")
+	f.w.hook("install-settled")
+	if ctx.Err() != nil {
+		return watch.Settling{First: first, Ended: f.w.clock.Now()}
+	}
+	end := first.Add(f.w.cfg.Limits.Settle)
+	s := watch.Settling{First: first, Settled: end, Ended: end}
+	if f.settle != nil {
+		s = f.settle(first)
+	}
+	f.w.clock.Advance(s.Ended.Sub(f.w.clock.Now()) + f.late)
+	return s
 }
 
 // UseService keeps the Service and the calls made before it.
@@ -353,28 +376,44 @@ func (f *fakeWatcher) Stop() {
 
 // fakeProbe is the probe.Probe that fakeCluster.Probe returns.
 type fakeProbe struct {
-	w        *world
-	startErr error
-	stopErr  error
-	events   []probe.Event
-	ch       chan probe.Event
-	once     sync.Once
-	facts    probe.Facts
+	w          *world
+	startErr   error
+	stopErr    error
+	events     []probe.Event
+	unbuffered bool // Events gives a channel with no buffer: a send returns only when a reader takes it
+	ch         chan probe.Event
+	made, once sync.Once
+	facts      probe.Facts
+	last       []probe.Event // the lines that the drain gives: Stop sends them before it closes the channel
 }
 
-// Start records "start", runs its hook and fills a channel with the scripted
-// events.
+// Events gives the probe's channel, made at the first call: with room for the scripted events and
+// 64 more, or with no buffer when unbuffered is set.
+func (p *fakeProbe) Events() <-chan probe.Event {
+	p.made.Do(func() {
+		if p.unbuffered {
+			p.ch = make(chan probe.Event)
+		} else {
+			p.ch = make(chan probe.Event, len(p.events)+64)
+		}
+	})
+	return p.ch
+}
+
+// Start records "start", runs its hook and sends every scripted event into the probe's channel.
+// With startErr it then closes the channel, as a Start that failed does, and returns the error.
 func (p *fakeProbe) Start(ctx context.Context) (probe.Started, error) {
 	p.w.calls.add("start")
 	p.w.hook("start")
-	if p.startErr != nil {
-		return probe.Started{}, p.startErr
-	}
-	p.ch = make(chan probe.Event, len(p.events)+64)
+	p.Events()
 	for _, e := range p.events {
 		p.ch <- e
 	}
-	return probe.Started{First: p.w.clock.Now(), Events: p.ch}, nil
+	if p.startErr != nil {
+		p.once.Do(func() { close(p.ch) })
+		return probe.Started{}, p.startErr
+	}
+	return probe.Started{First: p.w.clock.Now()}, nil
 }
 
 // send puts one more event into the probe's channel.
@@ -384,25 +423,29 @@ func (p *fakeProbe) send(ev probe.Event) {
 	}
 }
 
-// Stop records "probe-stop", runs its hook, closes the channel once and gives
-// the scripted facts and error.
+// Stop records "probe-stop", runs its hook, sends the drain's lines, closes the channel once and
+// gives the scripted facts and error.
 func (p *fakeProbe) Stop(ctx context.Context) (probe.Facts, error) {
 	p.w.calls.add("probe-stop")
 	p.w.hook("probe-stop")
 	p.once.Do(func() {
 		if p.ch != nil {
+			for _, e := range p.last {
+				p.ch <- e
+			}
 			close(p.ch)
 		}
 	})
 	return p.facts, p.stopErr
 }
 
-// newWorld scripts a run that passes: the probe reports 200 passed checks
-// each second from t0 to t0+70 s; the deploy and the rollback each replace
-// both pods of deployment/orders, finish 15 s after they begin, and end 30 s
-// after.
+// newWorld scripts a run that passes: the probe's first observation is at
+// t0-15 s, and it reports 200 passed checks each second from there to t0+70 s;
+// the install settles limits.settle later, at t0, where the steady window
+// begins; the deploy and the rollback each replace both pods of
+// deployment/orders, finish 15 s after they begin, and end 30 s after.
 func newWorld(t *testing.T) *world {
-	w := &world{t: t, clock: &fakeClock{now: t0}, calls: &callLog{}, hooks: map[string]func(){},
+	w := &world{t: t, clock: &fakeClock{now: t0.Add(-15 * time.Second)}, calls: &callLog{}, hooks: map[string]func(){},
 		out: t.TempDir(), cfg: testConfig(t)}
 	replaced := watch.Transition{Replaced: true, Workloads: []watch.Count{{Workload: orders,
 		AtStart: 2, Replaced: 2, Created: 2, QuickestStop: 5200 * time.Millisecond, Probed: "yes",
@@ -415,10 +458,10 @@ func newWorld(t *testing.T) *world {
 		{Role: "previous", Chart: "orders", Version: "0.1.0", Source: "./chart"},
 		{Role: "candidate", Chart: "orders", Version: "0.1.0", Source: "./chart", InlineKeys: []string{"image"}}}}
 	w.watcher = &fakeWatcher{w: w,
-		install: watch.Install{Workloads: []watch.Count{{Workload: orders, Created: 2, Probed: "yes",
+		install: watch.Install{Ready: t0.Add(-21 * time.Second), Workloads: []watch.Count{{Workload: orders, Created: 2, Probed: "yes",
 			Digests: []string{"sha256:aaa"}}}},
 		transitions: map[verdict.WindowName]watch.Transition{verdict.Deploy: replaced, verdict.Rollback: replaced}}
-	w.probe = &fakeProbe{w: w, events: passes(0, 70), facts: probe.Facts{Lines: 71, StoppedWhenAsked: true}}
+	w.probe = &fakeProbe{w: w, events: passes(-15, 70), facts: probe.Facts{Lines: 86, StoppedWhenAsked: true}}
 	return w
 }
 

@@ -290,42 +290,35 @@ func (t *Tracker) unschedulable(ws []Workload) []string {
 	return out
 }
 
-// Install is what the install left: every watched workload with the image digests its pods run.
+// Install is what the install left when it was ready: the moment the Tracker first found it
+// ready, and every watched workload with the digests its pods run.
 type Install struct {
+	Ready     time.Time
 	Workloads []Count
 }
 
 // InstallState reports whether the install is ready at now. exited is when its command exited,
 // zero while it runs. The error is a Condition: nothing to watch one settle time after the
-// command exited; a workload the tool cannot judge; or not ready at began plus the timeout.
+// command exited; a workload the tool cannot judge; or not ready at began plus the timeout. From
+// the first call that reports ready, the Tracker notes every break of the install's conditions,
+// and began is the install's start for good. Nothing-watched is reported only before that call.
 func (t *Tracker) InstallState(began, exited, now time.Time) (Install, bool, error) {
 	// The install watches the workloads that exist and whose labels matched at their last Set;
 	// those that update by rolling take part.
-	set := map[Workload]bool{}
-	for w, rec := range t.workloads {
-		if rec.gone.IsZero() && rec.matched {
-			set[w] = true
-		}
-	}
-	watched := sortedWorkloads(set)
-	var part, notRolling []Workload
-	for _, w := range watched {
-		if Rolling(t.workloads[w].obj) {
-			part = append(part, w)
-		} else {
-			notRolling = append(notRolling, w)
-		}
-	}
+	watched, part, notRolling := t.installWatched()
 	switch {
 	case !exited.IsZero() && len(notRolling) > 0:
 		return Install{}, false, unsupported(notRolling, t.updateType)
 	case !exited.IsZero() && len(watched) > 0 && t.installReady(part):
-		inst := Install{Workloads: make([]Count, len(watched))}
+		if t.install == nil {
+			t.install = &installTrack{began: began, ready: now, unsupported: map[Workload]time.Time{}}
+		}
+		inst := Install{Ready: t.install.ready, Workloads: make([]Count, len(watched))}
 		for i, w := range watched {
 			inst.Workloads[i] = Count{Workload: w, Digests: t.runningDigests(w)}
 		}
 		return inst, true, nil
-	case !exited.IsZero() && len(watched) == 0 && !now.Before(exited.Add(t.o.Settle)):
+	case t.install == nil && !exited.IsZero() && len(watched) == 0 && !now.Before(exited.Add(t.o.Settle)):
 		return Install{}, false, t.nothingWatched()
 	case !now.Before(began.Add(t.o.Timeout)):
 		text := "the install was not ready within limits.timeout"
@@ -491,9 +484,7 @@ func sortedWorkloads(set map[Workload]bool) []Workload {
 	for w := range set {
 		ws = append(ws, w)
 	}
-	slices.SortFunc(ws, func(a, b Workload) int {
-		return cmp.Or(cmp.Compare(a.Kind, b.Kind), cmp.Compare(a.Name, b.Name))
-	})
+	slices.SortFunc(ws, byKindAndName)
 	return ws
 }
 

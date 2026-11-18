@@ -6,8 +6,8 @@ import (
 )
 
 // Window is one window of a run. Start is zero for a window that never began, and End is zero
-// while it is open. Finished is when its transition last came to be finished: zero for the steady
-// window and for a stall. Conditions are what the caller placed in this window.
+// while it is open. Finished is when its transition last came to be finished: zero for the install
+// and steady windows and for a stall. Conditions are what the caller placed in this window.
 type Window struct {
 	Name       WindowName
 	Start      time.Time
@@ -16,7 +16,7 @@ type Window struct {
 	Conditions []Condition
 }
 
-// Timeline is everything known of a run so far. Before is what happened before the steady window.
+// Timeline is everything known of a run so far. Before is what happened before the first window.
 // Windows are all the run's windows in order, those not yet begun included. Timed are conditions
 // that Decide places by their At. Silence is limits.silence. Now is the moment of judging.
 type Timeline struct {
@@ -40,7 +40,9 @@ type Reason struct {
 
 // WindowResult is how one window ended, with its counts. AfterFinish counts failures that began at
 // or after the window's Finished. Crossed counts failures that began before the window's Start and
-// were written in or after it. FirstFailure is zero when nothing failed.
+// were written in or after it; only a transition's window counts them, because the transition may
+// be what cut them (plan ruling 10). FirstFailure is zero when nothing failed. LastFailure is the
+// latest time at which a check that failed in this window began, zero when nothing failed.
 type WindowResult struct {
 	Name         WindowName
 	Start, End   time.Time
@@ -51,13 +53,15 @@ type WindowResult struct {
 	Crossed      int
 	ByClass      map[string]int
 	FirstFailure time.Time
+	LastFailure  time.Time
 	SlowestMs    float64
 	LagMs        float64
 }
 
 // Decision is the verdict so far. GoOn says whether the run starts its next transition. Uncounted
-// is the number of observations outside every window. Ignored are Timed conditions at or after
-// the last window's End; the report shows them as warnings.
+// is the number of observations that no window counts: those after the last window ended, and
+// those before the first window when the run has no install window. Ignored are Timed conditions
+// at or after the last window's End; the report shows them as warnings.
 type Decision struct {
 	Verdict   Verdict
 	GoOn      bool
@@ -70,12 +74,14 @@ type Decision struct {
 // Decide judges everything known so far by the rules of section 10. Call it at the end of each
 // window and once more after the probe has stopped; the last call's Decision is the run's. GoOn is
 // true when the verdict so far is Pass. A Timeline in which no window has begun, with nothing in
-// Before, gives NotVerified with InternalError.
+// Before, gives NotVerified with InternalError. The install window is judged as the first of
+// t.Windows when the caller puts it there: a failed check in it is counted and gives no condition,
+// and any condition makes it not verified.
 //
 // Decide also reads the observations: it counts them into windows by T, turns a failure into
 // ProbeFailures in a transition's window and into SteadyNotClean in the steady window, and turns a
 // stretch with no observation longer than Silence into ProbeSilent for every window the stretch
-// overlaps.
+// overlaps. Crossed is counted for a transition's window only.
 func Decide(t Timeline) Decision {
 	p := place(t)
 	observe(t, &p)
@@ -258,14 +264,14 @@ func judge(t Timeline, p placement) Decision {
 	return d
 }
 
-// resultOf judges one begun window by its conditions: the steady window is not verified by any
-// condition, a transition's window fails on a Fail code and is otherwise not verified by any
-// condition.
+// resultOf judges one begun window by its conditions: the install window and the steady window are
+// not verified by any condition, a transition's window fails on a Fail code and is otherwise not
+// verified by any condition.
 func resultOf(name WindowName, cs []Condition) Result {
 	if len(cs) == 0 {
 		return ResultPass
 	}
-	if name == Steady {
+	if name == Install || name == Steady {
 		return ResultNotVerified
 	}
 	for _, c := range cs {

@@ -1,16 +1,20 @@
 package report
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 )
 
-// detailWidth is the widest line of section 10's examples, indent included.
+// detailWidth is how wide a reason's detail line or an install restart line may be, indent
+// included, before it wraps. It was the widest line of section 10's examples before the install's
+// lines; the install's checks line, at 99 characters, is written whole.
 const detailWidth = 92
 
 // notExercised is what a pass did not exercise, in the design's order.
@@ -27,18 +31,19 @@ var notExercised = []string{
 }
 
 // Console returns the text a run prints at its end, as section 10 shows it:
-// the verdict line, the releases, images and probe, one row for each window
-// and for each workload of each transition, every reason with its code, the
-// lists of what a pass exercised and did not, every warning, and the results
-// folder. It is a pure function of r: no clock, no environment, no terminal
-// width.
+// the verdict line, the releases, images, probe and install, one row for each
+// window and for each workload of each transition, every reason with its code,
+// the lists of what a pass exercised and did not, every warning, and the
+// results folder. It prints what the run reached: the images' and the probe's
+// lines once the record has a probe, the install's lines once the install has a
+// first observation, and the windows' table once a window of the list began. It
+// stays a pure function of r: no clock, no environment, no terminal width.
 func Console(r Run) string {
 	r = cleanRun(r)
 	var blocks [][]string
 	blocks = append(blocks, []string{verdictLine(r)})
 	blocks = append(blocks, setUp(r))
-	started := probeStarted(r)
-	if started {
+	if windowStarted(r) {
 		blocks = append(blocks, windowsTable(r))
 	}
 	blocks = append(blocks, transitionsTable(r))
@@ -104,6 +109,19 @@ func cleanSettings(s []Setting) []Setting {
 	return out
 }
 
+// cleanClasses cleans the names of the classes. Classes whose names clean to one name are one
+// class, with their counts added, so that the counts still sum to the failed checks.
+func cleanClasses(m map[string]int) map[string]int {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]int, len(m))
+	for name, n := range m {
+		out[clean(name)] += n
+	}
+	return out
+}
+
 // cleanRun is a copy of r with every string that the console prints cleaned.
 // Console prints only from this copy, so no print site can miss a field.
 func cleanRun(r Run) Run {
@@ -157,6 +175,12 @@ func cleanRun(r Run) Run {
 		cl.Provider, cl.Kubernetes = clean(cl.Provider), clean(cl.Kubernetes)
 		c.Cluster = &cl
 	}
+	if r.Install != nil {
+		in := *r.Install
+		in.SettleRestartedBy = cleanAll(r.Install.SettleRestartedBy)
+		in.FailedByClass = cleanClasses(r.Install.FailedByClass)
+		c.Install = &in
+	}
 	return c
 }
 
@@ -186,6 +210,10 @@ func verdictLine(r Run) string {
 }
 
 func probeStarted(r Run) bool {
+	return len(r.Probes) > 0
+}
+
+func windowStarted(r Run) bool {
 	for _, w := range r.Windows {
 		if w.Start != nil {
 			return true
@@ -194,10 +222,10 @@ func probeStarted(r Run) bool {
 	return false
 }
 
-// setUp is the block of releases, images, probe, changed settings and
+// setUp is the block of releases, images, probe, install, changed settings and
 // removed variables. Its first column is 12 characters wide.
 func setUp(r Run) []string {
-	started := probeStarted(r)
+	hasProbe := probeStarted(r)
 	var lines []string
 	add := func(word, text string) {
 		lines = append(lines, pad(word, 12)+text)
@@ -207,7 +235,7 @@ func setUp(r Run) []string {
 	for _, rel := range r.Releases {
 		roleWidth = max(roleWidth, len(rel.Role))
 	}
-	if started {
+	if hasProbe {
 		for _, img := range r.Images {
 			roleWidth = max(roleWidth, len(img.Name))
 		}
@@ -230,7 +258,7 @@ func setUp(r Run) []string {
 		add(word, pad(rel.Role, roleWidth)+rel.Chart+" "+rel.Version+", "+rel.Source+"; "+values)
 	}
 
-	if started {
+	if hasProbe {
 		for i, img := range r.Images {
 			word := ""
 			if i == 0 {
@@ -259,6 +287,7 @@ func setUp(r Run) []string {
 			lines = append(lines, probeLines(p)...)
 		}
 	}
+	lines = append(lines, installLines(r)...)
 
 	var differ []string
 	collect := func(s []Setting) {
@@ -333,6 +362,83 @@ func probeLines(p Probe) []string {
 		lines = append(lines, indent+"the probe did not stop when asked; checks still in flight were not reported")
 	}
 	return lines
+}
+
+// installLines are the install's lines: the first has "install" in the first
+// column, and every further line is indented 12 spaces. There are none before
+// the probe's first observation.
+func installLines(r Run) []string {
+	in := r.Install
+	if in == nil || in.FirstObservation == nil {
+		return nil
+	}
+	const indent = "            "
+	head := "had not settled under the probe when the run ended"
+	if in.Settled != nil {
+		head = fmt.Sprintf("settled after %.1f s under the probe",
+			float64(in.Settled.Sub(*in.FirstObservation).Milliseconds())/1000)
+	}
+	decided := "failures not judged"
+	for _, rs := range r.Reasons {
+		if rs.Decided && rs.Window == "install" {
+			decided = "NOT VERIFIED"
+			break
+		}
+	}
+	lines := []string{pad("install", 12) + head + "; " + decided}
+
+	checks := thousands(in.Checks) + " checks"
+	if in.Checks == 1 {
+		checks = "1 check"
+	}
+	line := indent + checks + ", " + thousands(in.Failed) + " failed"
+	if in.Failed > 0 {
+		if classes := classCounts(in.FailedByClass); classes != "" {
+			line += " (" + classes + ")"
+		}
+		switch {
+		case in.Settled != nil && in.LastFailure != nil:
+			line += fmt.Sprintf(", the last %.1f s before the steady window",
+				float64(in.Settled.Sub(*in.LastFailure).Milliseconds())/1000)
+		case in.LastFailure != nil:
+			line += ", the last at " + in.LastFailure.UTC().Format("15:04:05.00")
+		}
+	}
+	lines = append(lines, line)
+
+	slowest, behind := "-", "-"
+	if in.Checks != 0 {
+		behind = millis(in.LagMs)
+		if in.Checks != in.Failed {
+			slowest = millis(in.SlowestMs)
+		}
+	}
+	lines = append(lines, indent+"slowest "+slowest+", behind "+behind)
+
+	for _, s := range in.SettleRestartedBy {
+		lines = append(lines, wrap(indent, "the settle time started again: "+s)...)
+	}
+	return lines
+}
+
+// classCounts writes the classes of failures with their counts: the most
+// frequent first, and equal counts by name.
+func classCounts(m map[string]int) string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	slices.SortFunc(names, func(a, b string) int {
+		if c := cmp.Compare(m[b], m[a]); c != 0 {
+			return c
+		}
+		return strings.Compare(a, b)
+	})
+	parts := make([]string, len(names))
+	for i, name := range names {
+		parts[i] = name + " " + thousands(m[name])
+	}
+	return strings.Join(parts, ", ")
 }
 
 func pad(s string, width int) string {
@@ -524,7 +630,7 @@ func exercisedLists(r Run) []string {
 	}
 	lines = append(lines, "not exercised")
 	if hasWindowThatRan(r, "deploy") && !hasWindowThatRan(r, "rollback") {
-		lines = append(lines, "  the candidate's shutdown, because the run has no rollback")
+		lines = append(lines, "  the candidate's shutdown and the installed release's start-up, because the run has no rollback")
 	}
 	for _, n := range notExercised {
 		lines = append(lines, "  "+n)

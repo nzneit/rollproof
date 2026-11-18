@@ -28,6 +28,14 @@ func rollback(cs ...Condition) Window {
 	return Window{Name: Rollback, Start: at(40 * sec), Finished: at(55 * sec), End: at(70 * sec), Conditions: cs}
 }
 
+// The install window of the tables: [-15 s, 0 s), before the steady window.
+func install(cs ...Condition) Window {
+	return Window{Name: Install, Start: at(-15 * sec), End: at(0), Conditions: cs}
+}
+
+// withInstall puts the install window before ws.
+func withInstall(ws []Window) []Window { return append([]Window{install()}, ws...) }
+
 // stalled is w as a transition that never finished.
 func stalled(w Window) Window { w.Finished = time.Time{}; return w }
 
@@ -43,7 +51,7 @@ func timed(c Code, d time.Duration) Condition {
 }
 
 // worked gives tl the observations of a probe that worked: one passing
-// summary line a second from the steady window's Start to the end of the
+// summary line a second from the first window's Start to the end of the
 // last window that began (Now while that window is open), and a Silence of
 // 5 s, so that counting observations adds no condition to a row.
 func worked(tl Timeline) Timeline {
@@ -220,6 +228,38 @@ func placedRows() []placedRow {
 		tl: Timeline{Windows: []Window{steady(), deploy(), {Name: Rollback, Start: at(40500 * msec), Finished: at(55 * sec), End: at(70 * sec)}},
 			Timed: []Condition{timed(ProbeLineInvalid, 40200*msec)}, Now: at(70 * sec)},
 		want: summary{Verdict: NotVerified, Results: []Result{ResultPass, ResultNotVerified, NotJudged}, Reasons: []string{"deploy:probe-line-invalid"}, Decided: ProbeLineInvalid},
+	}, {
+		name: "the install window and the three windows ended with no condition",
+		tl:   Timeline{Windows: []Window{install(), steady(), deploy(), rollback()}, Now: at(70 * sec)},
+		want: summary{Verdict: Pass, Results: []Result{ResultPass, ResultPass, ResultPass, ResultPass}, GoOn: true},
+	}, {
+		name: "the install window ended clean and the steady window has not begun: the run goes on",
+		tl:   Timeline{Windows: []Window{install(), notBegun(Steady), notBegun(Deploy), notBegun(Rollback)}, Now: at(0)},
+		want: summary{Verdict: Pass, Results: []Result{ResultPass, NotRun, NotRun, NotRun}, GoOn: true},
+	}, {
+		name: "the install window holds only a fail code; it is not verified all the same",
+		tl:   Timeline{Windows: []Window{install(cond(CommandFailed)), notBegun(Steady), notBegun(Deploy), notBegun(Rollback)}, Now: at(0)},
+		want: summary{Verdict: NotVerified, Results: []Result{ResultNotVerified, NotRun, NotRun, NotRun}, Reasons: []string{"install:command-failed"}, Decided: CommandFailed},
+	}, {
+		name: "two conditions in the install window; the earlier in Codes decides",
+		tl:   Timeline{Windows: []Window{install(cond(ProbeSilent), cond(InstallFailed)), notBegun(Steady), notBegun(Deploy), notBegun(Rollback)}, Now: at(0)},
+		want: summary{Verdict: NotVerified, Results: []Result{ResultNotVerified, NotRun, NotRun, NotRun}, Reasons: []string{"install:install-failed", "install:probe-silent"}, Decided: InstallFailed},
+	}, {
+		name: "a timed fault of the probe inside the install window",
+		tl:   Timeline{Windows: []Window{install(), notBegun(Steady), notBegun(Deploy), notBegun(Rollback)}, Timed: []Condition{timed(ProbeExited, -5*sec)}, Now: at(0)},
+		want: summary{Verdict: NotVerified, Results: []Result{ResultNotVerified, NotRun, NotRun, NotRun}, Reasons: []string{"install:probe-exited"}, Decided: ProbeExited},
+	}, {
+		name: "a timed fault before the probe's first observation has no window",
+		tl:   Timeline{Windows: []Window{install(), steady(), notBegun(Deploy), notBegun(Rollback)}, Timed: []Condition{timed(ProbeLineInvalid, -16*sec)}, Now: at(10 * sec)},
+		want: summary{Verdict: NotVerified, Results: []Result{NotJudged, NotJudged, NotRun, NotRun}, Reasons: []string{":probe-line-invalid"}, Decided: ProbeLineInvalid},
+	}, {
+		name: "a signal while the probe stops, after a run that ended in the install window",
+		tl:   Timeline{Windows: []Window{install(cond(Interrupted), cond(ProbeSilent)), notBegun(Steady), notBegun(Deploy), notBegun(Rollback)}, Now: at(2 * sec)},
+		want: summary{Verdict: NotVerified, Results: []Result{ResultNotVerified, NotRun, NotRun, NotRun}, Reasons: []string{"install:probe-silent", "install:interrupted"}, Decided: ProbeSilent},
+	}, {
+		name: "the steady window began, but the install window before it never did",
+		tl:   Timeline{Windows: []Window{notBegun(Install), steady(), notBegun(Deploy), notBegun(Rollback)}, Now: at(10 * sec)},
+		want: summary{Verdict: NotVerified, Results: []Result{NotRun, NotJudged, NotRun, NotRun}, Reasons: []string{":internal-error"}, Decided: InternalError},
 	}}
 }
 
@@ -314,6 +354,30 @@ func TestFailOutranksNotVerified(t *testing.T) {
 					Decided: f,
 				}
 				if got := summarize(t, Decide(worked(tl))); !reflect.DeepEqual(got, want) {
+					t.Errorf("got  %+v\nwant %+v", got, want)
+				}
+			})
+		}
+	}
+}
+
+// Each of these makes the install window not verified, whether it is placed while the window is
+// the last that began or after the steady window has ended.
+func TestInstallWindowNotVerified(t *testing.T) {
+	for _, c := range []Code{ProbeSilent, ProbeExited, ProbeLineInvalid, InstallFailed, WorkloadUnsupported, Interrupted, InternalError} {
+		rest := []Window{notBegun(Deploy), notBegun(Rollback)}
+		for name, row := range map[string]struct {
+			windows []Window
+			now     time.Duration
+			results []Result
+		}{
+			"on time":     {append([]Window{install(cond(c)), notBegun(Steady)}, rest...), 0, []Result{ResultNotVerified, NotRun, NotRun, NotRun}},
+			"placed late": {append([]Window{install(cond(c)), steady()}, rest...), 10 * sec, []Result{ResultNotVerified, NotJudged, NotRun, NotRun}},
+		} {
+			t.Run(string(c)+", "+name, func(t *testing.T) {
+				want := summary{Verdict: NotVerified, Results: row.results, Reasons: []string{"install:" + string(c)}, Decided: c}
+				got := summarize(t, Decide(worked(Timeline{Windows: row.windows, Now: at(row.now)})))
+				if !reflect.DeepEqual(got, want) {
 					t.Errorf("got  %+v\nwant %+v", got, want)
 				}
 			})

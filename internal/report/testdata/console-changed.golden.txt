@@ -5,6 +5,9 @@ releases    previous   orders 1.4.2, oci://registry.example/charts/orders; chart
 images      orders     run by deployment/orders, in pods the deploy created
 probe       built-in HTTP: GET http://orders.orders.svc/api/orders/latest
             100 a second (one check every 10 ms), timeout 2 s, status 200-299
+install     settled after 15.0 s under the probe; failures not judged
+            3,000 checks, 6 failed (refused 5, timeout 1), the last 14.9 s before the steady window
+            slowest 44 ms, behind 9 ms
 settings that differ from their defaults
   cluster.workers  4  (default 3)
   limits.steady  5m  (default 10s)

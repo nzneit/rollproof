@@ -89,6 +89,9 @@ type Tracker struct {
 	// down holds, for each of the Watcher's watches of the cluster that is down, the moment it
 	// went down.
 	down map[string]time.Time
+	// install holds what the Tracker keeps of the install from the first moment it found it
+	// ready; nil before that.
+	install *installTrack
 }
 
 // blindStretch is a stretch of time, from and until included, in which the watch of the cluster
@@ -175,6 +178,7 @@ func (t *Tracker) Set(obj runtime.Object, at time.Time) {
 		}
 	}
 	t.afterChange(c, at)
+	t.noteInstall(at)
 }
 
 // Gone tells the Tracker that such an object no longer exists.
@@ -189,6 +193,7 @@ func (t *Tracker) Gone(obj runtime.Object, at time.Time) {
 	}
 	// A ReplicaSet's entry stays when it is gone, and any other type is ignored.
 	t.afterChange(c, at)
+	t.noteInstall(at)
 }
 
 // Begin starts a transition at the given moment. The pods that exist then are the ones it may

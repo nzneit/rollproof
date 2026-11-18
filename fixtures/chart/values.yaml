@@ -13,3 +13,5 @@ drainDeadline: "10s"
 # spread forbids two pods on one node.
 spread: true
 gracePeriod: 30
+# failWork makes /work answer 500 while /readyz still answers 200.
+failWork: false

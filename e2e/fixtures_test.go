@@ -3,7 +3,9 @@
 package e2e
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -51,6 +53,24 @@ func TestFirstFixture(t *testing.T) {
 		if seen != 2 {
 			t.Errorf("deployment/orders is in %d transitions, want 2", seen)
 		}
+		got := readInstall(t, outDir(t))
+		in, steady := got.Install, got.Windows[0]
+		if in.FirstObservation == nil || in.Settled == nil || in.Checks == 0 {
+			t.Fatalf("install %+v; want a first observation, a settling and checks", in)
+		}
+		if d := in.Settled.Sub(*in.FirstObservation); d < 15*time.Second {
+			t.Errorf("the install settled %v after the first observation, want limits.settle, 15s, or more", d)
+		}
+		if steady.Start == nil || !steady.Start.Equal(*in.Settled) {
+			t.Errorf("the steady window starts at %v, want the moment the install had settled, %v", steady.Start, in.Settled)
+		}
+		// The figure that section 14, points 7 and 23 ask every run to record.
+		if in.LastFailure == nil {
+			t.Logf("install window: %d checks, none failed", in.Checks)
+		} else {
+			t.Logf("install window: %d of %d checks failed %v, the last %v before the steady window",
+				in.Failed, in.Checks, in.FailedByClass, in.Settled.Sub(*in.LastFailure))
+		}
 	})
 }
 
@@ -86,5 +106,35 @@ func TestNoRoomForTheExtraPod(t *testing.T) {
 		expect(t, r, result{exit: 1, verdict: "fail",
 			codes: []string{"pod-unschedulable", "transition-stalled"}, decided: "transition-stalled",
 			windows: map[string]string{"steady": "pass", "deploy": "fail", "rollback": "not-run"}})
+	})
+}
+
+// The previous release's pods report ready, and its handler fails every request: not verified,
+// steady-not-clean, within a minute of the install; the text says that no check has passed since
+// the probe started.
+func TestPreviousFailsEveryRequest(t *testing.T) {
+	f := fixture{name: "previous-fails-every-request", previous: map[string]any{"failWork": true}}
+	underBothHelms(t, f, func(t *testing.T, r result) {
+		expect(t, r, result{exit: 2, verdict: "not-verified", codes: []string{"steady-not-clean"}, decided: "steady-not-clean",
+			windows: map[string]string{"steady": "not-verified", "deploy": "not-run", "rollback": "not-run"}})
+		got := readInstall(t, outDir(t))
+		in, steady := got.Install, got.Windows[0]
+		// The handler answers 500. The first checks may instead have been refused or timed out while
+		// the cluster began to route to the new Service (section 7).
+		if in.Checks == 0 || in.Failed != in.Checks || in.FailedByClass["500"] == 0 {
+			t.Errorf("install %+v; want every check of the install window failed, and 500 among the classes", in)
+		}
+		if steady.End == nil || steady.End.Sub(in.Ready) > time.Minute {
+			t.Errorf("the steady window ended at %v, want within a minute of the install being ready at %v", steady.End, in.Ready)
+		}
+		said := false
+		for _, reason := range got.Reasons {
+			for _, line := range reason.Detail {
+				said = said || (reason.Code == "steady-not-clean" && strings.HasPrefix(line, "no check has passed since the probe started"))
+			}
+		}
+		if !said {
+			t.Errorf("the reasons do not say that no check has passed since the probe started: %+v", got.Reasons)
+		}
 	})
 }
