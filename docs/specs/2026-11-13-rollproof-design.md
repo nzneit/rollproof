@@ -1007,7 +1007,9 @@ are new in that time, and the settle time is for both:
 - **The target.** A cluster may route to a Service that the install has just created only a
   moment after its endpoints are ready. In the first plan's end-to-end runs kube-proxy on the
   probe's node took about a second, and the built-in probe's first checks were refused
-  (section 16). No release caused those failures.
+  (section 16). No release caused those failures. A few attempts in that time leave the node
+  without being sent to a pod, and the tool sets the nodes so that the kernel forgets them
+  within 5 s (section 9).
 - **The probe's own pod.** What its first moments meet, such as a proxy that a mesh injects
   (section 6), falls in the same time.
 
@@ -1482,6 +1484,17 @@ binaries are statically linked, because the binary is also the probe's whole ima
   the nodes' container runtime that stops each container from taking a kernel session key. Without
   it, a few clusters exhaust the user's key quota. Whether one cluster needs it is open
   (section 14).
+- **Attempts to connect that had no answer.** The tool sets, in each node, how long the kernel's
+  connection tracking keeps an attempt to connect that has had no answer: 5 s, where Linux keeps
+  it 120 s (`net.netfilter.nf_conntrack_tcp_timeout_syn_sent`). While kube-proxy brings in the
+  rules of a Service that the install has just created, a few of the built-in probe's attempts
+  leave the node without being sent to a pod, and the kernel keeps each one with that route.
+  The probe opens a connection for each request and uses each source port again, often within
+  half a minute. A later attempt from one of those ports takes the kept route and times out, up to
+  120 s after the first: in the steady window, or in a transition's window, where it fails a
+  release that did nothing wrong. With 5 s, the kept attempts are gone inside the install
+  window (section 7). A node on which the value cannot be set fails the cluster
+  (`cluster-failed`). Section 14, point 24, has the runs and what the setting hides.
 - **What linking kind costs.** A new Kubernetes minor reaches users only after a kind release and
   then a release of this tool. The project accepts that rhythm and automates it: a dependency
   update that moves kind runs the cluster suite, and a green run is released.
@@ -2509,13 +2522,14 @@ which step proves which point.
       seconds, because failures that the target causes at the install come back in the rollback.
 
     What the revision rests on, and what it leaves open:
-    - Nothing has been run with it. The first plan's code still has the warm-up (section 13).
+    - Nothing had been run with it when it was written. Point 24 has its first runs.
     - Every run that reaches its steady window is at least `limits.settle` longer: 15 s at the
       default, on a job that took about 4.5 minutes in the experiments (section 3). The key now
       also sizes the install's settle time, and nobody has sized it for that (point 7).
     - It is not known that the probe's own pod, in a cluster with no mesh, meets no failure of
       its own that lasts longer than the settle time. The first fixture, run with no warm-up,
-      shows whether it does.
+      shows whether it does. Its first runs met failures after the settle time from another
+      cause, the attempts that the nodes kept (point 24).
     - The install's settle time starts again when a pod stops being ready, and a transition's
       does not (section 7). The chosen design says so, and the maintainer has not ruled on the
       difference. The other way is one rule for both.
@@ -2534,6 +2548,57 @@ which step proves which point.
       next plan changes that to the failed check that section 6 now describes.
     - The report does not say how many ready endpoints the probe's target had when the steady
       window began. It would sharpen the text for a target that passed no check.
+
+24. **Attempts that the nodes kept, a finding of 2026-11-18.** In the revision's first
+    end-to-end runs, seven of the nine runs that reached the probe had checks that timed out
+    long after its first seconds, at single moments from 23 s to 102 s after its first
+    observation. Five ended `steady-not-clean`, and a fixture that should stall ended
+    `probe-failures`. The plan stopped there, as it says it must. A copy of the first plan's
+    code with no warm-up and a steady window of 60 s had such timeouts in 5 of 6 runs, and the
+    same copy with its warm-up, in the same hour, in none of 6. So they came from the probe's
+    start, not from the revision's other changes.
+
+    Two captures of the nodes' connection tracking then showed the cause. kind's kube-proxy
+    runs in iptables mode. While it brings in a new Service's rules, in the first 0.7 to 2 s
+    after the probe's first observation, a few of the probe's attempts leave the node without
+    being sent to a pod. The kernel keeps each one, with that route, as an attempt with no
+    answer, for 120 s. The built-in probe opens a connection for each request, 200 a second,
+    and it used a source port again about 3,000 times a minute, a median of 18 to 22 s after
+    its last use. In the second capture all seven late timeouts made no new entry, and at each
+    of them the only entries alive and not closed were the attempts kept from the first
+    seconds, on ports beside the one in use. The fixture that should stall is believed to have
+    met the same: its five timeouts came 44 to 102 s after the probe's first observation, all
+    within 120 s of the attempts kept in its first second, and no capture was made of it. The
+    first plan's warm-up is believed to have hidden all of this: it sent one check at a time
+    while the Service was not yet routed, and it wrote none of them.
+
+    The maintainer chose the same day to set, on each node, the time that the kernel keeps such
+    an attempt to 5 s (section 9). The same copy with no warm-up and that setting had no
+    failure after the first second in 6 of 6 runs of 60 s; without it, 5 of 6 had one. What
+    lost, and why:
+    - **Deleting the kept attempts when the install has settled.** The tool would act on the
+      nodes in the middle of a run, at a moment of its choosing. The setting acts once, when
+      the cluster is made.
+    - **A probe that starts only when the Service routes.** It is point 23's warm-up, moved
+      into the tool, with the same costs.
+    - **The warm-up again.** Point 23's four costs come back.
+    - **An install window longer than 120 s.** Every run would be two minutes longer.
+
+    What the setting rests on, and what it leaves open:
+    - 5 s is the one value tried. The kept attempts were made in the first 2 s after the
+      probe's first observation, so they are gone about 7 s after it: inside the install window
+      at the default `limits.settle` of 15 s. A `limits.settle` shorter than that, which section
+      8 allows down to just above `limits.silence`, may leave one for the steady window.
+    - The test cluster differs from a node with Linux's defaults in this value. An attempt that
+      uses a port again more than 5 s after an attempt from it that had no answer is routed
+      afresh here, where a node with the default would send it the old way for up to 120 s.
+      The tool does not show such a failure. It is believed that few clients open connections
+      from one address as often as the built-in probe does.
+    - A connection whose first answer takes longer than 5 s is believed to wait for the
+      kernel's next attempt, about 7 s after the first. Nothing in the fixtures does that.
+    - The value was set on nodes of rootless nerdctl only. Docker and Podman are not tried.
+    - Nothing has been run with the setting and the revision's code together. The next plan
+      sets it, and its fixtures run again.
 
 ## 15. Not in the first release
 
@@ -2745,9 +2810,22 @@ the kind file and the kubectl file itself.
 | kind at `v0.33.0`: the kubeadm configuration it writes for a cluster | That kind sets kube-proxy's shortest time between syncs to 1 s in every cluster it creates |
 | `k8s.io/kubectl` at `v0.37.2`: the rollout status of a Deployment, a StatefulSet and a DaemonSet | That a rollout is not complete while its controller has not yet seen the workload's latest spec, while fewer pods are updated than the spec asks for, and while an updated pod is not available or, for a StatefulSet, not ready. So a pod created, a spec changed and a pod that stops being ready each make the install's conditions not hold (section 7) |
 
+Seen on 2026-11-18, for section 14, point 24. The runs were on the same workstation, with kind
+through rootless nerdctl, under Helm 3 and under Helm 4. Their logs and captures are not filed in
+the repository.
+
+| Source | What this design takes from it |
+| --- | --- |
+| The revision's end-to-end runs, with the next plan's code before the setting | That seven of the nine runs that reached the probe had checks time out long after its first seconds, and that a fixture that should stall failed with `probe-failures` from five such timeouts |
+| The first plan's code with no warm-up and a steady window of 60 s, three runs under both Helm majors, then three with the warm-up | That the timeouts came from the probe's start: 5 of 6 runs had them without the warm-up, none of 6 with it |
+| Two captures of the nodes' connection tracking, from the moment the probe's Service existed | That a late timeout made no new entry, and that the only entries alive and not closed then were attempts kept with no answer from the first seconds, on ports beside the one in use; that the kernel kept them 120 s; how often the probe used a source port again |
+| The same copy with no warm-up, the nodes' value set to 5 s, three runs under both Helm majors | That a node of rootless nerdctl takes the value, and that no failure came after the first second in 6 of 6 runs |
+
 Still not shown by any run or any page: that 15 s is long enough for an install to settle under
-the probe; that the probe's own pod meets no failure of its own after that time; that a shorter
-time between the proxy's syncs would hide failures that the fixtures catch. And, from before the
+the probe; that the probe's own pod meets no failure of its own after that time with the
+revision's code; that the setting of section 14, point 24, removes the late timeouts with the
+revision's code, and that a node of Docker or Podman takes it; that a shorter time between the
+proxy's syncs would hide failures that the fixtures catch. And, from before the
 revision: that a node which the tool asks to pull an image uses the
 settings it uses for the kubelet; that nodes behind a proxy reach the run's registry by its
 address; that a shell as the first process of a container ignores SIGTERM; that a pod's status
