@@ -39,7 +39,9 @@ type resultFile struct {
 	Windows []struct {
 		Name   string     `json:"name"`
 		Result string     `json:"result"`
+		Start  *time.Time `json:"start"`
 		End    *time.Time `json:"end"`
+		Checks int        `json:"checks"`
 	} `json:"windows"`
 	Warnings []string `json:"warnings"`
 	Probes   []struct {
@@ -204,7 +206,7 @@ func TestEachBeforeFailure(t *testing.T) {
 		}, "nothing-watched", then("watcher", "install", "install-ready", "end-commands", "watch-stop", "delete")},
 		{"probe not started", func(w *world) {
 			w.probe.startErr = verdict.Condition{Code: verdict.ProbeNotStarted, Text: "no observation within limits.timeout"}
-		}, "probe-not-started", then("watcher", "install", "install-ready", "target", "probe", "start", "end-commands", "watch-stop", "delete")},
+		}, "probe-not-started", then("watcher", "install", "install-ready", "target", "probe", "start", "probe-stop", "end-commands", "watch-stop", "delete")},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -1279,5 +1281,64 @@ func TestTheProbesStopErrorIsAWarning(t *testing.T) {
 	}
 	if !strings.Contains(w.stdout.String(), "the pod delete was refused") {
 		t.Errorf("the console does not print the warning:\n%s", w.stdout.String())
+	}
+}
+
+// The run reads the probe's events from before the probe starts (section 5). Start sends 5,000
+// observations and the scripted ones on a channel with no buffer, so it returns only while a
+// reader takes them.
+func TestTheReaderStartsWithTheProbe(t *testing.T) {
+	w := newWorld(t)
+	w.probe.unbuffered = true
+	first := w.clock.Now()
+	var early []probe.Event
+	for i := range 5000 { // one check every 2 ms for the probe's first 10 s
+		at := first.Add(time.Duration(i) * 2 * time.Millisecond)
+		early = append(early, probe.Event{Obs: &verdict.Observation{Written: at, T: at, OK: true, N: 1, Ms: 30, Lag: 2}})
+	}
+	w.probe.events = append(early, w.probe.events...)
+	done := make(chan int, 1)
+	go func() { done <- w.run(context.Background()) }()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start is waiting for a reader of the probe's events: the run must read them from the moment the probe starts")
+	}
+	checks := 0
+	for _, x := range w.result().Windows {
+		checks += x.Checks
+	}
+	if checks != 19000 { // 5,000 early, and 200 a second for the 70 s of the three windows
+		t.Errorf("the windows hold %d checks, want 19000: none may be lost", checks)
+	}
+}
+
+// Rule 9: a fault of the probe before its first observation makes the run not verified, also when
+// the probe then never starts. Both reasons are listed, and neither has a window.
+func TestFaultsBeforeAFailedStartAreReasons(t *testing.T) {
+	w := newWorld(t)
+	w.probe.events = []probe.Event{{Fault: &verdict.Condition{Code: verdict.ProbeLineInvalid,
+		Text: "the line is not one JSON object", At: w.clock.Now()}}}
+	w.probe.startErr = verdict.Condition{Code: verdict.ProbeNotStarted, Text: "no observation within limits.timeout"}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"probe-not-started", "probe-line-invalid"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	for _, x := range r.Reasons {
+		if x.Window != "" {
+			t.Errorf("%s has the window %q, want none", x.Code, x.Window)
+		}
+	}
+	if r.decided() != "probe-not-started" {
+		t.Errorf("decided by %q, want probe-not-started", r.decided())
+	}
+	if n := w.calls.count("probe-stop"); n != 1 {
+		t.Errorf("the probe's Stop was called %d times after a failed start, want 1", n)
 	}
 }

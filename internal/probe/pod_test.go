@@ -221,7 +221,7 @@ func TestStartReturnsAtTheFirstObservation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events := allEvents(st.Events)
+	events := allEvents(s.pod.Events())
 	if len(events) != 1 || events[0].Obs == nil || !events[0].Obs.T.Equal(logAt(-1000)) {
 		t.Errorf("events = %+v, want the one observation", events)
 	}
@@ -332,7 +332,7 @@ func TestProbeExitsAfterStart(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			s := newProbe(t, newFakeLog(logLine(logAt(400), `{"ok":true}`)), runningStatus(), 100*time.Millisecond, 5*time.Second)
 			s.clock.Set(logAt(700))
-			st, err := s.pod.Start(context.Background())
+			_, err := s.pod.Start(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -341,7 +341,7 @@ func TestProbeExitsAfterStart(t *testing.T) {
 			timeout := time.After(2 * time.Second)
 			for {
 				select {
-				case e := <-st.Events:
+				case e := <-s.pod.Events():
 					if e.Fault == nil {
 						continue
 					}
@@ -371,7 +371,7 @@ func TestStopDrains(t *testing.T) {
 			s := newProbe(t, &fakeLog{streams: []io.Reader{pr}}, runningStatus(), 2500*time.Millisecond, 5*time.Second)
 			s.clock.Set(logAt(700))
 			go io.WriteString(pw, logLine(logAt(400), `{"ok":true}`))
-			st, err := s.pod.Start(context.Background())
+			_, err := s.pod.Start(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -388,7 +388,7 @@ func TestStopDrains(t *testing.T) {
 			if facts.StoppedWhenAsked != c.stopped {
 				t.Errorf("StoppedWhenAsked = %v, want %v", facts.StoppedWhenAsked, c.stopped)
 			}
-			events := allEvents(st.Events)
+			events := allEvents(s.pod.Events())
 			if len(events) != 2 || events[1].Obs == nil || !events[1].Obs.Written.Equal(logAt(9000)) {
 				t.Errorf("events = %+v, want the observation of the drain too", events)
 			}
@@ -403,7 +403,7 @@ func TestStopKillsAProbeThatDoesNotStop(t *testing.T) {
 	// Ruling C3: the stream stays open; the brief served newFakeLog(the line), which ends.
 	l := &fakeLog{streams: []io.Reader{openStream(t, logLine(logAt(400), `{"ok":true}`))}}
 	s := newProbe(t, l, runningStatus(), 200*time.Millisecond, 5*time.Second)
-	st, err := s.pod.Start(context.Background())
+	_, err := s.pod.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,14 +415,14 @@ func TestStopKillsAProbeThatDoesNotStop(t *testing.T) {
 	if took := time.Since(began); took > time.Second {
 		t.Errorf("Stop took %v, want the drain and the margin", took)
 	}
-	allEvents(st.Events) // returns only when Events is closed
+	allEvents(s.pod.Events()) // returns only when Events is closed
 }
 
 func TestStopEndsWithItsContext(t *testing.T) {
 	// Ruling C3: the stream stays open; the brief served newFakeLog(the line), which ends.
 	l := &fakeLog{streams: []io.Reader{openStream(t, logLine(logAt(400), `{"ok":true}`))}}
 	s := newProbe(t, l, runningStatus(), 10*time.Second, 5*time.Second)
-	st, err := s.pod.Start(context.Background())
+	_, err := s.pod.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +431,7 @@ func TestStopEndsWithItsContext(t *testing.T) {
 	if _, err := s.pod.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("Stop = %v, want the context's error", err)
 	}
-	allEvents(st.Events)
+	allEvents(s.pod.Events())
 }
 
 func TestStopBeforeStartAndTwice(t *testing.T) {
@@ -497,7 +497,7 @@ func TestStopReportsAnExitOnce(t *testing.T) {
 				pollEvery = time.Hour // the watcher reads the pod once, at its start
 			}
 			s.clock.Set(logAt(700))
-			st, err := s.pod.Start(context.Background())
+			_, err := s.pod.Start(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -513,12 +513,12 @@ func TestStopReportsAnExitOnce(t *testing.T) {
 			s.setStatus(t, terminatedStatus(1, "Error", logAt(5000)))
 			var events []Event
 			if c.watcherSaw {
-				events = untilFault(t, st.Events)
+				events = untilFault(t, s.pod.Events())
 			}
 			if _, err := s.pod.Stop(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			events = append(events, allEvents(st.Events)...)
+			events = append(events, allEvents(s.pod.Events())...)
 			if n := exits(events); n != 1 {
 				t.Fatalf("%d probe-exited faults, want 1: %+v", n, events)
 			}
@@ -551,7 +551,7 @@ func TestExitAroundTheFirstObservation(t *testing.T) {
 	for i := range 20 {
 		s := newProbe(t, newFakeLog(logLine(logAt(400), `{"ok":true}`)), terminatedStatus(1, "Error", logAt(500)), 100*time.Millisecond, 5*time.Second)
 		s.clock.Set(logAt(700))
-		st, err := s.pod.Start(context.Background())
+		_, err := s.pod.Start(context.Background())
 		if err != nil {
 			if c := condition(err); c.Code != verdict.ProbeExited {
 				t.Errorf("run %d: Start = %v, want probe-exited", i, err)
@@ -562,7 +562,7 @@ func TestExitAroundTheFirstObservation(t *testing.T) {
 		if _, err := s.pod.Stop(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if n := exits(allEvents(st.Events)); n != 1 {
+		if n := exits(allEvents(s.pod.Events())); n != 1 {
 			t.Errorf("run %d: %d probe-exited faults in Events, want 1", i, n)
 		}
 		inEvents++
@@ -580,12 +580,12 @@ func TestStopWhenNobodyReadsEvents(t *testing.T) {
 	l := &fakeLog{streams: []io.Reader{openStream(t, log.String())}}
 	s := newProbe(t, l, runningStatus(), 100*time.Millisecond, 5*time.Second)
 	s.clock.Set(logAt(700))
-	st, err := s.pod.Start(context.Background())
+	_, err := s.pod.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for range 200 { // until the follower waits on a full channel
-		if len(st.Events) == cap(st.Events) {
+		if len(s.pod.Events()) == cap(s.pod.Events()) {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -605,8 +605,8 @@ func TestStopWhenNobodyReadsEvents(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Stop did not return")
 	}
-	if n := len(allEvents(st.Events)); n != cap(st.Events) {
-		t.Errorf("%d events, want a full channel of %d", n, cap(st.Events))
+	if n := len(allEvents(s.pod.Events())); n != cap(s.pod.Events()) {
+		t.Errorf("%d events, want a full channel of %d", n, cap(s.pod.Events()))
 	}
 }
 
@@ -653,22 +653,140 @@ func TestAnAPIErrorIsNoExit(t *testing.T) {
 func TestStopWhenThePodIsGone(t *testing.T) {
 	s := newProbe(t, newFakeLog(logLine(logAt(400), `{"ok":true}`)), runningStatus(), 100*time.Millisecond, 5*time.Second)
 	s.clock.Set(logAt(700))
-	st, err := s.pod.Start(context.Background())
+	_, err := s.pod.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := s.client.CoreV1().Pods(cluster.ProbeNamespace).Delete(context.Background(), "probe", metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	events := untilFault(t, st.Events)
+	events := untilFault(t, s.pod.Events())
 	if _, err := s.pod.Stop(context.Background()); err != nil {
 		t.Errorf("Stop = %v, want no error", err)
 	}
-	events = append(events, allEvents(st.Events)...)
+	events = append(events, allEvents(s.pod.Events())...)
 	if n := exits(events); n != 1 {
 		t.Fatalf("%d probe-exited faults, want 1: %+v", n, events)
 	}
 	if f := events[len(events)-1].Fault; f == nil || f.Text != "the probe's pod is gone" || !f.At.Equal(logAt(700)) {
 		t.Errorf("last event = %+v, want the pod gone, at now", events[len(events)-1])
+	}
+}
+
+// The follower's sends have a reader from the probe's first line: 3,000 lines that break the
+// contract come before the first observation, more than the channel holds, and Start returns.
+func TestEventsAreReadFromTheStart(t *testing.T) {
+	var log strings.Builder
+	for i := range 3000 {
+		log.WriteString(logLine(logAt(100+i), `{"ok":"yes"}`))
+	}
+	log.WriteString(logLine(logAt(4000), `{"ok":true}`))
+	l := &fakeLog{streams: []io.Reader{openStream(t, log.String())}}
+	s := newProbe(t, l, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s.clock.Set(logAt(4000))
+	read := make(chan []Event, 1)
+	go func() { read <- allEvents(s.pod.Events()) }()
+	st, err := s.pod.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start = %v; with a reader of Events from before Start, the follower never waits", err)
+	}
+	if !st.First.Equal(logAt(4000)) {
+		t.Errorf("First = %v, want %v", st.First, logAt(4000))
+	}
+	if _, err := s.pod.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	faults, observations := 0, 0
+	for _, e := range <-read {
+		if e.Fault != nil {
+			faults++
+		} else {
+			observations++
+		}
+	}
+	if faults != 3000 || observations != 1 {
+		t.Errorf("%d faults and %d observations were read, want 3000 and 1", faults, observations)
+	}
+}
+
+// A Start that failed leaves no probe running, unless its context ended: the pod is deleted with
+// the drain as its grace period, Events is closed, and Stop gives what that stop left.
+func TestAFailedStartStopsTheProbe(t *testing.T) {
+	background := func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) }
+	soon := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), 100*time.Millisecond)
+	}
+	refuse := errors.New("the API server refused the delete")
+	for _, c := range []struct {
+		name       string
+		log        *fakeLog
+		status     corev1.PodStatus
+		clock      time.Time
+		ctx        func() (context.Context, context.CancelFunc)
+		failDelete bool
+		code       verdict.Code // empty: the context's error
+		grace      int64        // of the last delete: 1 for the drain of 100 ms, 0 for the delete Start begins with
+	}{
+		{"no observation in time", newFakeLog(logLine(logAt(100), "starting")), runningStatus(), logAt(700), background, false, verdict.ProbeNotStarted, 1},
+		{"the clock check fails", newFakeLog(logLine(logAt(400), `{"ok":true}`)), runningStatus(), logAt(2900), background, false, verdict.RunnerUnsupported, 1},
+		{"the probe exits first", &fakeLog{}, terminatedStatus(2, "Error", logAt(300)), logAt(700), background, false, verdict.ProbeExited, 1},
+		{"the delete fails", newFakeLog(logLine(logAt(100), "starting")), runningStatus(), logAt(700), background, true, verdict.ProbeNotStarted, 1},
+		{"the context ends", &fakeLog{}, runningStatus(), logAt(700), soon, false, "", 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newProbe(t, c.log, c.status, 100*time.Millisecond, 300*time.Millisecond)
+			s.clock.Set(c.clock)
+			if c.failDelete {
+				deletes := 0
+				s.client.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+					if deletes++; deletes == 1 {
+						return false, nil, nil // the delete of a leftover pod, which Start begins with
+					}
+					return true, nil, refuse
+				})
+			}
+			read := make(chan []Event, 1)
+			go func() { read <- allEvents(s.pod.Events()) }()
+			ctx, cancel := c.ctx()
+			defer cancel()
+			_, err := s.pod.Start(ctx)
+			switch {
+			case c.code == "" && !errors.Is(err, context.DeadlineExceeded):
+				t.Errorf("Start = %v, want the context's error", err)
+			case c.code != "" && condition(err).Code != c.code:
+				t.Errorf("Start = %v, want %s", err, c.code)
+			}
+			select {
+			case <-read:
+			case <-time.After(2 * time.Second):
+				t.Fatal("Events was not closed when Start had failed")
+			}
+			if g := s.lastDeleteGrace(); g == nil || *g != c.grace {
+				t.Errorf("the last delete of the pod had the grace period %v, want %d", g, c.grace)
+			}
+			before := len(s.client.Actions())
+			_, stopErr := s.pod.Stop(context.Background())
+			if n := len(s.client.Actions()); n != before {
+				t.Errorf("Stop after a failed Start made %d more calls of the API, want none", n-before)
+			}
+			if c.failDelete != errors.Is(stopErr, refuse) {
+				t.Errorf("Stop = %v; it gives the error of the delete that the failed Start made, and no other", stopErr)
+			}
+		})
+	}
+}
+
+// A Start that failed before its pod was created ran nothing, so the probe did not fail to stop.
+func TestAStartThatCreatedNoPodStoppedWhenAsked(t *testing.T) {
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 300*time.Millisecond)
+	s.client.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("the API server refused the pod")
+	})
+	go allEvents(s.pod.Events())
+	if _, err := s.pod.Start(context.Background()); err == nil {
+		t.Fatal("Start succeeded although the API server refused the pod")
+	}
+	if f, _ := s.pod.Stop(context.Background()); !f.StoppedWhenAsked {
+		t.Errorf("facts %+v; a probe whose pod was never created stopped when asked", f)
 	}
 }

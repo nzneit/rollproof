@@ -129,7 +129,8 @@ type writer interface {
 
 // runState is everything one run knows: the units it has, what each returned,
 // and the timeline of its windows. Only the goroutine that reads the probe's
-// events and the goroutine of a command touch it besides the run itself.
+// events, from just before the probe starts, and the goroutine of a command
+// touch it besides the run itself.
 type runState struct {
 	o        Options
 	u        Units
@@ -300,12 +301,19 @@ func (s *runState) installStep(ctx context.Context) bool {
 	return false
 }
 
-// startProbe performs step 9: the probe and its first observation.
+// startProbe performs step 9: the probe and its first observation. The goroutine that reads the
+// probe's events starts before the probe does, so that no event waits for a reader; it is the
+// only reader of them until the probe is stopped. A start that failed has stopped the probe,
+// unless a signal ended the run, and Stop is asked for what that stop left.
 func (s *runState) startProbe(ctx context.Context) bool {
 	p := s.cluster.Probe(s.cfg, s.probeImage, s.ev.file("probe.log"))
 	s.probe = p
+	s.readEvents(p.Events())
 	st, err := p.Start(ctx)
 	if err != nil {
+		if ctx.Err() == nil {
+			s.takeStop(ctx)
+		}
 		return s.beforeFail(ctx, err)
 	}
 	if s.interrupted(ctx) {
@@ -324,9 +332,8 @@ func (s *runState) windows(ctx context.Context) bool {
 	for _, name := range s.names {
 		s.tl.Windows = append(s.tl.Windows, verdict.Window{Name: name})
 	}
-	// Step 10: the windows are fixed, and the goroutine that reads the probe's events starts here.
-	// It is the only reader of them until the probe is stopped.
-	s.readEvents(s.probeStart.Events)
+	// Step 10: the windows are fixed. The goroutine that reads the probe's events has run since
+	// the probe started, and the events it took before are judged against these windows.
 
 	// Step 11: the steady window runs to its end, whatever happened in it, unless a signal
 	// comes first: a signal stops the run at once (section 10), and limits.steady has no upper
@@ -411,13 +418,7 @@ func (s *runState) placeTransition(i int, tr watch.Transition, res deploy.Result
 // belongs to the last window that began.
 func (s *runState) stopProbe(ctx context.Context) {
 	if s.probe != nil {
-		f, err := s.probe.Stop(ctx)
-		s.probeFacts = f
-		s.stopped = true
-		if err != nil {
-			// Stop's error is the pod delete's, or the context's: the probe's pod may still run.
-			s.warnings.add("the probe could not be stopped: " + err.Error() + "; its pod may still be there")
-		}
+		s.takeStop(ctx)
 	}
 	if s.reader != nil {
 		<-s.reader.done // the probe has closed its events
@@ -425,6 +426,18 @@ func (s *runState) stopProbe(ctx context.Context) {
 	}
 	s.interrupted(ctx) // a signal that came while the probe was stopped
 	s.decide(true)
+}
+
+// takeStop asks the probe to stop, keeps the Facts it gives, marks the probe as stopped, and
+// warns when Stop gave an error. After a start that failed, Stop gives what that stop left.
+func (s *runState) takeStop(ctx context.Context) {
+	f, err := s.probe.Stop(ctx)
+	s.probeFacts = f
+	s.stopped = true
+	if err != nil {
+		// Stop's error is the pod delete's, or the context's: the probe's pod may still run.
+		s.warnings.add("the probe could not be stopped: " + err.Error() + "; its pod may still be there")
+	}
 }
 
 // beforeFail places the condition of a step that failed before the steady
@@ -972,7 +985,8 @@ type reader struct {
 	caught any // the value of a panic that stopped the reader
 }
 
-// readEvents starts the goroutine that reads the probe's events.
+// readEvents starts the goroutine that reads the probe's events. startProbe calls it before the
+// probe starts, so that the probe's sends have a reader from its first line on.
 func (s *runState) readEvents(events <-chan probe.Event) {
 	if events == nil {
 		return

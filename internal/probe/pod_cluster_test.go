@@ -115,7 +115,7 @@ func TestPodOnACluster(t *testing.T) {
 read:
 	for {
 		select {
-		case e := <-st.Events:
+		case e := <-p.Events():
 			switch {
 			case e.Fault != nil:
 				t.Errorf("fault: %v", *e.Fault)
@@ -136,7 +136,7 @@ read:
 	if err != nil {
 		t.Fatal(err)
 	}
-	for e := range st.Events {
+	for e := range p.Events() {
 		if e.Fault != nil {
 			t.Errorf("fault in the drain: %v", *e.Fault)
 		}

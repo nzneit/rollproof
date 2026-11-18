@@ -353,28 +353,43 @@ func (f *fakeWatcher) Stop() {
 
 // fakeProbe is the probe.Probe that fakeCluster.Probe returns.
 type fakeProbe struct {
-	w        *world
-	startErr error
-	stopErr  error
-	events   []probe.Event
-	ch       chan probe.Event
-	once     sync.Once
-	facts    probe.Facts
+	w          *world
+	startErr   error
+	stopErr    error
+	events     []probe.Event
+	unbuffered bool // Events gives a channel with no buffer: a send returns only when a reader takes it
+	ch         chan probe.Event
+	made, once sync.Once
+	facts      probe.Facts
 }
 
-// Start records "start", runs its hook and fills a channel with the scripted
-// events.
+// Events gives the probe's channel, made at the first call: with room for the scripted events and
+// 64 more, or with no buffer when unbuffered is set.
+func (p *fakeProbe) Events() <-chan probe.Event {
+	p.made.Do(func() {
+		if p.unbuffered {
+			p.ch = make(chan probe.Event)
+		} else {
+			p.ch = make(chan probe.Event, len(p.events)+64)
+		}
+	})
+	return p.ch
+}
+
+// Start records "start", runs its hook and sends every scripted event into the probe's channel.
+// With startErr it then closes the channel, as a Start that failed does, and returns the error.
 func (p *fakeProbe) Start(ctx context.Context) (probe.Started, error) {
 	p.w.calls.add("start")
 	p.w.hook("start")
-	if p.startErr != nil {
-		return probe.Started{}, p.startErr
-	}
-	p.ch = make(chan probe.Event, len(p.events)+64)
+	p.Events()
 	for _, e := range p.events {
 		p.ch <- e
 	}
-	return probe.Started{First: p.w.clock.Now(), Events: p.ch}, nil
+	if p.startErr != nil {
+		p.once.Do(func() { close(p.ch) })
+		return probe.Started{}, p.startErr
+	}
+	return probe.Started{First: p.w.clock.Now()}, nil
 }
 
 // send puts one more event into the probe's channel.
