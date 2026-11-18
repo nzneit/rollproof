@@ -86,10 +86,12 @@ const (
 
 // Run runs one test from the results folder to the exit code: 0 for a pass, 1
 // for a fail, 2 for not verified. When ctx ends, the run is interrupted: it
-// writes its final result first and leaves the cluster. The windows of a run
-// are the install window, the steady window and one for each transition. The
-// run begins a window only when verdict says that it goes on, and it stops the
-// probe whenever a window began.
+// writes its final result first and leaves the cluster, with the probe's pod in
+// it. The windows of a run are the install window, the steady window and one
+// for each transition. The run begins a window only when verdict says that it
+// goes on. Once the probe was created, the run stops it before the final
+// verdict, whether the run's last window ended, the run ended before the
+// probe's first observation or the tool failed, unless a signal ended the run.
 func Run(ctx context.Context, o Options, u Units) int {
 	s := &runState{o: o, u: u, warnings: &warnings{}}
 	s.parent = ctx
@@ -114,6 +116,7 @@ func Run(ctx context.Context, o Options, u Units) int {
 	}
 	if caught != nil {
 		s.toolFailed(caught)
+		s.stopAfterFailure()
 	}
 	s.cancel()
 	s.endReading()
@@ -136,8 +139,8 @@ type writer interface {
 
 // runState is everything one run knows: the units it has, what each returned,
 // and the timeline of its windows. Only the goroutine that reads the probe's
-// events, from just before the probe starts, and the goroutine of a command
-// touch it besides the run itself.
+// events, from just before the probe starts, the goroutine of a command, and
+// the goroutine that asks the probe to stop touch it besides the run itself.
 type runState struct {
 	o        Options
 	u        Units
@@ -446,13 +449,16 @@ func (s *runState) placeTransition(i int, tr watch.Transition, res deploy.Result
 	}
 }
 
-// stopProbe performs step 13, whenever a window began, the install window
-// included: the probe is stopped, its last lines are read, and the verdict is
-// decided. A signal that comes while the probe is stopping belongs to the last
-// window that began.
+// stopProbe performs step 13 when the run's last window has ended, whether or
+// not every transition was run: the probe is stopped, its last lines are read, and the
+// verdict is decided. A signal that comes while the probe is stopping belongs to
+// the last window that began. After a failure of the tool, stopAfterFailure
+// stops the probe in the same way.
 func (s *runState) stopProbe(ctx context.Context) {
 	if s.probe != nil {
-		s.takeStop(ctx)
+		if p := s.haltProbe(ctx); p != nil {
+			panic(p)
+		}
 	}
 	if s.reader != nil {
 		<-s.reader.done // the probe has closed its events
@@ -462,12 +468,74 @@ func (s *runState) stopProbe(ctx context.Context) {
 	s.decide(true)
 }
 
+// stopAfterFailure stops the probe after a failure of the tool, as stopProbe does, when the
+// probe was created and not yet asked to stop and no signal ended the run: section 6 stops the
+// probe at every end of a run but a signal. The stop's context is the caller's, so the run's own
+// cancel does not cut it short and a signal does; Stop bounds its own wait by the drain and
+// stopMargin. Its last lines are read, a signal that came meanwhile is placed as stopProbe places
+// one, and the verdict is decided again with the internal-error that the failure placed. A panic
+// in the stop, or one of the reader, is the tool's failure too: it is placed as one more
+// internal-error beside the first.
+func (s *runState) stopAfterFailure() {
+	if s.probe == nil || s.stopped || s.parent.Err() != nil {
+		return
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			// A panic of the last decision; a reader's panic that it met was taken by then.
+			s.place(verdict.Condition{Code: verdict.InternalError, Text: panicText(p)})
+			s.decide(true)
+		}
+	}()
+	p := s.haltProbe(s.parent)
+	if p == nil {
+		p = s.readerPanic()
+	}
+	if p != nil {
+		s.place(verdict.Condition{Code: verdict.InternalError, Text: panicText(p)})
+	}
+	s.interrupted(s.parent) // a signal that came while the probe was stopped
+	s.decide(true)
+}
+
+// haltProbe asks the probe to stop and returns when Stop has returned, with the value of a panic
+// in Stop, if one came. The event reader reads the probe's last lines meanwhile. When the reader
+// is gone before Stop has returned, because a panic stopped it, the lines are taken here and
+// dropped, so that the probe never waits on a channel that nobody reads.
+func (s *runState) haltProbe(ctx context.Context) any {
+	stopped := make(chan any, 1)
+	go func() {
+		defer func() { stopped <- recover() }()
+		s.takeStop(ctx)
+	}()
+	events := s.probe.Events()
+	var gone <-chan struct{} // the reader's end, until it has come
+	if s.reader != nil {
+		gone = s.reader.done
+	}
+	var drop <-chan probe.Event // the probe's events, once no reader takes them
+	for {
+		select {
+		case p := <-stopped:
+			return p
+		case <-gone:
+			gone, drop = nil, events
+		case _, open := <-drop:
+			if !open {
+				drop = nil
+			}
+		}
+	}
+}
+
 // takeStop asks the probe to stop, keeps the Facts it gives, marks the probe as stopped, and
-// warns when Stop gave an error. After a start that failed, Stop gives what that stop left.
+// warns when Stop gave an error. After a start that failed, Stop gives what that stop left. The
+// probe counts as stopped from the moment it was asked, so that a Stop that panicked is not asked
+// again.
 func (s *runState) takeStop(ctx context.Context) {
+	s.stopped = true
 	f, err := s.probe.Stop(ctx)
 	s.probeFacts = f
-	s.stopped = true
 	if err != nil {
 		// Stop's error is the pod delete's, or the context's: the probe's pod may still run.
 		s.warnings.add("the probe could not be stopped: " + err.Error() + "; its pod may still be there")
@@ -1021,13 +1089,25 @@ type reader struct {
 	caught any // the value of a panic that stopped the reader
 }
 
+// eventHook, when a test sets it, runs in the event reader on each event before the event is put
+// into the timeline: a test's way to make the reader fail, as only a runtime fault could. It is nil
+// in the tool.
+var eventHook func(probe.Event)
+
 // readEvents starts the goroutine that reads the probe's events. startProbe calls it before the
 // probe starts, so that the probe's sends have a reader from its first line on.
 func (s *runState) readEvents(events <-chan probe.Event) {
 	if events == nil {
 		return
 	}
-	r := &reader{events: events, add: s.addEvent, ask: make(chan chan struct{}),
+	add := s.addEvent
+	if h := eventHook; h != nil {
+		add = func(ev probe.Event) {
+			h(ev)
+			s.addEvent(ev)
+		}
+	}
+	r := &reader{events: events, add: add, ask: make(chan chan struct{}),
 		stop: make(chan struct{}), done: make(chan struct{})}
 	s.reader = r
 	go s.read(r)

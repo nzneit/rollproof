@@ -384,6 +384,7 @@ type fakeProbe struct {
 	ch         chan probe.Event
 	made, once sync.Once
 	facts      probe.Facts
+	last       []probe.Event // the lines that the drain gives: Stop sends them before it closes the channel
 }
 
 // Events gives the probe's channel, made at the first call: with room for the scripted events and
@@ -422,13 +423,16 @@ func (p *fakeProbe) send(ev probe.Event) {
 	}
 }
 
-// Stop records "probe-stop", runs its hook, closes the channel once and gives
-// the scripted facts and error.
+// Stop records "probe-stop", runs its hook, sends the drain's lines, closes the channel once and
+// gives the scripted facts and error.
 func (p *fakeProbe) Stop(ctx context.Context) (probe.Facts, error) {
 	p.w.calls.add("probe-stop")
 	p.w.hook("probe-stop")
 	p.once.Do(func() {
 		if p.ch != nil {
+			for _, e := range p.last {
+				p.ch <- e
+			}
 			close(p.ch)
 		}
 	})

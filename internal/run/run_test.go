@@ -557,9 +557,7 @@ func TestPanicInAUnit(t *testing.T) {
 			if window, text := r.windowOf("internal-error"); window != "deploy" || text != "the watcher broke" {
 				t.Errorf("internal-error in window %q with text %q", window, text)
 			}
-			if n := w.calls.count("delete"); n != 1 {
-				t.Errorf("Delete called %d times, want 1", n)
-			}
+			w.probeWasStopped()
 		})
 	}
 }
@@ -924,9 +922,7 @@ func TestAPanicInACommandGoroutine(t *testing.T) {
 	if window, text := r.windowOf("internal-error"); window != "deploy" || text != "the deploy driver broke" {
 		t.Errorf("internal-error in window %q with text %q", window, text)
 	}
-	if n := w.calls.count("delete"); n != 1 {
-		t.Errorf("Delete called %d times, want 1", n)
-	}
+	w.probeWasStopped()
 	if n := w.calls.count("rollback"); n != 0 {
 		t.Errorf("rollback called %d times, want 0", n)
 	}
@@ -1561,6 +1557,7 @@ func TestAToolFailureInTheInstallWindow(t *testing.T) {
 	if window, text := w.result().windowOf("internal-error"); window != "install" || text != "the watch unit broke" {
 		t.Errorf("internal-error in window %q with text %q", window, text)
 	}
+	w.probeWasStopped()
 }
 
 func TestASettlingWithNoResultIsTheToolsFailure(t *testing.T) {
@@ -1574,6 +1571,101 @@ func TestASettlingWithNoResultIsTheToolsFailure(t *testing.T) {
 	if window, _ := w.result().windowOf("internal-error"); window != "install" {
 		t.Errorf("internal-error in window %q, want install", window)
 	}
+	w.probeWasStopped()
+}
+
+// probeWasStopped fails the test unless the run stopped the probe once, kept the Facts its Stop
+// gave in the probe's entry, and deleted the cluster (section 6, "Stop").
+func (w *world) probeWasStopped() {
+	w.t.Helper()
+	for name, want := range map[string]int{"probe-stop": 1, "delete": 1} {
+		if n := w.calls.count(name); n != want {
+			w.t.Errorf("%s was called %d times, want %d", name, n, want)
+		}
+	}
+	r := w.result()
+	if len(r.Probes) != 1 || r.Probes[0].Lines != w.probe.facts.Lines {
+		w.t.Errorf("probes %+v, want one whose lines are the %d that Stop gave", r.Probes, w.probe.facts.Lines)
+	}
+}
+
+// A failure of the tool stops the probe, as the end of the windows does (section 6, "Stop"). When
+// the failure was a panic of the event reader, nothing reads the probe's events any more, and the
+// drain's lines come on a channel with no buffer: the stop must not wait for a reader.
+func TestTheProbeStopsAfterTheReaderPanics(t *testing.T) {
+	w := newWorld(t)
+	w.probe.unbuffered = true
+	w.probe.events = passes(-15, -15)
+	w.probe.last = passes(-14, -10)
+	defer func(h func(probe.Event)) { eventHook = h }(eventHook)
+	eventHook = func(probe.Event) { panic("the timeline broke") }
+	done := make(chan int, 1)
+	go func() { done <- w.run(context.Background()) }()
+	select {
+	case code := <-done:
+		if code != 2 {
+			t.Fatalf("exit %d, want 2", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the run did not end: the probe's stop waits for a reader that has failed")
+	}
+	r := w.result()
+	if window, text := r.windowOf("internal-error"); window != "install" || text != "the timeline broke" {
+		t.Errorf("internal-error in window %q with text %q", window, text)
+	}
+	w.probeWasStopped()
+}
+
+// A panic or a signal while the probe stops after a failure of the tool: the panic is one more
+// internal-error and the first stays, and a signal is placed as stopProbe places one.
+func TestWhileTheProbeStopsAfterAToolFailure(t *testing.T) {
+	t.Run("a panic", func(t *testing.T) {
+		w := newWorld(t)
+		w.hooks["install-settled"] = func() { panic("the watch unit broke") }
+		w.hooks["probe-stop"] = func() { panic("the probe unit broke") }
+		if code := w.run(context.Background()); code != 2 {
+			t.Fatalf("exit %d, want 2", code)
+		}
+		r := w.result()
+		var texts []string
+		for _, x := range r.Reasons {
+			texts = append(texts, x.Code+" in "+x.Window+": "+x.Text)
+		}
+		want := []string{"internal-error in install: the watch unit broke", "internal-error in install: the probe unit broke"}
+		if diff := cmp.Diff(want, texts); diff != "" {
+			t.Errorf("reasons (-want +got):\n%s", diff)
+		}
+		for name, want := range map[string]int{"probe-stop": 1, "delete": 1} {
+			if n := w.calls.count(name); n != want {
+				t.Errorf("%s was called %d times, want %d", name, n, want)
+			}
+		}
+	})
+	t.Run("a signal", func(t *testing.T) {
+		w := newWorld(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		w.hooks["install-settled"] = func() { panic("the watch unit broke") }
+		w.hooks["probe-stop"] = cancel
+		if code := w.run(ctx); code != 2 {
+			t.Fatalf("exit %d, want 2", code)
+		}
+		r := w.result()
+		if diff := cmp.Diff([]string{"interrupted", "internal-error"}, r.codes()); diff != "" {
+			t.Errorf("reasons (-want +got):\n%s", diff)
+		}
+		if window, _ := r.windowOf("interrupted"); window != "install" {
+			t.Errorf("interrupted in window %q, want install", window)
+		}
+		for name, want := range map[string]int{"probe-stop": 1, "delete": 0} {
+			if n := w.calls.count(name); n != want {
+				t.Errorf("%s was called %d times, want %d", name, n, want)
+			}
+		}
+		if len(r.Probes) != 1 || r.Probes[0].Lines != w.probe.facts.Lines {
+			t.Errorf("probes %+v, want one whose lines are the %d that Stop gave", r.Probes, w.probe.facts.Lines)
+		}
+	})
 }
 
 // Rule 8: a condition of the install window that the tool learns of only after the steady window
