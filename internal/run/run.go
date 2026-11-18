@@ -122,7 +122,7 @@ func Run(ctx context.Context, o Options, u Units) int {
 		// A signal that came before the failure was handled belongs to the same window
 		// (section 10 rule 3), and is no warning after the verdict.
 		if !s.signalSeen && s.interrupted(s.parent) {
-			s.decide(true)
+			s.decideAgain(true)
 		}
 	}
 	// The run's own context ends here, before the probe's stop, so that a command that still runs
@@ -490,26 +490,22 @@ func (s *runState) stopProbe(ctx context.Context) {
 // the event reader is gone, as haltProbe says. A signal that came meanwhile is placed as
 // stopProbe places one, and the verdict is decided again with the internal-error that the
 // failure placed. A panic in the stop, or one of the reader, is the tool's failure too: it is
-// placed as one more internal-error beside the first. A panic of the decision after that is a
-// warning, as any failure after the verdict was decided.
+// placed as one more internal-error beside the first, with a signal that came and was not yet
+// placed, and the verdict is decided again by decideAgain.
 func (s *runState) stopAfterFailure() {
 	if s.probe == nil || s.stop != notAsked || s.parent.Err() != nil {
 		return
 	}
+	signal := false // a signal placed here, which only a decision made since holds
 	defer func() {
 		if p := recover(); p != nil {
 			// A panic of the stop before Stop was called, or of the last decision; a reader's panic
 			// that it met was taken by then.
 			s.place(verdict.Condition{Code: verdict.InternalError, Text: panicText(p)})
-			func() {
-				defer func() {
-					if p := recover(); p != nil {
-						// The verdict was decided when the first failure was placed.
-						s.warnings.add("the tool failed after the verdict was decided: " + panicText(p))
-					}
-				}()
-				s.decide(true)
-			}()
+			if !s.signalSeen && s.interrupted(s.parent) {
+				signal = true
+			}
+			s.decideAgain(signal)
 		}
 	}()
 	p := s.haltProbe(s.parent)
@@ -519,7 +515,25 @@ func (s *runState) stopAfterFailure() {
 	if p != nil {
 		s.place(verdict.Condition{Code: verdict.InternalError, Text: panicText(p)})
 	}
-	s.interrupted(s.parent) // a signal that came while the probe was stopped
+	signal = s.interrupted(s.parent) // a signal that came while the probe was stopped
+	s.decide(true)
+}
+
+// decideAgain decides the verdict again once the tool's first failure was decided, with what was
+// placed since. A panic of that decision is the warning that a failure after the verdict was
+// decided gives, and the verdict kept is the one decided at the first failure, which already holds
+// that failure. signal says that a signal was placed for this decision: when the decision panics,
+// the verdict kept does not hold that signal, so it no longer counts as reported, and cleanUp
+// reports it as a signal after the verdict.
+func (s *runState) decideAgain(signal bool) {
+	defer func() {
+		if p := recover(); p != nil {
+			s.warnings.add("the tool failed after the verdict was decided: " + panicText(p))
+			if signal {
+				s.signalSeen = false
+			}
+		}
+	}()
 	s.decide(true)
 }
 
@@ -734,7 +748,10 @@ func (s *runState) keepFirstFailures(d verdict.Decision) {
 }
 
 // toolFailed places the condition of a panic that stopped the run, like a
-// signal, and decides the verdict that the run reached.
+// signal, and decides the verdict that the run reached. Its decision has no
+// recover: the decision kept from before the failure may be a pass, and writing
+// it would hide the failure. A panic here ends the process with Go's exit 2, and
+// the first result.json, which is not final, reads as not verified.
 func (s *runState) toolFailed(caught any) {
 	s.place(verdict.Condition{Code: verdict.InternalError, Text: panicText(caught)})
 	s.decide(true)

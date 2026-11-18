@@ -428,10 +428,11 @@ type fakeProbe struct {
 func (p *fakeProbe) Counts() (lines, jsonText int) { return p.linesRead, p.jsonTextRead }
 
 // Events gives the probe's channel, made at the first call: with room for the scripted events and
-// 64 more, or with no buffer when unbuffered is set. With eventsPanic it panics once Start has
-// returned.
+// 64 more, or with no buffer when unbuffered is set. With eventsPanic, once Start has returned, it
+// runs the hook "events" and panics.
 func (p *fakeProbe) Events() <-chan probe.Event {
 	if p.eventsPanic && p.returned.Load() {
+		p.w.hook("events")
 		panic("the probe's events broke")
 	}
 	p.made.Do(func() {

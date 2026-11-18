@@ -1510,6 +1510,155 @@ func TestAFailureAndASignalInOneWindow(t *testing.T) {
 	}
 }
 
+// count is how many of the reasons have the code.
+func (r resultFile) count(code string) int {
+	n := 0
+	for _, x := range r.Reasons {
+		if x.Code == code {
+			n++
+		}
+	}
+	return n
+}
+
+// A signal that comes once the stop after a failure of the tool has begun, and before a panic in
+// that stop, is placed before the handler's decision, as the stop's own path places one.
+func TestASignalBeforeAPanicInTheStopAfterAFailure(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.hooks["install-settled"] = func() { panic("the watch unit broke") }
+	w.probe.eventsPanic = true
+	w.probe.linesRead, w.probe.jsonTextRead = 7, 1
+	w.hooks["events"] = cancel // stopAfterFailure's guard has passed; Events then panics
+	if code := w.run(ctx); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if n := r.count("interrupted"); n != 1 {
+		t.Errorf("%d interrupted reasons, want 1; reasons %q", n, r.codes())
+	}
+	if window, _ := r.windowOf("interrupted"); window != "install" {
+		t.Errorf("interrupted in window %q, want install, the last that began", window)
+	}
+	var faults []string
+	for _, x := range r.Reasons {
+		if x.Code == "internal-error" {
+			faults = append(faults, x.Text)
+		}
+	}
+	if diff := cmp.Diff([]string{"the watch unit broke", "the probe's events broke"}, faults); diff != "" {
+		t.Errorf("internal-error texts (-want +got):\n%s", diff)
+	}
+	if slices.Contains(r.Warnings, "interrupted after the verdict was decided") {
+		t.Errorf("warnings %q: the signal was reported after the verdict too", r.Warnings)
+	}
+	w.probeStopNotJudged(noteStopFailed)
+}
+
+// The decision that places a signal beside a failure of the tool panics: the panic is a warning,
+// the run goes on to its end and writes its final result, and the verdict kept is the one decided
+// at the failure. That verdict does not hold the signal, which is then reported as one after it.
+func TestADecisionAfterASignalThatPanics(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	armed, calls := false, 0
+	w.hooks["transition-deploy"] = func() {
+		armed = true
+		cancel()
+		panic("the watcher broke")
+	}
+	defer func(h func()) { decideHook = h }(decideHook)
+	decideHook = func() {
+		if !armed {
+			return
+		}
+		calls++
+		if calls == 2 { // the first is toolFailed's, which returns; the second places the signal
+			panic("the verdict broke")
+		}
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			t.Fatalf("Run panicked: %v", p)
+		}
+	}()
+	if code := w.run(ctx); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if !r.Final || r.Verdict != "not-verified" {
+		t.Errorf("final %v, verdict %q; want a final not-verified", r.Final, r.Verdict)
+	}
+	if window, text := r.windowOf("internal-error"); window != "deploy" || text != "the watcher broke" {
+		t.Errorf("internal-error in window %q with text %q", window, text)
+	}
+	want := []string{"the tool failed after the verdict was decided: the verdict broke",
+		"interrupted after the verdict was decided"}
+	if diff := cmp.Diff(want, r.Warnings); diff != "" {
+		t.Errorf("warnings (-want +got):\n%s", diff)
+	}
+	if n := w.calls.count("end-commands"); n != 1 {
+		t.Errorf("EndCommands called %d times, want 1: the run did not go on to its end", n)
+	}
+}
+
+// Counts is read once, by the first record: a rewrite of result.json for a later warning gives
+// the same counts, also when the probe's counts have moved on since.
+func TestTheProbesCountsAreReadOnce(t *testing.T) {
+	w := newWorld(t)
+	w.probe.stopErr = errors.New("the pod delete was refused") // the stop gives no Facts to use
+	w.probe.linesRead, w.probe.jsonTextRead = 7, 1
+	w.cluster.deleteErr = errors.New("the engine did not answer") // a warning after the first write
+	w.hooks["delete"] = func() {
+		if p := w.result().Probes; len(p) != 1 || p[0].Lines != 7 || p[0].JSONLinesWithoutOK != 1 {
+			t.Errorf("the first final result.json has probes %+v, want 7 lines and 1", p)
+		}
+		w.probe.linesRead, w.probe.jsonTextRead = 99, 9
+	}
+	if code := w.run(context.Background()); code != 0 {
+		t.Errorf("exit %d, want 0", code)
+	}
+	r := w.result()
+	if !slices.Contains(r.Warnings, "the cluster was not deleted: the engine did not answer") {
+		t.Fatalf("warnings %q: result.json was not written again", r.Warnings)
+	}
+	if p := r.Probes; len(p) != 1 || p[0].Lines != 7 || p[0].JSONLinesWithoutOK != 1 {
+		t.Errorf("the rewritten result.json has probes %+v, want the first counts, 7 lines and 1", p)
+	}
+}
+
+// A signal already placed as a reason is not placed again when a failure of the tool follows it.
+func TestASignalPlacedBeforeAToolFailureIsPlacedOnce(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer func(h func(probe.Event)) { eventHook = h }(eventHook)
+	eventHook = func(probe.Event) {
+		if ctx.Err() != nil {
+			panic("the timeline broke") // the reader fails on the first line after the signal
+		}
+	}
+	u := w.units()
+	u.Clock = &lateClock{fakeClock: w.clock, before: func() {
+		cancel() // the signal comes in the steady window
+		w.probe.send(passes(1, 1)[0])
+	}}
+	code := Run(ctx, Options{ConfigPath: filepath.Join(w.cfg.Dir, "rollproof.yaml"), Out: w.out,
+		Stdout: &w.stdout, Stderr: &w.stderr, Version: "test", Getenv: func(string) string { return "" }}, u)
+	if code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if n := r.count("interrupted"); n != 1 {
+		t.Errorf("%d interrupted reasons, want 1; reasons %q", n, r.codes())
+	}
+	if window, text := r.windowOf("internal-error"); window != "steady" || text != "the timeline broke" {
+		t.Errorf("internal-error in window %q with text %q", window, text)
+	}
+}
+
 // The run reads the probe's events from before the probe starts (section 5). Start sends 5,000
 // observations and the scripted ones on a channel with no buffer, so it returns only while a
 // reader takes them.
