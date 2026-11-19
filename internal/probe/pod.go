@@ -328,7 +328,8 @@ func (p *Pod) Start(ctx context.Context) (Started, error) {
 
 	timeout := time.NewTimer(p.o.StartTimeout)
 	defer timeout.Stop()
-	if err := p.replace(ctx, timeout.C); err != nil {
+	asked, err := p.replace(ctx, timeout.C)
+	if err != nil {
 		p.end(Facts{StoppedWhenAsked: true}, nil)
 		p.closeEvents()
 		return Started{}, err
@@ -342,6 +343,7 @@ func (p *Pod) Start(ctx context.Context) (Started, error) {
 		firstCh: make(chan struct{}), exitCh: make(chan struct{}),
 	}
 	r.follower = newFollower(p.open, p.running, p.o.Raw, p.o.Now, func(e Event) { p.emit(r, e) })
+	r.follower.podAsked = asked
 	// The run is kept from the moment it exists, so that Counts reads it and a Stop after a Start
 	// that panicked stops the follower and the watcher started below.
 	p.mu.Lock()
@@ -357,7 +359,6 @@ func (p *Pod) Start(ctx context.Context) (Started, error) {
 	}()
 	afterRunStarted()
 
-	var err error
 	select {
 	case <-r.firstCh:
 	case <-r.exitCh:
@@ -392,12 +393,14 @@ func (p *Pod) Start(ctx context.Context) (Started, error) {
 }
 
 // replace deletes a pod named probe with a grace period of 0, waits until it is gone, and
-// creates the probe's pod. It gives up when timeout fires or ctx ends.
-func (p *Pod) replace(ctx context.Context, timeout <-chan time.Time) error {
+// creates the probe's pod. It gives up when timeout fires or ctx ends. It returns the moment it
+// asked for the pod, read just before the create, with its error; the moment is zero when no
+// create was made.
+func (p *Pod) replace(ctx context.Context, timeout <-chan time.Time) (time.Time, error) {
 	zero := int64(0)
 	err := p.pods().Delete(ctx, "probe", metav1.DeleteOptions{GracePeriodSeconds: &zero})
 	if err != nil && !apierrors.IsNotFound(err) {
-		return err
+		return time.Time{}, err
 	}
 	for {
 		_, err := p.pods().Get(ctx, "probe", metav1.GetOptions{})
@@ -406,18 +409,19 @@ func (p *Pod) replace(ctx context.Context, timeout <-chan time.Time) error {
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return time.Time{}, ctx.Err()
 		case <-timeout:
-			return errors.New("the probe pod of an earlier run is still there")
+			return time.Time{}, errors.New("the probe pod of an earlier run is still there")
 		case <-time.After(pollEvery):
 		}
 	}
+	asked := p.o.Now()
 	_, err = p.pods().Create(ctx, podSpec(p.o), metav1.CreateOptions{})
 	if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsBadRequest(err) {
-		return verdict.Condition{Code: verdict.ProbeNotStarted,
+		return asked, verdict.Condition{Code: verdict.ProbeNotStarted,
 			Text: "the API server refused the probe's pod: " + err.Error()}
 	}
-	return err
+	return asked, err
 }
 
 // judgeStart decides Start once its wait has ended other than by its context: an exit before the

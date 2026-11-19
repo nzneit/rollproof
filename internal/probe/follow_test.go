@@ -154,6 +154,35 @@ func TestFollowLineKinds(t *testing.T) {
 	}
 }
 
+func TestFollowFailedCheckAndFloor(t *testing.T) {
+	early := logAt(-2500).Format(time.RFC3339Nano)
+	l := newFakeLog(logLine(logAt(100), `{"ok":true}`) +
+		logLine(logAt(200), `{"ok":false,"t":"`+early+`"}`) +
+		logLine(logAt(300), `{"ok":true,"n":0}`) +
+		logAt(400).Format(time.RFC3339Nano) + ` {"ok":false,"n":2}`) // a final piece with no line end
+	quickPolling(t)
+	var events []Event
+	f := newFollower(l.open, l.running, io.Discard, func() time.Time { return logAt(60_000) }, func(e Event) { events = append(events, e) })
+	f.podAsked = logAt(0)
+	f.stopAsked()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	f.run(ctx)
+	if len(events) != 3 {
+		t.Fatalf("events = %+v, want an observation and two faults; the final piece is not judged", events)
+	}
+	if e := events[1]; e.Fault == nil || e.Fault.Code != verdict.ProbeLineInvalid || !e.Fault.At.Equal(logAt(200)) ||
+		!strings.Contains(e.Fault.Text, "earlier than the moment the tool asked") || !e.FailedCheck {
+		t.Errorf("event 1 = %+v, want a failed check's fault for the early t, at the line's stamp", e)
+	}
+	if e := events[2]; e.Fault == nil || e.FailedCheck {
+		t.Errorf("event 2 = %+v, want a fault that is not a failed check's", e)
+	}
+	if events[0].FailedCheck {
+		t.Error("an observation carries FailedCheck")
+	}
+}
+
 func TestFollowLongLine(t *testing.T) {
 	long := `{"ok":true,"detail":"` + strings.Repeat("x", 100_000) + `"}`
 	_, events, _ := followAll(t, newFakeLog(logLine(logAt(100), long)), false)

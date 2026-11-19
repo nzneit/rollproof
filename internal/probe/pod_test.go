@@ -404,6 +404,34 @@ func TestStartReturnsAtTheFirstObservation(t *testing.T) {
 	}
 }
 
+func TestStartFloorsTAtTheCreate(t *testing.T) {
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s.clock.Set(logAt(-60_000)) // Start begins
+	s.client.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		s.clock.Set(logAt(0)) // the moment of the ask
+		return false, nil, nil
+	})
+	s.client.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		s.clock.Set(logAt(500)) // after the create
+		return false, nil, nil
+	})
+	at := func(ms int) string { return logAt(ms).Format(time.RFC3339Nano) }
+	s.endsWhenDeleted(t, logLine(logAt(0), `{"ok":true}`)+
+		logLine(logAt(100), `{"ok":false,"t":"`+at(-1800)+`"}`)+ // 1.8 s before the ask: counted
+		logLine(logAt(200), `{"ok":false,"t":"`+at(-2100)+`"}`)) // 2.1 s before the ask: a fault
+	if _, err := s.pod.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pod.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := allEvents(s.pod.Events())
+	if len(events) != 3 || events[1].Obs == nil || events[2].Fault == nil ||
+		events[2].Fault.Code != verdict.ProbeLineInvalid || !events[2].FailedCheck {
+		t.Errorf("events = %+v, want two observations and the early t's fault", events)
+	}
+}
+
 func TestClockCheck(t *testing.T) {
 	for _, c := range []struct {
 		name  string

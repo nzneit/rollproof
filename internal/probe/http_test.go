@@ -50,7 +50,7 @@ func (c *capture) observations(t *testing.T) []verdict.Observation {
 		if !ok || strings.Contains(text, "\n") {
 			t.Fatalf("a Write was not one line: %q", s.text)
 		}
-		line := ParseLine(text, s.at)
+		line := ParseLine(text, s.at, time.Time{})
 		if line.Kind != Observed {
 			t.Fatalf("not an observation (%s): %q", line.Fault, text)
 		}

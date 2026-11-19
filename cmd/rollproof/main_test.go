@@ -390,7 +390,7 @@ func TestProbeHTTP(t *testing.T) {
 	}
 	written := time.Now()
 	for _, line := range strings.Split(text, "\n") {
-		if got := probe.ParseLine(line, written); got.Kind != probe.Observed {
+		if got := probe.ParseLine(line, written, time.Time{}); got.Kind != probe.Observed {
 			t.Errorf("line %q is not an observation", line)
 		}
 	}
