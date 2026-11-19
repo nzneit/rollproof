@@ -118,6 +118,70 @@ func TestVersion(t *testing.T) {
 	}
 }
 
+// After it listens, the server fails /work for FAIL_FOR, counted from FAIL_AFTER, while /readyz
+// and /version answer as before, and the failures end on their own.
+func TestFailsForAWhileAfterItListens(t *testing.T) {
+	ready, _, done := launch(t, map[string]string{"ADDR": "127.0.0.1:0", "SHUTDOWN": "drain-now",
+		"FAIL_AFTER": "300ms", "FAIL_FOR": "300ms"})
+	addr := listening(t, ready, done)
+	began := time.Now()
+
+	time.Sleep(100*time.Millisecond - time.Since(began))
+	if code, _, err := get(addr, "/work?ms=0"); err != nil || code != 200 {
+		t.Fatalf("/work 100 ms after it listened: %d, %v; want 200", code, err)
+	}
+
+	time.Sleep(400*time.Millisecond - time.Since(began))
+	code, body, err := get(addr, "/work?ms=0")
+	if err != nil || code != 500 || body != "failing" {
+		t.Errorf("/work 400 ms after it listened: %d %q, %v; want 500 %q", code, body, err, "failing")
+	}
+	if code, _, err := get(addr, "/readyz"); err != nil || code != 200 {
+		t.Errorf("/readyz 400 ms after it listened: %d, %v; want 200", code, err)
+	}
+	if code, _, err := get(addr, "/version"); err != nil || code != 200 {
+		t.Errorf("/version 400 ms after it listened: %d, %v; want 200", code, err)
+	}
+
+	time.Sleep(800*time.Millisecond - time.Since(began))
+	if code, _, err := get(addr, "/work?ms=0"); err != nil || code != 200 {
+		t.Errorf("/work 800 ms after it listened: %d, %v; want 200", code, err)
+	}
+}
+
+// With JOB_SLEEP, serve sleeps and exits 0 as a Job does, and never listens.
+func TestJobSleepEndsWithoutListening(t *testing.T) {
+	began := time.Now()
+	ready, _, done := launch(t, map[string]string{"ADDR": "127.0.0.1:0", "JOB_SLEEP": "200ms"})
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve: %v, want nil", err)
+		}
+		if d := time.Since(began); d < 200*time.Millisecond {
+			t.Errorf("serve returned after %v, want 200 ms or more", d)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return within 5 s")
+	}
+	select {
+	case addr := <-ready:
+		t.Errorf("serve listened on %s, want no listen", addr)
+	default:
+	}
+}
+
+// A FAIL_AFTER that does not parse is an error that names the variable.
+func TestBadFailAfter(t *testing.T) {
+	env := map[string]string{"ADDR": "127.0.0.1:0", "FAIL_AFTER": "soon"}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := serve(ctx, func(k string) string { return env[k] }, nil)
+	if err == nil || !strings.Contains(err.Error(), "FAIL_AFTER") {
+		t.Errorf("serve with FAIL_AFTER=soon = %v, want an error that holds FAIL_AFTER", err)
+	}
+}
+
 func TestStartDelay(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

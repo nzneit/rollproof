@@ -1,3 +1,4 @@
+{{- if eq .Values.workload "Deployment" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,50 +20,5 @@ spec:
       labels:
         app.kubernetes.io/name: orders
     spec:
-      terminationGracePeriodSeconds: {{ .Values.gracePeriod }}
-      automountServiceAccountToken: false
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        runAsGroup: 65532
-        seccompProfile:
-          type: RuntimeDefault
-      {{- if .Values.spread }}
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchLabels:
-                  app.kubernetes.io/name: orders
-              topologyKey: kubernetes.io/hostname
-      {{- end }}
-      containers:
-        - name: orders
-          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
-          imagePullPolicy: IfNotPresent
-          ports:
-            - name: http
-              containerPort: 8080
-          env:
-            - name: START_DELAY
-              value: {{ .Values.startDelay | quote }}
-            - name: SHUTDOWN
-              value: {{ .Values.shutdown | quote }}
-            - name: SERVE_AFTER_TERM
-              value: {{ .Values.serveAfterTerm | quote }}
-            - name: DRAIN_DEADLINE
-              value: {{ .Values.drainDeadline | quote }}
-            - name: FAIL_WORK
-              value: {{ .Values.failWork | quote }}
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-          {{- if .Values.readiness }}
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: 8080
-            periodSeconds: 1
-            failureThreshold: 1
-          {{- end }}
+      {{- include "orders.podSpec" . | nindent 6 }}
+{{- end }}

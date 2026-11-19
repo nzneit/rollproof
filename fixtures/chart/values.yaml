@@ -15,3 +15,21 @@ spread: true
 gracePeriod: 30
 # failWork makes /work answer 500 while /readyz still answers 200.
 failWork: false
+# workload is the kind of the orders workload: Deployment, StatefulSet or DaemonSet.
+workload: Deployment
+# denyIngress adds a policy that denies all ingress in the namespace.
+denyIngress: false
+# allowProbe adds the rule that lets the probe's pods through the deny policy.
+allowProbe: false
+# second adds orders-worker, which the Service does not select.
+second: false
+# secondRevision is the annotation that rolls orders-worker alone when it changes.
+secondRevision: "1"
+# hooks adds a Job after the install and a Job before the upgrade.
+hooks: false
+# hookSleep is how long each hook Job sleeps; longer than the default settle time.
+hookSleep: "20s"
+# failAfter is when /work begins to fail after it listens; empty never fails.
+failAfter: ""
+# failFor is how long /work fails from failAfter on.
+failFor: ""

@@ -11,6 +11,9 @@
 // SERVE_AFTER_TERM  helper: keep serving this long after SIGTERM
 // DRAIN_DEADLINE    drain-now, helper: deadline given to http.Server.Shutdown
 // FAIL_WORK         true: GET /work answers 500 with "failing" and does nothing else
+// FAIL_AFTER        time after it listens before GET /work begins to fail
+// FAIL_FOR          how long GET /work fails from FAIL_AFTER on; empty FAIL_AFTER never fails
+// JOB_SLEEP         sleep this long and exit 0 without listening, as a Job does
 // version is built in: -ldflags "-X main.version=…" (default dev), so that two builds are two images.
 package main
 
@@ -48,6 +51,15 @@ func handlesTerm(mode string) bool {
 
 func serve(ctx context.Context, env func(string) string, ready chan<- string) error {
 	pod, _ := os.Hostname()
+	jobSleep, err := durEnv(env, "JOB_SLEEP", 0)
+	if err != nil {
+		return err
+	}
+	if jobSleep > 0 {
+		log.Printf("job_sleep=%s", jobSleep)
+		time.Sleep(jobSleep)
+		return nil
+	}
 	mode := env("SHUTDOWN")
 	if mode == "" {
 		mode = "exit"
@@ -67,18 +79,34 @@ func serve(ctx context.Context, env func(string) string, ready chan<- string) er
 	if err != nil {
 		return err
 	}
+	failAfter, err := durEnv(env, "FAIL_AFTER", 0)
+	if err != nil {
+		return err
+	}
+	failFor, err := durEnv(env, "FAIL_FOR", 0)
+	if err != nil {
+		return err
+	}
 	addr := env("ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
 	failWork := env("FAIL_WORK") == "true"
 
-	log.Printf("pod=%s version=%s shutdown=%s start_delay=%s serve_after_term=%s drain_deadline=%s fail_work=%t",
-		pod, version, mode, startDelay, serveAfter, drain, failWork)
+	log.Printf("pod=%s version=%s shutdown=%s start_delay=%s serve_after_term=%s drain_deadline=%s fail_work=%t fail_after=%s fail_for=%s",
+		pod, version, mode, startDelay, serveAfter, drain, failWork, failAfter, failFor)
+
+	// failFrom and failUntil are written once, after listening and before the
+	// server's goroutine starts, so the handlers read them without a race.
+	var failFrom, failUntil time.Time
+	failing := func() bool {
+		now := time.Now()
+		return failWork || (!failFrom.IsZero() && !now.Before(failFrom) && now.Before(failUntil))
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /work", func(w http.ResponseWriter, r *http.Request) {
-		if failWork {
+		if failing() {
 			w.WriteHeader(http.StatusInternalServerError)
 			fmt.Fprint(w, "failing")
 			return
@@ -107,6 +135,10 @@ func serve(ctx context.Context, env func(string) string, ready chan<- string) er
 	}
 	if ready != nil {
 		ready <- ln.Addr().String()
+	}
+	if failAfter > 0 {
+		failFrom = time.Now().Add(failAfter)
+		failUntil = failFrom.Add(failFor)
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
