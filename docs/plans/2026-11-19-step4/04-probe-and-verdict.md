@@ -465,7 +465,7 @@ Design: section 6, "The contract": the paragraph after "How a line is read" ("A 
 - Modify: `internal/probe/line.go` (`ParseLine` takes `asked`; `Line.FailedCheck`)
 - Modify: `internal/probe/follow.go` (`Event.FailedCheck`; the follower passes the asked moment to `ParseLine`)
 - Modify: `internal/probe/pod.go` (`replace` records the asked moment; `Start` hands it to the follower)
-- Test: `internal/probe/line_test.go`, `internal/probe/follow_test.go`, `internal/probe/pod_test.go`, `internal/probe/http_test.go` (its call of `ParseLine`)
+- Test: `internal/probe/line_test.go`, `internal/probe/follow_test.go`, `internal/probe/pod_test.go`, `internal/probe/http_test.go` (its call of `ParseLine`), `cmd/rollproof/main_test.go` (its call of `probe.ParseLine`, at line 393)
 
 **Interfaces:**
 - Consumes: `probe.ClockBound` (2 s, as built)
@@ -483,7 +483,7 @@ Design: section 6, "The contract": the paragraph after "How a line is read" ("A 
   The event's Fault comes from a line whose FailedCheck is set. False for an
   observation and for every other fault.
 
-The README's "Interfaces between tasks" names this last one `probe.Fault.FailedCheck`. The package has no type `Fault`: `Event.Fault` is a `*verdict.Condition`. The flag goes on `Event`, beside the fault it qualifies, and Task 16 reads `e.FailedCheck` on an event whose `Fault` is set.
+The README names this last one `probe.Event.FailedCheck`. The package has no type `Fault`: `Event.Fault` is a `*verdict.Condition`, which carries no such flag. The flag goes on `Event`, beside the fault it qualifies, and Task 16 reads `e.FailedCheck` on an event whose `Fault` is set.
 
 `ParseLine`'s new check comes right after "t is later than the line", with the text built from `ClockBound`: `t is more than 2s earlier than the moment the tool asked for the probe's pod`. `FailedCheck` is found before any other rule of the line returns: once the line has decoded as one object (and the token after it is end of input), walk its top-level names as `hasDuplicateName` does and set it when any value of the name `ok` is the JSON literal `false`. A line that is not one JSON object, log text, and an object whose `ok` is the string `"false"` do not set it. The final piece of a stopped probe is not read as a line (as built), so it never sets it.
 
@@ -561,7 +561,7 @@ The asked moment: `replace` reads `p.o.Now()` just before its call of `Create` a
   }
   ```
 
-  In `http_test.go`, change the call to `ParseLine(text, s.at, time.Time{})`.
+  In `http_test.go`, change the call to `ParseLine(text, s.at, time.Time{})`. In `cmd/rollproof/main_test.go`, change the call at line 393 to `probe.ParseLine(line, written, time.Time{})`: that test parses the built-in probe's output and has no asked moment, and a zero `asked` skips the floor.
 
   In `follow_test.go`:
 
@@ -639,7 +639,7 @@ The asked moment: `replace` reads `p.o.Now()` just before its call of `Create` a
   Expected: PASS.
 
 - [ ] **Step 5: Commit**
-  `git add internal/probe/line.go internal/probe/follow.go internal/probe/pod.go internal/probe/line_test.go internal/probe/follow_test.go internal/probe/pod_test.go internal/probe/http_test.go` and `git commit -m "Make a t more than the clock check's bound before the probe's pod was asked for a fault of the line, and mark a fault whose line is a failed check's"`
+  `git add internal/probe/line.go internal/probe/follow.go internal/probe/pod.go internal/probe/line_test.go internal/probe/follow_test.go internal/probe/pod_test.go internal/probe/http_test.go cmd/rollproof/main_test.go` and `git commit -m "Make a t more than the clock check's bound before the probe's pod was asked for a fault of the line, and mark a fault whose line is a failed check's"`
 
 ### Task 12: No `ms` or no `lag` gives null and "-"
 
@@ -722,7 +722,9 @@ The golden file's record is a custom probe's (decision 9: kind `custom`, named b
 
   In `line_test.go`, `TestParseLineHasMsAndLag`: `{"ok":true}` gives `HasMs` and `HasLag` false; `{"ok":true,"ms":0,"lag":0}` gives both true with `Ms` and `Lag` 0; `{"ok":false,"ms":12.5}` gives `HasMs` true and `HasLag` false; `{"ok":true,"n":200,"lag":6}` gives `HasMs` false and `HasLag` true. In `TestParseLine`'s comparison of an observation, compare `HasMs` and `HasLag` too, and set both to true in the `obs` of the three cases whose line gives `ms` and `lag`: the second, the sixth, and `{"ok":true,"ms":0,"lag":0}`, which then gets an `obs` of its own in place of `pass`.
 
-  In `result_test.go`: in `passRun` and every other record of the package's tests, `SlowestMs: 41` becomes `SlowestMs: new(41.0)`, and so for each value (`LagMs: new(6.0)`, `new(13.5)` and so on). Add `"slowest_ms"` and `"lag_ms"` to `TestNoNulls`'s `keysThatMayBeNull`. In `TestInstallRecordAtEachEnding`, the case "before the probe's first observation" now wants `"slowest_ms":null,"lag_ms":null`. Add:
+  Every `Window` and `Install` literal in `internal/report`'s tests that gives `SlowestMs` or `LagMs` a number takes `new(…)` of that number as a `float64`: `SlowestMs: 41` becomes `SlowestMs: new(41.0)`. They are, at the base commit, `result_test.go:105`, `106`, `107` (`passRun`'s windows), `111` (its install), `372` (`TestInstallRecordAtEachEnding`'s `counts`) and `848` (`TestWindowReadsBack`, `new(13.5)` and `new(17.25)`), and `console_test.go:24` and `26` (`failRun`'s windows), `78` (`inInstallRun`'s install), `86` (`installDecidedRun`'s install), `102` (`stallRun`'s deploy), `243` (a rollback window of `TestConsoleLines`) and `426` (a restart window). After the change, `grep -nE '(SlowestMs|LagMs): [0-9]' internal/report/*_test.go` prints nothing.
+
+  In `result_test.go`: add `"slowest_ms"` and `"lag_ms"` to `TestNoNulls`'s `keysThatMayBeNull`. In `TestInstallRecordAtEachEnding`, the case "before the probe's first observation" now wants `"slowest_ms":null,"lag_ms":null`. Add:
 
   ```go
   // customNoMsOrLagRun is a pass judged by a custom probe that gives neither ms nor lag (section 12).

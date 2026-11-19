@@ -21,16 +21,17 @@ Design: section 7, "The restart", "When a transition has finished" (the first co
   says that the API server took every change. When it refused one, Workload
   names that workload, as deployment/orders, and Text is the server's answer.
 - Produces: `func (w *Watcher) Restart(ctx context.Context) Restart`
-  Sets the pod template annotation kubectl.kubernetes.io/restartedAt, to the
-  clock's time in RFC 3339, by a strategic merge patch on every workload that
-  exists and matches the selector when it is called, one at a time in the
-  order of kind and then name. The first refusal ends it; the workloads after
-  it are not changed. No workload is Accepted. When ctx ends first, Accepted
-  is false and Text is ctx's error: the caller tells that from a refusal.
+  Restarts every workload that exists and matches the selector when it is
+  called, as README decision 3 says: one at a time, stopping at the first
+  refusal. Accepted is true only when the API server took every change, and
+  so also when there was nothing to change. When ctx ends first, Accepted is
+  false and Text is ctx's error: the caller tells that from a refusal.
 
 - [ ] **Step 1: Write the failing tests**
 
-  In `watcher_test.go`, `startWatcher` keeps its signature and calls `startWatcherWith(t, nil, service, objs...)`, which takes an `edit func(*Options)` applied to the Options before `Start`.
+  In `watcher_test.go`, add `func startWatcherWith(t *testing.T, edit func(*Options), service *types.NamespacedName, objs ...runtime.Object) (*Watcher, *fake.Clientset, *fakeClock)`: the body of `startWatcher`, with the Options built into a variable `o`, `edit(&o)` called when `edit` is not nil, and `Start` given `o`. `startWatcher` keeps its signature and becomes `return startWatcherWith(t, nil, service, objs...)`.
+
+  New `internal/watch/restart_test.go`, with the imports `context`, `errors`, `strings`, `testing`, `time`, go-cmp's `cmp`, `appsv1 "k8s.io/api/apps/v1"`, `apierrors "k8s.io/apimachinery/pkg/api/errors"`, `metav1`, `runtime`, `schema`, `types`, `k8s.io/client-go/kubernetes/fake` and `k8stesting "k8s.io/client-go/testing"`:
 
   ```go
   // restartObjects: four workloads that update by rolling, and deployment/batch, which the
@@ -43,19 +44,80 @@ Design: section 7, "The restart", "When a transition has finished" (the first co
   	}
   }
 
-  const restartPatch = `{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"2026-11-13T10:00:00Z"}}}}}`
+  const (
+  	restartedAtKey = "kubectl.kubernetes.io/restartedAt"
+  	restartPatch   = `{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"2026-11-13T10:00:00Z"}}}}}`
+  )
 
   // patches gives each patch the fake client recorded, as RESOURCE/NAME, and fails the test unless
   // every one is a strategic merge patch whose body is restartPatch.
-  func patches(t *testing.T, client *fake.Clientset) []string
+  func patches(t *testing.T, client *fake.Clientset) []string {
+  	t.Helper()
+  	var out []string
+  	for _, a := range client.Actions() {
+  		p, ok := a.(k8stesting.PatchAction)
+  		if !ok || a.GetVerb() != "patch" {
+  			continue
+  		}
+  		if p.GetPatchType() != types.StrategicMergePatchType || string(p.GetPatch()) != restartPatch {
+  			t.Errorf("patch of %s/%s: type %s, body %s", a.GetResource().Resource, p.GetName(), p.GetPatchType(), p.GetPatch())
+  		}
+  		out = append(out, a.GetResource().Resource+"/"+p.GetName())
+  	}
+  	return out
+  }
+
+  // restartedAt reads the annotation from the pod template of RESOURCE/NAME in the fake client.
+  func restartedAt(t *testing.T, client *fake.Clientset, workload string) string {
+  	t.Helper()
+  	resource, name, _ := strings.Cut(workload, "/")
+  	apps := client.AppsV1()
+  	var ann map[string]string
+  	var err error
+  	switch resource {
+  	case "deployments":
+  		var o *appsv1.Deployment
+  		o, err = apps.Deployments("orders").Get(t.Context(), name, metav1.GetOptions{})
+  		if err == nil {
+  			ann = o.Spec.Template.Annotations
+  		}
+  	case "statefulsets":
+  		var o *appsv1.StatefulSet
+  		o, err = apps.StatefulSets("orders").Get(t.Context(), name, metav1.GetOptions{})
+  		if err == nil {
+  			ann = o.Spec.Template.Annotations
+  		}
+  	case "daemonsets":
+  		var o *appsv1.DaemonSet
+  		o, err = apps.DaemonSets("orders").Get(t.Context(), name, metav1.GetOptions{})
+  		if err == nil {
+  			ann = o.Spec.Template.Annotations
+  		}
+  	}
+  	if err != nil {
+  		t.Fatal(err)
+  	}
+  	return ann[restartedAtKey]
+  }
 
   func TestRestartChangesEveryWatchedWorkload(t *testing.T) {
   	w, client, _ := startWatcherWith(t, func(o *Options) { o.Selector = "app!=batch" }, nil, restartObjects()...)
   	got := w.Restart(t.Context())
-  	// cmp.Diff(Restart{Began: t0, Ended: t0, Accepted: true}, got) is empty;
-  	// patches(t, client) is {"daemonsets/logs", "deployments/api", "deployments/orders", "statefulsets/web"};
-  	// the Deployment orders read back from the client has
-  	//   Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] == "2026-11-13T10:00:00Z".
+  	if d := cmp.Diff(Restart{Began: t0, Ended: t0, Accepted: true}, got); d != "" {
+  		t.Errorf("Restart (-want +got):\n%s", d)
+  	}
+  	want := []string{"daemonsets/logs", "deployments/api", "deployments/orders", "statefulsets/web"}
+  	if d := cmp.Diff(want, patches(t, client)); d != "" {
+  		t.Errorf("patches (-want +got):\n%s", d)
+  	}
+  	for _, wl := range want {
+  		if got := restartedAt(t, client, wl); got != "2026-11-13T10:00:00Z" {
+  			t.Errorf("%s has %s %q", wl, restartedAtKey, got)
+  		}
+  	}
+  	if got := restartedAt(t, client, "deployments/batch"); got != "" {
+  		t.Errorf("deployment/batch, which the selector leaves out, has %s %q", restartedAtKey, got)
+  	}
   }
 
   // Review Focus 5: one workload is refused after another was already changed.
@@ -67,29 +129,57 @@ Design: section 7, "The restart", "When a transition has finished" (the first co
   		}
   		clock.Advance(2 * time.Second)
   		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "apps", Resource: "deployments"}, "orders",
-  			errors.New("admission webhook \"policy.example\" denied the request"))
+  			errors.New(`admission webhook "policy.example" denied the request`))
   	})
   	got := w.Restart(t.Context())
-  	// got.Accepted == false, got.Workload == "deployment/orders", got.Began == t0, got.Ended == at(2);
-  	// got.Text holds `admission webhook "policy.example" denied the request`;
-  	// patches(t, client) is {"daemonsets/logs", "deployments/api", "deployments/orders"}: web is not patched;
-  	// daemonset/logs and deployment/api read back carry the annotation, so their controllers roll them.
+  	if got.Accepted || got.Workload != "deployment/orders" || !got.Began.Equal(t0) || !got.Ended.Equal(at(2)) {
+  		t.Errorf("Restart gave %+v; want refused by deployment/orders, begun at t0, ended at +2 s", got)
+  	}
+  	if !strings.Contains(got.Text, `admission webhook "policy.example" denied the request`) {
+  		t.Errorf("text %q does not hold the API server's answer", got.Text)
+  	}
+  	want := []string{"daemonsets/logs", "deployments/api", "deployments/orders"}
+  	if d := cmp.Diff(want, patches(t, client)); d != "" {
+  		t.Errorf("patches (-want +got):\n%s", d)
+  	}
+  	for _, wl := range []string{"daemonsets/logs", "deployments/api"} {
+  		if got := restartedAt(t, client, wl); got != "2026-11-13T10:00:00Z" {
+  			t.Errorf("%s, changed before the refusal, has %s %q", wl, restartedAtKey, got)
+  		}
+  	}
+  	if got := restartedAt(t, client, "statefulsets/web"); got != "" {
+  		t.Errorf("statefulset/web, after the refusal, has %s %q", restartedAtKey, got)
+  	}
   }
 
   func TestRestartWhenCtxHasEnded(t *testing.T) {
-  	// ctx cancelled before the call: Accepted false, Text == context.Canceled.Error(), Workload "",
-  	// and patches(t, client) is empty.
+  	w, client, _ := startWatcherWith(t, func(o *Options) { o.Selector = "app!=batch" }, nil, restartObjects()...)
+  	ctx, cancel := context.WithCancel(t.Context())
+  	cancel()
+  	got := w.Restart(ctx)
+  	if got.Accepted || got.Workload != "" || got.Text != context.Canceled.Error() {
+  		t.Errorf("Restart with an ended ctx gave %+v; want not accepted, no workload, ctx's error", got)
+  	}
+  	if p := patches(t, client); len(p) != 0 {
+  		t.Errorf("patches %v after ctx ended", p)
+  	}
   }
 
   func TestRestartWithNothingToRestart(t *testing.T) {
-  	// a namespace with no workload: Restart{Began: t0, Ended: t0, Accepted: true}, and no patch.
+  	w, client, _ := startWatcher(t, nil)
+  	if d := cmp.Diff(Restart{Began: t0, Ended: t0, Accepted: true}, w.Restart(t.Context())); d != "" {
+  		t.Errorf("Restart (-want +got):\n%s", d)
+  	}
+  	if p := patches(t, client); len(p) != 0 {
+  		t.Errorf("patches %v with nothing to restart", p)
+  	}
   }
   ```
 
   The window's verdict for a refusal, `restart-failed` with the server's text and the workload's name, is `run`'s (Task 14); this task gives `run` the facts.
 
 - [ ] **Step 2: Run them to see them fail**
-  Run: `go test ./internal/watch/ -run 'TestRestart' -v` / Expected: FAIL to build: `Restart` and `startWatcherWith` are not defined.
+  Run: `go test ./internal/watch/ -run 'TestRestart' -v` / Expected: FAIL to build: `Restart` (the type and the method) is not defined.
 
 - [ ] **Step 3: Implement `Restart` and `(*Watcher).Restart` in `internal/watch/restart.go`**, with the interface comments from the Interfaces block. Under `w.mu`, read the clock and the workloads that exist and match (`installWatched`'s first list, already in kind-and-name order); the patches are made outside the lock, by kind through `AppsV1().Deployments`, `StatefulSets` or `DaemonSets` of the namespace, `types.StrategicMergePatchType`, `metav1.PatchOptions{FieldManager: "rollproof"}`, and the body `restartPatch` with the time read once at the start. `ctx.Err()` is checked before each patch. `Ended` is the clock read under `w.mu` after the last patch returned or the refusal came.
 
@@ -133,48 +223,204 @@ Design: section 7, "When a transition has finished" (the settle time that starts
 
 - [ ] **Step 1: Write the failing tests**
 
+  New `internal/watch/marks_test.go`, with the imports `bytes`, `encoding/json`, `io`, `maps`, `slices`, `sync`, `testing`, `time`, go-cmp's `cmp`, `corev1`, `metav1`, `k8s.io/client-go/kubernetes/fake` and `rollproof/internal/verdict`. Its helpers serve Task 7 too.
+
   ```go
-  // evidenceFiles records what a Watcher writes through Options.Evidence.
+  // evidenceFiles records what a Watcher writes through Options.Evidence. One lock guards every file.
   type evidenceFiles struct {
   	mu    sync.Mutex
   	files map[string]*recordedFile // by name
   }
+
   type recordedFile struct {
-  	bytes.Buffer
+  	mu     *sync.Mutex
+  	buf    bytes.Buffer
   	closed bool
   }
-  func (e *evidenceFiles) open(name string) (io.WriteCloser, error)
-  // text waits up to 5 s of real time until the file name exists and is closed, and returns its text.
-  func (e *evidenceFiles) text(t *testing.T, name string) string
+
+  func (f *recordedFile) Write(p []byte) (int, error) {
+  	f.mu.Lock()
+  	defer f.mu.Unlock()
+  	return f.buf.Write(p)
+  }
+
+  func (f *recordedFile) Close() error {
+  	f.mu.Lock()
+  	defer f.mu.Unlock()
+  	f.closed = true
+  	return nil
+  }
+
+  func newEvidence() *evidenceFiles { return &evidenceFiles{files: map[string]*recordedFile{}} }
+
+  func (e *evidenceFiles) open(name string) (io.WriteCloser, error) {
+  	e.mu.Lock()
+  	defer e.mu.Unlock()
+  	f := &recordedFile{mu: &e.mu}
+  	e.files[name] = f
+  	return f, nil
+  }
+
   // names lists the names opened so far, sorted.
-  func (e *evidenceFiles) names() []string
+  func (e *evidenceFiles) names() []string {
+  	e.mu.Lock()
+  	defer e.mu.Unlock()
+  	return slices.Sorted(maps.Keys(e.files))
+  }
+
+  // state gives the text of the file name, whether it was opened, and whether it is closed.
+  func (e *evidenceFiles) state(name string) (text string, opened, closed bool) {
+  	e.mu.Lock()
+  	defer e.mu.Unlock()
+  	f, ok := e.files[name]
+  	if !ok {
+  		return "", false, false
+  	}
+  	return f.buf.String(), true, f.closed
+  }
+
+  // text waits up to 5 s of real time until the file name exists and is closed, and returns its text.
+  func (e *evidenceFiles) text(t *testing.T, name string) string {
+  	t.Helper()
+  	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+  		if s, _, closed := e.state(name); closed {
+  			return s
+  		}
+  		if time.Now().After(deadline) {
+  			t.Fatalf("%s was not written and closed within 5 s; files: %v", name, e.names())
+  		}
+  	}
+  }
+
+  // holds waits up to 5 s of real time until the file name, open or closed, holds exactly want.
+  func (e *evidenceFiles) holds(t *testing.T, name, want string) {
+  	t.Helper()
+  	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+  		if s, _, _ := e.state(name); s == want {
+  			return
+  		}
+  		if time.Now().After(deadline) {
+  			s, _, _ := e.state(name)
+  			t.Fatalf("%s holds %q after 5 s, want %q", name, s, want)
+  		}
+  	}
+  }
+
+  // startDeploy begins a deploy on w and makes, through the client and at +1 s, the changes of
+  // TestTransition: a new spec, ReplicaSet orders-b with two ready pods, the two old pods deleted,
+  // the rollout complete. It returns when the Watcher has seen them, with the channel that tells
+  // the command's exit, still open, and the channel of Transition's result.
+  func startDeploy(t *testing.T, w *Watcher, client *fake.Clientset, clock *fakeClock) (chan struct{}, chan Transition) {
+  	t.Helper()
+  	ctx := t.Context()
+  	exited := make(chan struct{})
+  	res := make(chan Transition, 1)
+  	go func() { res <- w.Transition(ctx, verdict.Deploy, clock.Now(), exited) }()
+  	until(t, w, clock, func(s Transition) bool { return s.Name == verdict.Deploy })
+  	clock.Advance(time.Second)
+  	update(t, client, deployment("orders", 2, 1, 2, 2, 2, 2))
+  	if _, err := client.AppsV1().ReplicaSets("orders").Create(ctx, replicaSet("orders-b", "orders"), metav1.CreateOptions{}); err != nil {
+  		t.Fatal(err)
+  	}
+  	for _, p := range []*corev1.Pod{
+  		pod("orders-b-1", "b1", "ReplicaSet", "orders-b", true, false),
+  		pod("orders-b-2", "b2", "ReplicaSet", "orders-b", true, false),
+  	} {
+  		if _, err := client.CoreV1().Pods("orders").Create(ctx, p, metav1.CreateOptions{}); err != nil {
+  			t.Fatal(err)
+  		}
+  	}
+  	for _, old := range []*corev1.Pod{
+  		pod("orders-a-1", "a1", "ReplicaSet", "orders-a", true, true),
+  		pod("orders-a-2", "a2", "ReplicaSet", "orders-a", true, true),
+  	} {
+  		update(t, client, old)
+  		if err := client.CoreV1().Pods("orders").Delete(ctx, old.Name, metav1.DeleteOptions{}); err != nil {
+  			t.Fatal(err)
+  		}
+  	}
+  	update(t, client, deployment("orders", 2, 2, 2, 2, 2, 2))
+  	until(t, w, clock, func(s Transition) bool {
+  		return len(s.Workloads) == 1 && s.Workloads[0].Replaced == 2 && s.Workloads[0].Created == 2
+  	})
+  	return exited, res
+  }
 
   func TestFinishesAsTheyHappen(t *testing.T) {
   	w, client, clock := startWatcher(t, nil, base()...)
-  	// Drive a deploy as TestTransition does, up to close(exited);
-  	// until(...) the transition so far has a Finished; f1 is it.
+  	exited, res := startDeploy(t, w, client, clock)
+  	close(exited)
+  	var f1, f2 time.Time
+  	until(t, w, clock, func(s Transition) bool { f1 = s.Finished; return !f1.IsZero() })
   	clock.Advance(5 * time.Second)
-  	// create pod orders-b-3 of ReplicaSet orders-b, ready; until(...) Finished == clock.Now(); f2 is it.
+  	if _, err := client.CoreV1().Pods("orders").Create(t.Context(),
+  		pod("orders-b-3", "b3", "ReplicaSet", "orders-b", true, false), metav1.CreateOptions{}); err != nil {
+  		t.Fatal(err)
+  	}
+  	until(t, w, clock, func(s Transition) bool { f2 = s.Finished; return f2.Equal(clock.Now()) })
+
   	tr := drive(t, clock, res) // nobody has read Finishes yet: the watch was not held up
-  	// tr.Finished == f2; len(tr.SettleRestarts) == 1;
-  	// the next two values received from w.Finishes(), each within 1 s, are
-  	//   Finish{Name: verdict.Deploy, At: f1} and Finish{Name: verdict.Deploy, At: f2};
-  	// no third value arrives within 200 ms.
+  	if !tr.Finished.Equal(f2) || len(tr.SettleRestarts) != 1 {
+  		t.Errorf("finished %v with %d settle restarts; want %v and 1", tr.Finished, len(tr.SettleRestarts), f2)
+  	}
+  	for _, want := range []Finish{{Name: verdict.Deploy, At: f1}, {Name: verdict.Deploy, At: f2}} {
+  		select {
+  		case got := <-w.Finishes():
+  			if got.Name != want.Name || !got.At.Equal(want.At) {
+  				t.Errorf("finish %+v, want %+v", got, want)
+  			}
+  		case <-time.After(time.Second):
+  			t.Fatalf("no finish %+v within 1 s", want)
+  		}
+  	}
+  	select {
+  	case got := <-w.Finishes():
+  		t.Errorf("a third finish %+v", got)
+  	case <-time.After(200 * time.Millisecond):
+  	}
   }
 
   func TestFinishesIsClosedByStop(t *testing.T) {
   	w, _, _ := startWatcher(t, nil, base()...)
   	w.Stop()
-  	// a receive from w.Finishes() gives ok == false within 1 s.
+  	select {
+  	case _, ok := <-w.Finishes():
+  		if ok {
+  			t.Error("a value came from Finishes after Stop")
+  		}
+  	case <-time.After(time.Second):
+  		t.Fatal("Finishes was not closed within 1 s of Stop")
+  	}
   }
 
   func TestPodListsBeforeAndAfter(t *testing.T) {
-  	ev := &evidenceFiles{files: map[string]*recordedFile{}}
+  	ev := newEvidence()
   	w, client, clock := startWatcherWith(t, func(o *Options) { o.Evidence = ev.open }, nil, base()...)
-  	// Drive the deploy of TestTransition to its end.
-  	// ev.names() is {"pods/deploy-after.json", "pods/deploy-before.json"};
-  	// each decodes into a corev1.PodList with Kind "PodList" and APIVersion "v1";
-  	// the before list's item names are {"orders-a-1", "orders-a-2"}, the after list's {"orders-b-1", "orders-b-2"}.
+  	exited, res := startDeploy(t, w, client, clock)
+  	close(exited)
+  	drive(t, clock, res)
+  	if d := cmp.Diff([]string{"pods/deploy-after.json", "pods/deploy-before.json"}, ev.names()); d != "" {
+  		t.Errorf("evidence files (-want +got):\n%s", d)
+  	}
+  	for name, want := range map[string][]string{
+  		"pods/deploy-before.json": {"orders-a-1", "orders-a-2"},
+  		"pods/deploy-after.json":  {"orders-b-1", "orders-b-2"},
+  	} {
+  		var list corev1.PodList
+  		if err := json.Unmarshal([]byte(ev.text(t, name)), &list); err != nil {
+  			t.Fatalf("%s: %v", name, err)
+  		}
+  		if list.Kind != "PodList" || list.APIVersion != "v1" {
+  			t.Errorf("%s is a %s of %s, want a PodList of v1", name, list.Kind, list.APIVersion)
+  		}
+  		var got []string
+  		for _, p := range list.Items {
+  			got = append(got, p.Name)
+  		}
+  		if d := cmp.Diff(want, got); d != "" {
+  			t.Errorf("%s (-want +got):\n%s", name, d)
+  		}
+  	}
   }
   ```
 
@@ -198,11 +444,11 @@ Design: section 10, "Evidence folder" (the events of both namespaces; the logs o
 
 **Files:**
 - Create: `internal/watch/podlogs.go` (the followers), `internal/watch/events.go` (`WriteEvents`, the event's time)
-- Modify: `internal/watch/watcher.go` (`Options.ProbeNamespace`; a follower started from `set`; `Stop` waits for the followers; `PodEvents`), `internal/watch/tracker.go` (an unexported reading of the pod records for `PodEvents`), `cmd/rollproof/wire.go` (`session.Watcher` passes `ProbeNamespace: cluster.ProbeNamespace`)
+- Modify: `internal/watch/watcher.go` (`Options.ProbeNamespace`; followers started from `set`, for a pod and for the pods of a ReplicaSet; `Stop` waits for the followers; `PodEvents`), `internal/watch/tracker.go` (an unexported reading of the pod records for `PodEvents`), `cmd/rollproof/wire.go` (`session.Watcher` passes `ProbeNamespace: cluster.ProbeNamespace`)
 - Test: new `internal/watch/podlogs_test.go`, new `internal/watch/events_test.go`
 
 **Interfaces:**
-- Consumes: `Options.Evidence`, `evidenceFiles` (Task 6); `startWatcherWith` (Task 5).
+- Consumes: `Options.Evidence`, and the test helpers `newEvidence`, `evidenceFiles` and `startDeploy` (Task 6); `startWatcherWith` (Task 5).
 - Produces: `Options.Evidence func(name string) (io.WriteCloser, error)`
   As in Task 6; the Watcher also writes through it the log of each
   container of every watched pod, followed from first sight until the pod
@@ -236,65 +482,241 @@ Design: section 10, "Evidence folder" (the events of both namespaces; the logs o
 
 - [ ] **Step 1: Write the failing tests**
 
-  `podlogs_test.go`:
+  `podlogs_test.go`, with the imports `errors`, `fmt`, `strings`, `testing`, `time`, go-cmp's `cmp`, `appsv1 "k8s.io/api/apps/v1"`, `corev1`, `metav1`, `runtime`, `k8s.io/client-go/kubernetes/fake` and `k8stesting "k8s.io/client-go/testing"`:
 
   ```go
   // logPod is pod() with the given containers in its spec, each with a status: terminated with
-  // exit code 0 and restartCount restarts. A terminated container's log is read once.
-  func logPod(name, uid, ownerKind, ownerName string, restarts int32, containers ...string) *corev1.Pod
+  // exit code 0 after restarts restarts. A terminated container's log is read once.
+  func logPod(name, uid, ownerKind, ownerName string, restarts int32, containers ...string) *corev1.Pod {
+  	p := pod(name, uid, ownerKind, ownerName, true, false)
+  	for _, c := range containers {
+  		p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: c})
+  		p.Status.ContainerStatuses = append(p.Status.ContainerStatuses, corev1.ContainerStatus{Name: c, RestartCount: restarts,
+  			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}}})
+  	}
+  	return p
+  }
+
+  // waiting is p with each container waiting to start.
+  func waiting(p *corev1.Pod) *corev1.Pod {
+  	for i := range p.Status.ContainerStatuses {
+  		p.Status.ContainerStatuses[i].State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}
+  	}
+  	return p
+  }
 
   // serveLogs answers every GetLogs of client with "log of CONTAINER\n", or "previous run of
-  // CONTAINER\n" when the options ask for the previous run. The fake's log action holds no pod
-  // name, so the text names the container only.
-  func serveLogs(client *fake.Clientset)
+  // CONTAINER\n" when the options ask for the previous run; with fail set, it fails each with fail.
+  // The fake's log action holds no pod name, so the text names the container only.
+  func serveLogs(client *fake.Clientset, fail error) {
+  	client.PrependReactor("get", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+  		if a.GetSubresource() != "log" {
+  			return false, nil, nil
+  		}
+  		if fail != nil {
+  			return true, nil, fail
+  		}
+  		o := a.(k8stesting.GenericAction).GetValue().(*corev1.PodLogOptions)
+  		text := "log of " + o.Container + "\n"
+  		if o.Previous {
+  			text = "previous run of " + o.Container + "\n"
+  		}
+  		return true, &runtime.Unknown{Raw: []byte(text)}, nil
+  	})
+  }
 
-  // logObjects: base's Deployment orders with pod orders-a-1 (containers app and sidecar), and
-  // deployment/batch with ReplicaSet batch-a and pod batch-a-1 (container app), which the selector
-  // app=orders leaves out.
-  func logObjects(restarts int32) []runtime.Object
+  // logActions counts the GetLogs the client has been asked for.
+  func logActions(client *fake.Clientset) int {
+  	n := 0
+  	for _, a := range client.Actions() {
+  		if a.GetSubresource() == "log" {
+  			n++
+  		}
+  	}
+  	return n
+  }
 
-  func TestPodLogsOfWatchedPods(t *testing.T) {
-  	ev := &evidenceFiles{files: map[string]*recordedFile{}}
+  // create stores Deployments, ReplicaSets and Pods in the fake client, in order.
+  func create(t *testing.T, client *fake.Clientset, objs ...runtime.Object) {
+  	t.Helper()
+  	var err error
+  	for _, obj := range objs {
+  		switch o := obj.(type) {
+  		case *appsv1.Deployment:
+  			_, err = client.AppsV1().Deployments("orders").Create(t.Context(), o, metav1.CreateOptions{})
+  		case *appsv1.ReplicaSet:
+  			_, err = client.AppsV1().ReplicaSets("orders").Create(t.Context(), o, metav1.CreateOptions{})
+  		case *corev1.Pod:
+  			_, err = client.CoreV1().Pods("orders").Create(t.Context(), o, metav1.CreateOptions{})
+  		default:
+  			t.Fatalf("create: %T", obj)
+  		}
+  		if err != nil {
+  			t.Fatal(err)
+  		}
+  	}
+  }
+
+  func deletePod(t *testing.T, client *fake.Clientset, name string) {
+  	t.Helper()
+  	if err := client.CoreV1().Pods("orders").Delete(t.Context(), name, metav1.DeleteOptions{}); err != nil {
+  		t.Fatal(err)
+  	}
+  }
+
+  // watchLogs starts a Watcher on an empty namespace with the selector app=orders and an evidence
+  // recorder, and has the client serve logs (or fail them with fail) before any object exists.
+  func watchLogs(t *testing.T, fail error) (*Watcher, *fake.Clientset, *evidenceFiles) {
+  	t.Helper()
+  	ev := newEvidence()
   	w, client, _ := startWatcherWith(t, func(o *Options) { o.Selector = "app=orders"; o.Evidence = ev.open }, nil)
-  	serveLogs(client) // before the objects exist, so that no opening comes first
-  	// create logObjects(0) through the client; then delete pod orders-a-1.
-  	// ev.text(t, "pods/orders-a-1/app.log") == "log of app\n";
-  	// ev.text(t, "pods/orders-a-1/sidecar.log") == "log of sidecar\n";
-  	// no name in ev.names() begins with "pods/batch-a-1/" and none ends with ".previous.log".
+  	serveLogs(client, fail)
+  	return w, client, ev
+  }
+
+  // seen waits up to 5 s of real time until the Watcher has seen the pod name created.
+  func seen(t *testing.T, w *Watcher, name string) {
+  	t.Helper()
+  	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+  		for _, e := range w.PodEvents() {
+  			if e.Pod == name && e.Kind == "created" {
+  				return
+  			}
+  		}
+  		if time.Now().After(deadline) {
+  			t.Fatalf("the Watcher did not see pod %s within 5 s", name)
+  		}
+  	}
+  }
+
+  // A3: the pod's workload may become known after the pod, when the ReplicaSet's Set comes second.
+  func TestPodLogsOfWatchedPods(t *testing.T) {
+  	orders, rs := deployment("orders", 1, 1, 1, 1, 1, 1), replicaSet("orders-a", "orders")
+  	pa := logPod("orders-a-1", "a1", "ReplicaSet", "orders-a", 0, "app", "sidecar")
+  	for _, tc := range []struct {
+  		name  string
+  		order []runtime.Object
+  	}{
+  		{"the ReplicaSet first", []runtime.Object{orders, rs, pa}},
+  		{"the pod first", []runtime.Object{orders, pa}},
+  	} {
+  		t.Run(tc.name, func(t *testing.T) {
+  			w, client, ev := watchLogs(t, nil)
+  			create(t, client, tc.order...)
+  			if len(tc.order) == 2 {
+  				seen(t, w, "orders-a-1") // a pod whose ReplicaSet the Watcher does not know yet
+  				create(t, client, rs)
+  			}
+  			create(t, client, deployment("batch", 1, 1, 1, 1, 1, 1), replicaSet("batch-a", "batch"),
+  				logPod("batch-a-1", "k1", "ReplicaSet", "batch-a", 0, "app"))
+  			ev.holds(t, "pods/orders-a-1/app.log", "log of app\n")
+  			ev.holds(t, "pods/orders-a-1/sidecar.log", "log of sidecar\n")
+  			deletePod(t, client, "orders-a-1")
+  			if got := ev.text(t, "pods/orders-a-1/app.log"); got != "log of app\n" {
+  				t.Errorf("app.log %q", got)
+  			}
+  			if got := ev.text(t, "pods/orders-a-1/sidecar.log"); got != "log of sidecar\n" {
+  				t.Errorf("sidecar.log %q", got)
+  			}
+  			for _, n := range ev.names() {
+  				if strings.HasPrefix(n, "pods/batch-a-1/") || strings.HasSuffix(n, ".previous.log") {
+  					t.Errorf("evidence file %s, want none for batch-a-1 and no previous run", n)
+  				}
+  			}
+  		})
+  	}
   }
 
   func TestPodLogsKeepThePreviousRun(t *testing.T) {
-  	// as above with logObjects(1): ev.text(t, "pods/orders-a-1/app.previous.log") == "previous run of app\n",
-  	// and ev.text(t, "pods/orders-a-1/app.log") == "log of app\n".
+  	_, client, ev := watchLogs(t, nil)
+  	create(t, client, deployment("orders", 1, 1, 1, 1, 1, 1), replicaSet("orders-a", "orders"),
+  		logPod("orders-a-1", "a1", "ReplicaSet", "orders-a", 1, "app"))
+  	if got := ev.text(t, "pods/orders-a-1/app.previous.log"); got != "previous run of app\n" {
+  		t.Errorf("app.previous.log %q", got)
+  	}
+  	ev.holds(t, "pods/orders-a-1/app.log", "log of app\n")
+  	deletePod(t, client, "orders-a-1")
+  	if got := ev.text(t, "pods/orders-a-1/app.log"); got != "log of app\n" {
+  		t.Errorf("app.log %q", got)
+  	}
   }
 
   func TestPodLogsWaitForTheContainerToStart(t *testing.T) {
-  	// pod orders-a-1 whose container app is waiting (ContainerCreating): after 500 ms of real time the
-  	// client has recorded no action with subresource "log"; after update() with app terminated,
-  	// ev.text(t, "pods/orders-a-1/app.log") == "log of app\n" once the pod is deleted.
+  	_, client, ev := watchLogs(t, nil)
+  	create(t, client, deployment("orders", 1, 1, 1, 1, 1, 1), replicaSet("orders-a", "orders"),
+  		waiting(logPod("orders-a-1", "a1", "ReplicaSet", "orders-a", 0, "app")))
+  	time.Sleep(500 * time.Millisecond)
+  	if n := logActions(client); n != 0 {
+  		t.Errorf("%d GetLogs for a container that has not started", n)
+  	}
+  	update(t, client, logPod("orders-a-1", "a1", "ReplicaSet", "orders-a", 0, "app"))
+  	ev.holds(t, "pods/orders-a-1/app.log", "log of app\n")
+  	deletePod(t, client, "orders-a-1")
+  	if got := ev.text(t, "pods/orders-a-1/app.log"); got != "log of app\n" {
+  		t.Errorf("app.log %q", got)
+  	}
   }
 
   // Review Focus 4: a log that cannot be read is told in its own file.
   func TestPodLogsOfAPodGoneBeforeItsLogWasRead(t *testing.T) {
-  	// (a) pod orders-a-1 whose container app is waiting and never starts; the pod is deleted:
-  	//   ev.text(t, "pods/orders-a-1/app.log") ==
-  	//   "rollproof: the log of container app could not be read: the pod was gone before the container started\n";
-  	// (b) app terminated, and a reactor that fails every GetLogs with errors.New("container \"app\" not found");
-  	//   after 500 ms of real time the pod is deleted:
-  	//   ev.text(t, "pods/orders-a-1/app.log") ==
-  	//   "rollproof: the log of container app could not be read: container \"app\" not found\n";
-  	// (c) as (b) with logObjects(1): app.previous.log ==
-  	//   "rollproof: the previous run of container app could not be read: container \"app\" not found\n".
+  	const prefix = "rollproof: the log of container app could not be read: "
+  	notFound := errors.New(`container "app" not found`)
+
+  	t.Run("the container never started", func(t *testing.T) {
+  		_, client, ev := watchLogs(t, nil)
+  		create(t, client, deployment("orders", 1, 1, 1, 1, 1, 1), replicaSet("orders-a", "orders"),
+  			waiting(logPod("orders-a-1", "a1", "ReplicaSet", "orders-a", 0, "app")))
+  		time.Sleep(500 * time.Millisecond)
+  		deletePod(t, client, "orders-a-1")
+  		if got, want := ev.text(t, "pods/orders-a-1/app.log"), prefix+"the pod was gone before the container started\n"; got != want {
+  			t.Errorf("app.log %q, want %q", got, want)
+  		}
+  	})
+
+  	for _, restarts := range []int32{0, 1} {
+  		t.Run(fmt.Sprintf("every opening fails, %d restarts", restarts), func(t *testing.T) {
+  			_, client, ev := watchLogs(t, notFound)
+  			create(t, client, deployment("orders", 1, 1, 1, 1, 1, 1), replicaSet("orders-a", "orders"),
+  				logPod("orders-a-1", "a1", "ReplicaSet", "orders-a", restarts, "app"))
+  			time.Sleep(500 * time.Millisecond)
+  			deletePod(t, client, "orders-a-1")
+  			files := map[string]string{"pods/orders-a-1/app.log": prefix}
+  			if restarts > 0 {
+  				files["pods/orders-a-1/app.previous.log"] = "rollproof: the previous run of container app could not be read: "
+  			}
+  			for name, start := range files {
+  				got := ev.text(t, name)
+  				if !strings.HasPrefix(got, start) || !strings.Contains(got, notFound.Error()) ||
+  					strings.Count(got, "\n") != 1 || !strings.HasSuffix(got, "\n") {
+  					t.Errorf("%s %q, want one line that begins %q and holds %q", name, got, start, notFound)
+  				}
+  			}
+  		})
+  	}
   }
 
   func TestStopClosesThePodLogs(t *testing.T) {
-  	// logObjects(0), the pod not deleted; once both log files are opened, w.Stop();
-  	// when Stop returns, every file in ev.files is closed.
+  	w, client, ev := watchLogs(t, nil)
+  	create(t, client, deployment("orders", 1, 1, 1, 1, 1, 1), replicaSet("orders-a", "orders"),
+  		logPod("orders-a-1", "a1", "ReplicaSet", "orders-a", 0, "app", "sidecar"))
+  	ev.holds(t, "pods/orders-a-1/app.log", "log of app\n")
+  	ev.holds(t, "pods/orders-a-1/sidecar.log", "log of sidecar\n")
+  	w.Stop()
+  	for _, n := range ev.names() {
+  		if text, _, closed := ev.state(n); !closed {
+  			t.Errorf("%s is open when Stop has returned (it holds %q)", n, text)
+  		}
+  	}
   }
 
   func TestPodEvents(t *testing.T) {
   	w, client, clock := startWatcher(t, nil, base()...)
-  	// Drive the deploy of TestTransition to its end, then add pod loose-1 with no owner at the end's moment.
+  	exited, res := startDeploy(t, w, client, clock)
+  	close(exited)
+  	drive(t, clock, res)
+  	end := clock.Now()
+  	loose := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "loose-1", Namespace: "orders", UID: "l1"}}
+  	create(t, client, loose)
   	wl := "deployment/orders"
   	want := []PodEvent{
   		{t0, "orders-a-1", wl, "created"}, {t0, "orders-a-1", wl, "ready"},
@@ -303,20 +725,43 @@ Design: section 10, "Evidence folder" (the events of both namespaces; the logs o
   		{at(1), "orders-a-2", wl, "deleted"}, {at(1), "orders-a-2", wl, "gone"},
   		{at(1), "orders-b-1", wl, "created"}, {at(1), "orders-b-1", wl, "ready"},
   		{at(1), "orders-b-2", wl, "created"}, {at(1), "orders-b-2", wl, "ready"},
-  		// then {END, "loose-1", "", "created"}, END being the clock when it was added; a pod with no ready condition has no ready
+  		{end, "loose-1", "", "created"}, // no owner, so no workload; no Ready condition, so no ready
   	}
-  	// cmp.Diff(want, w.PodEvents()) is empty.
+  	var got []PodEvent
+  	for deadline := time.Now().Add(5 * time.Second); len(got) < len(want) && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+  		got = w.PodEvents()
+  	}
+  	if d := cmp.Diff(want, got); d != "" {
+  		t.Errorf("PodEvents (-want +got):\n%s", d)
+  	}
   }
   ```
 
-  `events_test.go`:
+  `events_test.go`, with the imports `errors`, `strings`, `testing`, `time`, `corev1`, `metav1`, `runtime` and `k8stesting "k8s.io/client-go/testing"` (Task 8 adds `rollproof/internal/verdict`):
 
   ```go
-  // event is a core/v1 Event about KIND/NAME in ns, with the given time fields (zero leaves one unset).
-  func event(ns, name, kind, object, typ, reason, message string, last, eventTime, first time.Time) *corev1.Event
+  // event is a core/v1 Event about KIND/NAME in ns, counted once, with the given time fields
+  // (a zero time leaves its field unset).
+  func event(ns, name, kind, object, typ, reason, message string, last, eventTime, first time.Time) *corev1.Event {
+  	e := &corev1.Event{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+  		InvolvedObject: corev1.ObjectReference{Kind: kind, Name: object, Namespace: ns},
+  		Type:           typ, Reason: reason, Message: message, Count: 1}
+  	if !last.IsZero() {
+  		e.LastTimestamp = metav1.NewTime(last)
+  	}
+  	if !eventTime.IsZero() {
+  		e.EventTime = metav1.NewMicroTime(eventTime)
+  	}
+  	if !first.IsZero() {
+  		e.FirstTimestamp = metav1.NewTime(first)
+  	}
+  	return e
+  }
 
-  func TestWriteEvents(t *testing.T) {
-  	objs := append(base(),
+  // eventObjects: two events of orders, one of the probe's namespace and one of another, each with
+  // its time in a different field.
+  func eventObjects() []runtime.Object {
+  	return append(base(),
   		event("orders", "e1", "Pod", "orders-b-1", "Warning", "FailedScheduling",
   			"0/4 nodes are available:\n4 Insufficient cpu.", at(2), time.Time{}, time.Time{}),
   		event("orders", "e2", "Deployment", "orders", "Normal", "ScalingReplicaSet",
@@ -324,18 +769,41 @@ Design: section 10, "Evidence folder" (the events of both namespaces; the logs o
   		event("rollproof-probe", "e3", "Pod", "probe", "Normal", "Pulled",
   			"Container image already present on machine", time.Time{}, time.Time{}, at(1)),
   		event("elsewhere", "e4", "Pod", "x", "Normal", "Pulled", "not ours", at(3), time.Time{}, time.Time{}))
-  	w, _, _ := startWatcherWith(t, func(o *Options) { o.ProbeNamespace = "rollproof-probe" }, nil, objs...)
+  }
+
+  const (
+  	scaledLine = "2026-11-13T10:00:00.000Z\torders\tNormal\tScalingReplicaSet\tdeployment/orders\t1\tScaled up replica set orders-b from 0 to 1\n"
+  	pulledLine = "2026-11-13T10:00:01.000Z\trollproof-probe\tNormal\tPulled\tpod/probe\t1\tContainer image already present on machine\n"
+  	failedLine = "2026-11-13T10:00:02.000Z\torders\tWarning\tFailedScheduling\tpod/orders-b-1\t1\t0/4 nodes are available: 4 Insufficient cpu.\n"
+  )
+
+  func TestWriteEvents(t *testing.T) {
+  	w, _, _ := startWatcherWith(t, func(o *Options) { o.ProbeNamespace = "rollproof-probe" }, nil, eventObjects()...)
   	var b strings.Builder
-  	// w.WriteEvents(t.Context(), &b) == nil, and b.String() ==
-  	//   "2026-11-13T10:00:00.000Z\torders\tNormal\tScalingReplicaSet\tdeployment/orders\t1\tScaled up replica set orders-b from 0 to 1\n" +
-  	//   "2026-11-13T10:00:01.000Z\trollproof-probe\tNormal\tPulled\tpod/probe\t1\tContainer image already present on machine\n" +
-  	//   "2026-11-13T10:00:02.000Z\torders\tWarning\tFailedScheduling\tpod/orders-b-1\t1\t0/4 nodes are available: 4 Insufficient cpu.\n"
-  	// (event sets Count 1).
+  	if err := w.WriteEvents(t.Context(), &b); err != nil {
+  		t.Fatal(err)
+  	}
+  	if got, want := b.String(), scaledLine+pulledLine+failedLine; got != want {
+  		t.Errorf("events:\n%s\nwant:\n%s", got, want)
+  	}
   }
 
   func TestWriteEventsWhenAListFails(t *testing.T) {
-  	// the same objects, and a reactor that fails "list" "events" in rollproof-probe with "connection refused":
-  	// the two lines of orders are written; the error's text holds "rollproof-probe" and "connection refused".
+  	w, client, _ := startWatcherWith(t, func(o *Options) { o.ProbeNamespace = "rollproof-probe" }, nil, eventObjects()...)
+  	client.PrependReactor("list", "events", func(a k8stesting.Action) (bool, runtime.Object, error) {
+  		if a.GetNamespace() == "rollproof-probe" {
+  			return true, nil, errors.New("connection refused")
+  		}
+  		return false, nil, nil
+  	})
+  	var b strings.Builder
+  	err := w.WriteEvents(t.Context(), &b)
+  	if err == nil || !strings.Contains(err.Error(), "rollproof-probe") || !strings.Contains(err.Error(), "connection refused") {
+  		t.Errorf("error %v, want one that names rollproof-probe and holds connection refused", err)
+  	}
+  	if got, want := b.String(), scaledLine+failedLine; got != want {
+  		t.Errorf("events:\n%s\nwant:\n%s", got, want)
+  	}
   }
   ```
 
@@ -343,7 +811,7 @@ Design: section 10, "Evidence folder" (the events of both namespaces; the logs o
   Run: `go test ./internal/watch/ -run 'TestPodLogs|TestStopClosesThePodLogs|TestPodEvents|TestWriteEvents' -v` / Expected: FAIL to build: `PodEvent`, `PodEvents`, `WriteEvents` and `Options.ProbeNamespace` are not defined.
 
 - [ ] **Step 3: Implement the followers in `internal/watch/podlogs.go`, `WriteEvents` and the event's time in `internal/watch/events.go`, and `PodEvents`, `Options.ProbeNamespace` and `Stop` in `internal/watch/watcher.go`**, with the interface comments from the Interfaces block. The pod log's rule (the probe's follower in `internal/probe/follow.go` does not fit: it parses probe lines and judges gaps):
-  - A pod is followed from the first Set that shows it as a pod of a workload the watch knows and whose labels matched at its last Set. One follower for each container of its spec, init containers first. Followers run on a context that Stop cancels; Stop waits for them after the informers have ended.
+  - A pod is followed from the first moment the watch knows it as a pod of a workload whose labels matched at its last Set: the pod's own Set, or, when the pod came before its ReplicaSet, the ReplicaSet's Set, which starts a follower for each pod of that ReplicaSet the watch holds that is neither followed nor gone. One follower for each container of its spec, init containers first. Followers run on a context that Stop cancels; Stop waits for them after the informers have ended.
   - A follower waits, every `pollEvery`, until the watch's last object of the pod shows the container running or terminated. It ends when the pod is gone.
   - At that first sight, a container whose restart count is above 0 has its previous run read once (`PodLogOptions{Container, Previous: true, Timestamps: true}`) into `pods/POD/CONTAINER.previous.log`. When that opening fails, the file holds the one line `rollproof: the previous run of container C could not be read: ERROR`.
   - It then follows the current run (`Follow: true, Timestamps: true`) into `pods/POD/CONTAINER.log`, opened once for the pod's life, at the first stream or at the failure line below, whichever comes first. When a stream ends while the pod is not gone, it waits `pollEvery` and reads the pod's last object: a higher restart count than at the stream's opening writes the line `rollproof: the container started again (restart N)` and opens the new run from its start; the same run, still running, writes `rollproof: the log was opened again from TIME; lines of that second may repeat` and opens it with `SinceTime` at the second of the last line's timestamp; a terminated run that has not restarted waits again. An opening that fails is tried again after `pollEvery` while the pod is not gone.
@@ -386,7 +854,7 @@ Design: section 10, "What a run writes", the console item on a stall (each workl
 - [ ] **Step 1: Write the failing tests**
 
   ```go
-  // events_test.go
+  // events_test.go, which now also imports rollproof/internal/verdict
   func TestTransitionStallNamesTheLastEvent(t *testing.T) {
   	for _, tc := range []struct {
   		name   string
@@ -401,31 +869,56 @@ Design: section 10, "What a run writes", the console item on a stall (each workl
   		}, "pod/orders-b-1: FailedScheduling: 0/4 nodes are available: 4 Insufficient cpu."},
   		{"the ReplicaSet's event is the last", []runtime.Object{
   			event("orders", "e2", "Pod", "orders-b-1", "Warning", "FailedScheduling", "0/4 nodes are available", at(2), time.Time{}, time.Time{}),
-  			event("orders", "e5", "ReplicaSet", "orders-b", "Warning", "FailedCreate", "pods \"orders-b-2\" is forbidden: violates PodSecurity", at(5), time.Time{}, time.Time{}),
+  			event("orders", "e5", "ReplicaSet", "orders-b", "Warning", "FailedCreate", `pods "orders-b-2" is forbidden: violates PodSecurity`, at(5), time.Time{}, time.Time{}),
   		}, `replicaset/orders-b: FailedCreate: pods "orders-b-2" is forbidden: violates PodSecurity`},
   		{"no event names it", nil, ""},
   	} {
   		t.Run(tc.name, func(t *testing.T) {
   			w, client, clock := startWatcher(t, nil, append(base(), tc.events...)...)
-  			// A deploy that stalls: Transition started; deployment("orders", 2, 2, 2, 0, 2, 3), ReplicaSet orders-b
-  			// and pod orders-b-1, not ready, created through the client; close the exited channel; drive to the end.
-  			// tr.Stalled is true and tr.LastEvent == tc.want;
-  			// tr.Conditions(true)[0].Text == "did not finish within limits.timeout" in every case.
+  			ctx := t.Context()
+  			exited := make(chan struct{})
+  			res := make(chan Transition, 1)
+  			go func() { res <- w.Transition(ctx, verdict.Deploy, clock.Now(), exited) }()
+  			until(t, w, clock, func(s Transition) bool { return s.Name == verdict.Deploy })
+  			update(t, client, deployment("orders", 2, 2, 2, 0, 2, 3)) // one new pod wanted, none updated
+  			if _, err := client.AppsV1().ReplicaSets("orders").Create(ctx, replicaSet("orders-b", "orders"), metav1.CreateOptions{}); err != nil {
+  				t.Fatal(err)
+  			}
+  			if _, err := client.CoreV1().Pods("orders").Create(ctx, pod("orders-b-1", "b1", "ReplicaSet", "orders-b", false, false), metav1.CreateOptions{}); err != nil {
+  				t.Fatal(err)
+  			}
+  			close(exited)
+  			tr := drive(t, clock, res)
+  			if !tr.Stalled || tr.LastEvent != tc.want {
+  				t.Errorf("stalled %v, last event %q; want a stall and %q", tr.Stalled, tr.LastEvent, tc.want)
+  			}
+  			if got := tr.Conditions(true)[0].Text; got != "did not finish within limits.timeout" {
+  				t.Errorf("the stall's text %q changed", got)
+  			}
   		})
   	}
   }
   ```
 
-  In `internal/run/record_test.go`, `TestRecordStallDetail` sets `f.transitions[0].tr.LastEvent = "pod/orders-7f8e9d-k3m2p: FailedScheduling: 0/4 nodes are available..."` beside `Incomplete`, and wants as the stall's detail, in this order:
+  In `internal/run/record_test.go`, `TestRecordStallDetail`, after the check of pod-unschedulable's detail and before the nothing-watched case, add (the file gains the import `slices`):
 
   ```go
-  want := append(slices.Clone(incomplete),
-  	"the last event: pod/orders-7f8e9d-k3m2p: FailedScheduling: 0/4 nodes are available...")
-  // cmp.Diff(want, got.Reasons[0].Detail) is empty; got.Reasons[0].Text is still
-  // "did not finish within limits.timeout"; pod-unschedulable's detail is still empty.
+  	const last = "pod/orders-7f8e9d-k3m2p: FailedScheduling: 0/4 nodes are available..."
+  	f.transitions[0].tr.LastEvent = last
+  	got = record(f)
+  	if diff := cmp.Diff(append(slices.Clone(incomplete), "the last event: "+last), got.Reasons[0].Detail); diff != "" {
+  		t.Errorf("detail of transition-stalled with a last event (-want +got):\n%s", diff)
+  	}
+  	if got.Reasons[0].Text != "did not finish within limits.timeout" {
+  		t.Errorf("the stall's text %q changed", got.Reasons[0].Text)
+  	}
+  	if d := got.Reasons[1].Detail; len(d) != 0 {
+  		t.Errorf("detail of pod-unschedulable is %q, want none", d)
+  	}
+  	f.transitions[0].tr.LastEvent = ""
   ```
 
-  A second case in the same test: `LastEvent` empty gives `incomplete` alone, as now.
+  The check before it, with `LastEvent` empty, already wants `incomplete` alone.
 
 - [ ] **Step 2: Run them to see them fail**
   Run: `go test ./internal/watch/ ./internal/run/ -run 'TestTransitionStallNamesTheLastEvent|TestRecordStallDetail' -v` / Expected: FAIL to build: `Transition.LastEvent` is not defined.

@@ -6,7 +6,7 @@ The rows below run code that Tasks 1 to 21 built, so none of them has a failing 
 
 ### Task 22: The rows with the built-in probe, and the first fixture on the oldest node image
 
-Design: section 12 (the table, rows 5, 8, 9, 11 to 14, 19, 20, 23 to 26 and 28, and the paragraphs under it; "The suite's matrix"); section 10 ("Rules of the verdict", "Reasons"); section 7 ("Pods replaced", "When a transition has finished", "The restart"); section 6 ("What it cannot see"). README decisions 5, 13, 21, 23.
+Design: section 12 (the table, rows 5, 8, 9, 11 to 14, 19, 20, 23 to 26 and 28, and the paragraphs under it; "The suite's matrix"); section 10 ("Rules of the verdict", "Reasons"); section 7 ("Pods replaced", "When a transition has finished", "The restart"); section 6 ("What it cannot see"). README decisions 5, 13, 21, 23, 24.
 
 Row 5, the previous release that exits on SIGTERM, is in no earlier step: the first plan built rows 1 to 4 and 31. It is written here.
 
@@ -24,7 +24,7 @@ Row 5, the previous release that exits on SIGTERM, is in no earlier step: the fi
   The oldest node image that kind v0.33.0 lists, from
   docs/proofs/p09-kind-release.md, on which the first fixture also runs.
 
-- [ ] **Step 1: Write the tests** in `e2e/fixtures_test.go`, each with a comment that gives its row as section 12 words it, as the present tests do, after the two variables of the Interfaces block.
+- [ ] **Step 1: Write the tests** in `e2e/fixtures_test.go`, each with a comment that gives its row as section 12 words it, as the present tests do, after the three declarations of the Interfaces block: `allPass`, `failedDeploy` and `oldestNodeImage`.
 
 ```go
 // The first fixture on the oldest node image that the linked kind release lists: pass.
@@ -130,7 +130,20 @@ func TestSecondRolloutAfterTheFirstFinished(t *testing.T) {
 }
 
 // Row 14. The chart denies traffic by default, and the test's values let the probe in: pass.
+// The control comes first (decision 24): the same chart with the policy that denies and without
+// the rule that lets the probe in must not pass, or the row would pass whether or not kind's
+// network plugin enforces the policy. The control runs once, under Helm 3: it tests the cluster's
+// network plugin, not Helm.
 func TestChartDeniesTrafficByDefault(t *testing.T) {
+	t.Run("control", func(t *testing.T) {
+		denied := map[string]any{"denyIngress": true, "allowProbe": false}
+		r := runFixture(t, fixture{name: "chart-denies-traffic-control", previous: denied, candidate: denied, helm: "helm-3"})
+		if r.verdict == "pass" {
+			t.Fatal("the control passed: kind's network plugin does not enforce the policy, so row 14 shows nothing; stop for the maintainer (decision 24)")
+		}
+		expect(t, r, result{exit: 2, verdict: "not-verified", codes: []string{"steady-not-clean"}, decided: "steady-not-clean",
+			windows: map[string]string{"steady": "not-verified", "deploy": "not-run", "rollback": "not-run"}})
+	})
 	values := map[string]any{"denyIngress": true, "allowProbe": true}
 	f := fixture{name: "chart-denies-traffic-by-default", previous: values, candidate: values}
 	underBothHelms(t, f, func(t *testing.T, r result) {
@@ -225,8 +238,8 @@ func TestCandidateChangesOnlyAnUnprobedWorkload(t *testing.T) {
 
 - [ ] **Step 2: Check that they build**
   Run: `go vet -tags e2e ./e2e/` / Expected: no output.
-- [ ] **Step 3: Run the rows under both Helm majors** (about two hours)
-  Run: `env CGO_ENABLED=0 KIND_EXPERIMENTAL_PROVIDER=nerdctl go test -tags e2e -p 1 -count=1 -timeout 360m -v ./e2e/ -run '^(TestFirstFixtureOnTheOldestNodeImage|TestPreviousExitsOnSIGTERM|TestDeployReplacesNoPod|TestPreviousNeverReady|TestNoPreviousRelease|TestBothReleasesEndWithoutDraining|TestSecondRolloutAfterTheFirstFinished|TestChartDeniesTrafficByDefault|TestStatefulSet|TestDaemonSet|TestHooksLongerThanTheSettleTime|TestCandidateFailsAfterTheRolloutFinished|TestCandidateValueBreaksTheSchema|TestSIGINTDuringTheDeploy|TestCandidateChangesOnlyAnUnprobedWorkload)$'` / Expected: PASS, 15 tests, each under `helm-3` and `helm-4`. On a failure, the rule at the top of this file applies. After it, `nerdctl ps -a` lists no container whose name begins `rollproof-e2e-`.
+- [ ] **Step 3: Run the rows under both Helm majors** (about two hours and ten minutes)
+  Run: `env CGO_ENABLED=0 KIND_EXPERIMENTAL_PROVIDER=nerdctl go test -tags e2e -p 1 -count=1 -timeout 360m -v ./e2e/ -run '^(TestFirstFixtureOnTheOldestNodeImage|TestPreviousExitsOnSIGTERM|TestDeployReplacesNoPod|TestPreviousNeverReady|TestNoPreviousRelease|TestBothReleasesEndWithoutDraining|TestSecondRolloutAfterTheFirstFinished|TestChartDeniesTrafficByDefault|TestStatefulSet|TestDaemonSet|TestHooksLongerThanTheSettleTime|TestCandidateFailsAfterTheRolloutFinished|TestCandidateValueBreaksTheSchema|TestSIGINTDuringTheDeploy|TestCandidateChangesOnlyAnUnprobedWorkload)$'` / Expected: PASS, 15 tests, each under `helm-3` and `helm-4`, and row 14's control once: 31 runs. A control that passes is the stop of decision 24, whatever the row gives; any other failure follows the rule at the top of this file. After it, `nerdctl ps -a` lists no container whose name begins `rollproof-e2e-`.
 - [ ] **Step 4: Commit**
   `git add e2e/fixtures_test.go` and `git commit -m "Add the fixture rows of the built-in probe, row 5 among them, and the first fixture on the oldest node image"`
 
@@ -468,7 +481,7 @@ Design: section 12 ("The suite's matrix"); section 13 ("Build order", step 4).
 - [ ] **Step 1: Run the unit suite and the checks**
   Run: `gofmt -l .` (prints nothing), `go vet ./...`, `go vet -tags cluster ./...`, `go vet -tags e2e ./...`, `go test -count=1 ./...` / Expected: PASS.
 - [ ] **Step 2: Run the whole suite once** (about four hours)
-  Run: `go run ./hack/fetchhelm`, then `env CGO_ENABLED=0 KIND_EXPERIMENTAL_PROVIDER=nerdctl go test -tags e2e -p 1 -count=1 -timeout 360m -v ./e2e/` / Expected: PASS, 32 tests (the five of the first plan, 15 of Task 22, 8 of Task 23, 4 of Task 24), each under `helm-3` and `helm-4`: 64 runs. Keep the output (for example by adding ` 2>&1 | tee /tmp/rollproof-e2e-step4.log`). On a failure, the rule at the top of this file applies: the README is not changed, and the task stops at this step. After the run, `nerdctl ps -a` lists no container whose name begins `rollproof-e2e-`.
+  Run: `go run ./hack/fetchhelm`, then `env CGO_ENABLED=0 KIND_EXPERIMENTAL_PROVIDER=nerdctl go test -tags e2e -p 1 -count=1 -timeout 360m -v ./e2e/` / Expected: PASS, 36 tests: 32 cluster tests (the five of the first plan, 15 of Task 22, 8 of Task 23, 4 of Task 24), each under `helm-3` and `helm-4`, with row 14's control once, so 65 cluster runs; and the 4 tests of `e2e/config_test.go`, which carry no build tag and need no cluster (`TestConfigOfEachShapeLoads`, `TestReadMarks`, `TestInterruptWaitsForTheDeploysStart`, `TestRestartComesAfterTheDelay`). A row 14 control that passes is the stop of decision 24. Keep the output (for example by adding ` 2>&1 | tee /tmp/rollproof-e2e-step4.log`). On a failure, the rule at the top of this file applies: the README is not changed, and the task stops at this step. After the run, `nerdctl ps -a` lists no container whose name begins `rollproof-e2e-`.
 - [ ] **Step 3: Record the results.** The task's report gives: the date; the engine (rootless nerdctl) and its version; Helm 3.22.1 and 4.3.2; the node images (kind v0.33.0's default, and `oldestNodeImage` for its row); each test with its two results and its time; and, from `TestFirstFixture`'s log line and rows 16 and 17, the install window's failures and how long before the steady window the last came (section 14, point 7).
 - [ ] **Step 4: Update `README.md`.** Keep its first three paragraphs. Rewrite "What works now" to say: on Linux with nerdctl, `rollproof run` creates its own kind cluster; deploys through Helm, with or without a previous release (a run with none tests a restart), or through the commands driver; runs the `setup` commands; judges with the built-in HTTP probe or a custom probe that `docs/probe-contract.md` describes; takes images from the engine or from an archive; and writes `result.json`, the console report and the evidence folder. Then: every row of the design's section 12 gives its expected verdict under Helm 3.22.1 and Helm 4.3.2, and the first fixture also on `kindest/node:v1.34.11`, on the date of Step 2's run, which the sentence gives. Then how to run it: `go run ./hack/fetchhelm` fetches the Helm binaries and kubectl 1.37.0 under `.tools/`; the suite's first run pulls busybox 1.37.0 by its digest into `.tools/`; `go test -tags e2e -p 1 ./e2e/ -timeout 360m` runs the suite in about four hours. "Not built yet" becomes: `registries` and `as` in `images`, which end as `config-rejected` with the text "not built yet" and the key's name. Keep the last line on the unit tests.
 - [ ] **Step 5: Commit**

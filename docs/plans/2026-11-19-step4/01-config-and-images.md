@@ -10,7 +10,7 @@ Design: section 8, "The config file" ("Paths", "What else is rejected": an image
 - Modify: `internal/config/validate.go` (the archive's check in `validate`, its comment at the top of `validate`; new `checkArchive`), `internal/config/notbuilt.go` (`images.NAME.archive` leaves the list)
 - Create: `internal/images/archive.go` (`storeArchive`)
 - Modify: `internal/images/local.go` (`storeLocal` ends with `storeArchive`), `internal/images/images.go` (`Store` takes `archive`; its comment)
-- Test: `internal/config/validate_test.go` (new tests, the helpers `writeArchive` and `writeTar`, `TestPathsAreRelativeToTheFile`), `internal/config/notbuilt_test.go` (`TestNotBuilt`), new `internal/images/archive_test.go`, `internal/images/own_test.go` (`TestStoreRefusesWhatIsNotBuilt`), `internal/images/images_test.go` (new cluster test)
+- Test: `internal/config/validate_test.go` (new tests, the helpers `writeArchive`, `writeTar`, `writeFile` and `mkdir`, `TestPathsAreRelativeToTheFile`), `internal/config/notbuilt_test.go` (`TestNotBuilt`), new `internal/images/archive_test.go`, `internal/images/own_test.go` (`TestStoreRefusesWhatIsNotBuilt`), `internal/images/images_test.go` (new cluster test; `tags` moves out)
 
 **Interfaces:**
 - Consumes: `tarball.LoadManifest`, `tarball.ImageFromPath` (`github.com/google/go-containerregistry/pkg/v1/tarball`, already a dependency); `pushImage` and `pull` in `internal/images/images.go` as built.
@@ -39,7 +39,7 @@ Design: section 8, "The config file" ("Paths", "What else is rejected": an image
 
 - [ ] **Step 1: Write the failing tests**
 
-  In `internal/config/validate_test.go`, two helpers and four tests. The archive's file name holds the planted value, so `rejected` proves that no text quotes the path.
+  In `internal/config/validate_test.go`, four helpers and four tests. The archive's file name holds the planted value, so `rejected` proves that no text quotes the path. The file gains the imports `archive/tar`, `bytes`, `fmt`, `maps` and `slices`, and go-containerregistry's `name`, `v1`, `v1/random` and `v1/tarball`.
 
   ```go
   // writeArchive writes at path a tar such as docker save writes, holding n small images.
@@ -51,15 +51,49 @@ Design: section 8, "The config file" ("Paths", "What else is rejected": an image
   		if err != nil {
   			t.Fatal(err)
   		}
-  		refs[name.MustParseReference(fmt.Sprintf("rollproof.test/img:%d", i))] = img
+  		ref, err := name.ParseReference(fmt.Sprintf("rollproof.test/img:%d", i))
+  		if err != nil {
+  			t.Fatal(err)
+  		}
+  		refs[ref] = img
   	}
   	if err := tarball.MultiRefWriteToFile(path, refs); err != nil {
   		t.Fatal(err)
   	}
   }
 
-  // writeTar writes at path a tar that holds the given files.
-  func writeTar(t *testing.T, path string, files map[string]string) { /* archive/tar, names in sorted order */ }
+  // writeTar writes at path a tar that holds the given files, in the order of their names.
+  func writeTar(t *testing.T, path string, files map[string]string) {
+  	t.Helper()
+  	var b bytes.Buffer
+  	tw := tar.NewWriter(&b)
+  	for _, n := range slices.Sorted(maps.Keys(files)) {
+  		if err := tw.WriteHeader(&tar.Header{Name: n, Mode: 0o644, Size: int64(len(files[n]))}); err != nil {
+  			t.Fatal(err)
+  		}
+  		if _, err := tw.Write([]byte(files[n])); err != nil {
+  			t.Fatal(err)
+  		}
+  	}
+  	if err := tw.Close(); err != nil {
+  		t.Fatal(err)
+  	}
+  	writeFile(t, path, b.String())
+  }
+
+  func writeFile(t *testing.T, path, text string) {
+  	t.Helper()
+  	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+  		t.Fatal(err)
+  	}
+  }
+
+  func mkdir(t *testing.T, path string) {
+  	t.Helper()
+  	if err := os.Mkdir(path, 0o755); err != nil {
+  		t.Fatal(err)
+  	}
+  }
 
   // archiveConfig is base with one image entry whose archive is the file S3CRET-VALUE.tar.
   func archiveConfig(t *testing.T) string {
@@ -122,8 +156,6 @@ Design: section 8, "The config file" ("Paths", "What else is rejected": an image
   }
   ```
 
-  `mkdir` and `writeFile` are three-line helpers beside `writeTar` that fail the test on an error.
-
   Change `TestPathsAreRelativeToTheFile`: `project(t, "chart", "images")`, then `writeArchive(t, filepath.Join(dir, "images", "orders.tar"), 1)` before the load; drop the comment line "Task 22's later plan reads the archive; this build only makes its path absolute."
 
   In `internal/config/notbuilt_test.go`, `TestNotBuilt` loads every row with `loadWith(t, dir, …, noEnv)` from one `dir := t.TempDir()` that holds `writeArchive(t, filepath.Join(dir, "orders.tar"), 1)`, so that the row "an image from an archive" loads; that row now wants `nil`. Add the row "an image from an archive with as": `images:\n  orders:\n    archive: orders.tar\n    as: registry.example/team/orders\n`, wanting `[]string{"images.orders.as"}`.
@@ -131,29 +163,151 @@ Design: section 8, "The config file" ("Paths", "What else is rejected": an image
   New `internal/images/archive_test.go` (`//go:build linux`), against an in-process registry (`httptest.NewServer(registry.New())` from `github.com/google/go-containerregistry/pkg/registry`), with `c := &cluster.Cluster{PushRegistry: strings.TrimPrefix(srv.URL, "http://")}`:
 
   ```go
+  //go:build linux
+
+  package images
+
+  // imports: encoding/json, net/http, net/http/httptest, os, path/filepath, strconv, strings, testing;
+  // go-cmp's cmp; go-containerregistry's name, v1, random, registry, remote and tarball;
+  // rollproof/internal/cluster, rollproof/internal/config and rollproof/internal/verdict.
+
+  // archiveRegistry starts a registry in the process and returns a Cluster whose run's registry it is.
+  func archiveRegistry(t *testing.T) *cluster.Cluster {
+  	t.Helper()
+  	srv := httptest.NewServer(registry.New())
+  	t.Cleanup(srv.Close)
+  	return &cluster.Cluster{PushRegistry: strings.TrimPrefix(srv.URL, "http://")}
+  }
+
+  // archiveOf writes n random images to a new archive and returns its path.
+  func archiveOf(t *testing.T, n int) string {
+  	t.Helper()
+  	refs := map[name.Reference]v1.Image{}
+  	for i := range n {
+  		img, err := random.Image(64, 1)
+  		if err != nil {
+  			t.Fatal(err)
+  		}
+  		ref, err := name.ParseReference("rollproof.test/img:" + strconv.Itoa(i))
+  		if err != nil {
+  			t.Fatal(err)
+  		}
+  		refs[ref] = img
+  	}
+  	file := filepath.Join(t.TempDir(), "orders.tar")
+  	if err := tarball.MultiRefWriteToFile(file, refs); err != nil {
+  		t.Fatal(err)
+  	}
+  	return file
+  }
+
   func TestStoreArchivePushesByDigest(t *testing.T) {
-  	// one random.Image written with tarball.WriteToFile to file, under the tag rollproof.test/img:1
+  	c := archiveRegistry(t)
+  	file := archiveOf(t, 1)
+  	img, err := tarball.ImageFromPath(file, nil)
+  	if err != nil {
+  		t.Fatal(err)
+  	}
+  	digest, err := img.Digest()
+  	if err != nil {
+  		t.Fatal(err)
+  	}
+
   	ref, err := storeArchive(t.Context(), c, "orders", file, "the archive")
-  	// want: err nil; ref.Repository == "rollproof.test/orders";
-  	// ref.Digest == the digest of tarball.ImageFromPath(file, nil);
-  	// remote.Head of PUSH/orders@DIGEST (name.Insecure) succeeds;
-  	// GET http://PUSH/v2/orders/tags/list lists no tag.
+  	if err != nil {
+  		t.Fatal(err)
+  	}
+  	want := config.ImageRef{Repository: "rollproof.test/orders", Digest: digest.String()}
+  	if d := cmp.Diff(want, ref); d != "" {
+  		t.Errorf("stored as (-want +got):\n%s", d)
+  	}
+  	pushed, err := name.NewDigest(c.PushRegistry+"/orders@"+digest.String(), name.Insecure)
+  	if err != nil {
+  		t.Fatal(err)
+  	}
+  	if _, err := remote.Head(pushed); err != nil {
+  		t.Errorf("the run's registry does not hold %s: %v", pushed, err)
+  	}
+  	if got := tags(t, c.PushRegistry, "orders"); len(got) != 0 {
+  		t.Errorf("the run's registry has tags %v for orders", got)
+  	}
   }
 
   func TestStoreArchiveFailures(t *testing.T) {
-  	// two images in the file: verdict.AsCondition(err) is ClusterFailed with the text
-  	//   "images.orders: the archive holds more than one image";
-  	// a file that is not a tar: ClusterFailed whose text begins with
-  	//   "images.orders: the archive cannot be read: ".
+  	c := archiveRegistry(t)
+  	notTar := filepath.Join(t.TempDir(), "orders.tar")
+  	if err := os.WriteFile(notTar, []byte("not a tar\n"), 0o644); err != nil {
+  		t.Fatal(err)
+  	}
+  	for _, tc := range []struct {
+  		name, file, text string
+  		exact            bool
+  	}{
+  		{"two images", archiveOf(t, 2), "images.orders: the archive holds more than one image", true},
+  		{"not a tar", notTar, "images.orders: the archive cannot be read: ", false},
+  	} {
+  		t.Run(tc.name, func(t *testing.T) {
+  			_, err := storeArchive(t.Context(), c, "orders", tc.file, "the archive")
+  			cond := verdict.AsCondition(err)
+  			if err == nil || cond.Code != verdict.ClusterFailed {
+  				t.Fatalf("storeArchive: %v, want cluster-failed", err)
+  			}
+  			if tc.exact && cond.Text != tc.text || !tc.exact && !strings.HasPrefix(cond.Text, tc.text) {
+  				t.Errorf("text %q, want %q", cond.Text, tc.text)
+  			}
+  		})
+  	}
   }
   ```
 
+  `tags` is the helper of `images_test.go`, which carries the tag `cluster`. Move it into `archive_test.go`, which both builds see, and delete it from `images_test.go` with the imports `encoding/json` and `net/http`, which only it used there.
+
   In `internal/images/own_test.go`, `TestStoreRefusesWhatIsNotBuilt` keeps only the entry with `as`; the entry `{Archive: "/tmp/orders.tar"}` goes.
 
-  In `internal/images/images_test.go` (tag `cluster`), add `TestStoreArchiveIntoEveryNode`: build `rollproof-test-img:archive` from `tinyProgram` and the same Dockerfile as `TestStoreOwnAndLocal`; `c.Engine.Binary save -o FILE rollproof-test-img:archive` into `t.TempDir()`, so that the archive is the engine's own format (decision 2); remove the local image in a cleanup; `Store(ctx, c, bin, map[string]config.Image{"app": {Archive: FILE}}, 2*time.Minute)`. Assert: no error; `s.Images["app"].Repository == "rollproof.test/app"` and its digest begins with `sha256:`; `crictl inspecti REF` succeeds on every node; the registry lists no tag for `app`.
+  In `internal/images/images_test.go` (tag `cluster`), the archive is the engine's own format (decision 2):
+
+  ```go
+  func TestStoreArchiveIntoEveryNode(t *testing.T) {
+  	ctx := context.Background()
+  	c := testCluster(t)
+  	dir, bin := tinyProgram(t)
+  	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM scratch\nCOPY app /app\nENTRYPOINT [\"/app\"]\n"), 0o644); err != nil {
+  		t.Fatal(err)
+  	}
+  	if out, err := exec.Command(c.Engine.Binary, "build", "-t", "rollproof-test-img:archive", dir).CombinedOutput(); err != nil {
+  		t.Fatalf("build the image: %v\n%s", err, out)
+  	}
+  	t.Cleanup(func() {
+  		if out, err := exec.Command(c.Engine.Binary, "rmi", "rollproof-test-img:archive").CombinedOutput(); err != nil {
+  			t.Errorf("remove the local image rollproof-test-img:archive: %v\n%s", err, out)
+  		}
+  	})
+  	file := filepath.Join(t.TempDir(), "app.tar")
+  	if out, err := exec.Command(c.Engine.Binary, "save", "-o", file, "rollproof-test-img:archive").CombinedOutput(); err != nil {
+  		t.Fatalf("save the image: %v\n%s", err, out)
+  	}
+
+  	s, err := Store(ctx, c, bin, map[string]config.Image{"app": {Archive: file}}, 2*time.Minute)
+  	if err != nil {
+  		t.Fatalf("Store: %v", err)
+  	}
+  	app := s.Images["app"]
+  	if app.Repository != "rollproof.test/app" || !strings.HasPrefix(app.Digest, "sha256:") {
+  		t.Errorf("app stored as %+v", app)
+  	}
+  	for _, n := range c.Nodes() {
+  		if out, err := c.Exec(ctx, n, "crictl", "inspecti", app.Ref()); err != nil {
+  			t.Errorf("%s does not hold %s: %v\n%s", n, app.Ref(), err, out)
+  		}
+  	}
+  	if got := tags(t, c.PushRegistry, "app"); len(got) != 0 {
+  		t.Errorf("the run's registry has tags %v for app", got)
+  	}
+  }
+  ```
 
 - [ ] **Step 2: Run them to see them fail**
-  Run: `go test ./internal/config/ -run 'TestArchive|TestNotBuilt|TestPathsAreRelativeToTheFile' -v` / Expected: FAIL: the four archive tests load what they must reject, and `TestNotBuilt`'s archive row gives `images.orders.archive` (`TestArchiveWithOneImage` and `TestPathsAreRelativeToTheFile` pass already).
+  Run: `go test ./internal/config/ -run 'TestArchive|TestNotBuilt|TestPathsAreRelativeToTheFile' -v` / Expected: FAIL: the three archive tests that must reject (`TestArchiveThatIsNotAnImage`, `TestArchiveWithTwoImages`, `TestArchiveThatDoesNotExist`) load the file, and `TestNotBuilt`'s archive row gives `images.orders.archive` (`TestArchiveWithOneImage` and `TestPathsAreRelativeToTheFile` pass already).
   Run: `go test ./internal/images/ -run 'TestStoreArchive|TestStoreRefusesWhatIsNotBuilt' -v` / Expected: FAIL to build: `storeArchive` is not defined.
 
 - [ ] **Step 3: Implement `checkArchive` in `internal/config/validate.go` and `storeArchive` in `internal/images/archive.go`, and change `Store` and `storeLocal`**, with the interface comments from the Interfaces block.
