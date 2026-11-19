@@ -414,3 +414,38 @@ func TestLastFailure(t *testing.T) {
 			w.Checks, w.Failed, w.FirstFailure, at(-16*sec))
 	}
 }
+
+// A window has a slowest check only when a passed line counted in it gave ms, and a lag only when
+// a line counted in it gave lag.
+func TestHasSlowestAndHasLag(t *testing.T) {
+	noFields := func(from, to time.Duration) []Observation {
+		var obs []Observation
+		for d := from; d < to; d += sec {
+			obs = append(obs, Observation{Written: at(d), T: at(d), OK: true, N: 200})
+		}
+		return obs
+	}
+	withFields := func(o Observation) Observation { o.HasMs, o.HasLag = true, true; return o }
+	lagOnly := Observation{Written: at(20 * sec), T: at(20 * sec), OK: false, N: 1, Class: "refused", Lag: 7, HasLag: true}
+	msOnFailure := Observation{Written: at(5 * sec), T: at(5 * sec), OK: false, N: 1, Class: "refused", Ms: 900, HasMs: true}
+	passWithMs := withFields(Observation{Written: at(-10 * sec), T: at(-10 * sec), OK: true, N: 1, Ms: 41, Lag: 3})
+	d := Decide(timeline(70*sec, withInstall(allThree()), noFields(-15*sec, 70*sec),
+		[]Observation{lagOnly, msOnFailure, passWithMs}))
+	for _, c := range []struct {
+		window          int
+		slowest, hasLag bool
+		slowestMs       float64
+		lagMs           float64
+	}{
+		{0, true, true, 41, 3},  // install: a passed line gave both
+		{1, false, false, 0, 0}, // steady: only a failed line gave ms
+		{2, false, true, 0, 7},  // deploy: a failed line gave lag
+		{3, false, false, 0, 0}, // rollback: no line gave either
+	} {
+		w := d.Windows[c.window]
+		if w.HasSlowest != c.slowest || w.HasLag != c.hasLag || w.SlowestMs != c.slowestMs || w.LagMs != c.lagMs {
+			t.Errorf("%s: HasSlowest %v, HasLag %v, SlowestMs %v, LagMs %v; want %v, %v, %v, %v",
+				w.Name, w.HasSlowest, w.HasLag, w.SlowestMs, w.LagMs, c.slowest, c.hasLag, c.slowestMs, c.lagMs)
+		}
+	}
+}

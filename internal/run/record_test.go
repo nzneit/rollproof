@@ -74,9 +74,9 @@ func sampleFacts(t *testing.T) facts {
 		decision: verdict.Decision{
 			Verdict: verdict.Pass, GoOn: true,
 			Windows: []verdict.WindowResult{
-				{Name: verdict.Steady, Start: ms(0), End: ms(10000), Result: verdict.ResultPass, Checks: 2000, SlowestMs: 41, LagMs: 6},
-				{Name: verdict.Deploy, Start: ms(10000), End: ms(43400), Result: verdict.ResultPass, Checks: 6680, SlowestMs: 212, LagMs: 38},
-				{Name: verdict.Rollback, Start: ms(43400), End: ms(77300), Result: verdict.ResultPass, Checks: 6780, SlowestMs: 187, LagMs: 35},
+				{Name: verdict.Steady, Start: ms(0), End: ms(10000), Result: verdict.ResultPass, Checks: 2000, SlowestMs: 41, LagMs: 6, HasSlowest: true, HasLag: true},
+				{Name: verdict.Deploy, Start: ms(10000), End: ms(43400), Result: verdict.ResultPass, Checks: 6680, SlowestMs: 212, LagMs: 38, HasSlowest: true, HasLag: true},
+				{Name: verdict.Rollback, Start: ms(43400), End: ms(77300), Result: verdict.ResultPass, Checks: 6780, SlowestMs: 187, LagMs: 35, HasSlowest: true, HasLag: true},
 			},
 		},
 		transitions: []transitionFacts{
@@ -131,10 +131,10 @@ func TestRecordCopiesTheDecision(t *testing.T) {
 		Reasons: []verdict.Reason{{Code: verdict.ProbeFailures, Verdict: verdict.Fail, Window: verdict.Deploy,
 			Text: "243 checks failed (refused 198, timeout 45), first at 10:00:17.31", Decided: true}},
 		Windows: []verdict.WindowResult{
-			{Name: verdict.Steady, Start: ms(0), End: ms(10000), Result: verdict.ResultPass, Checks: 2000, SlowestMs: 39, LagMs: 5},
+			{Name: verdict.Steady, Start: ms(0), End: ms(10000), Result: verdict.ResultPass, Checks: 2000, SlowestMs: 39, LagMs: 5, HasSlowest: true, HasLag: true},
 			{Name: verdict.Deploy, Start: ms(10000), End: ms(39100), Result: verdict.ResultFail, Checks: 5820, Failed: 243,
 				AfterFinish: 31, Crossed: 1, ByClass: map[string]int{"refused": 198, "timeout": 45},
-				FirstFailure: ms(17310), SlowestMs: 198, LagMs: 12},
+				FirstFailure: ms(17310), SlowestMs: 198, LagMs: 12, HasSlowest: true, HasLag: true},
 			{Name: verdict.Rollback, Result: verdict.NotRun},
 		},
 	}
@@ -152,10 +152,10 @@ func TestRecordCopiesTheDecision(t *testing.T) {
 		t.Errorf("reasons (-want +got):\n%s", diff)
 	}
 	wantWindows := []report.Window{
-		{Name: "steady", Start: ptr(ms(0)), End: ptr(ms(10000)), Result: "pass", Checks: 2000, SlowestMs: 39, LagMs: 5},
+		{Name: "steady", Start: ptr(ms(0)), End: ptr(ms(10000)), Result: "pass", Checks: 2000, SlowestMs: new(39.0), LagMs: new(5.0)},
 		{Name: "deploy", Start: ptr(ms(10000)), End: ptr(ms(39100)), Result: "fail", Checks: 5820, Failed: 243,
 			FailedAfterFinish: 31, CrossedStart: 1, FailedByClass: map[string]int{"refused": 198, "timeout": 45},
-			FirstFailure: ptr(ms(17310)), SlowestMs: 198, LagMs: 12},
+			FirstFailure: ptr(ms(17310)), SlowestMs: new(198.0), LagMs: new(12.0)},
 		{Name: "rollback", Result: "not-run"},
 	}
 	if diff := cmp.Diff(wantWindows, got.Windows, cmpopts.EquateEmpty()); diff != "" {
@@ -367,14 +367,14 @@ func settled(f facts) facts {
 	f.settling = watch.Settling{First: ms(-15000), Settled: ms(0), Ended: ms(0)}
 	f.decision.Windows = append([]verdict.WindowResult{{Name: verdict.Install, Start: ms(-15000), End: ms(0),
 		Result: verdict.ResultPass, Checks: 3000, Failed: 6, ByClass: map[string]int{"refused": 5, "timeout": 1},
-		FirstFailure: ms(-14990), LastFailure: ms(-14900), SlowestMs: 44, LagMs: 9}}, f.decision.Windows...)
+		FirstFailure: ms(-14990), LastFailure: ms(-14900), SlowestMs: 44, LagMs: 9, HasSlowest: true, HasLag: true}}, f.decision.Windows...)
 	return f
 }
 
 func TestRecordInstall(t *testing.T) {
 	whole := report.Install{Ready: ms(-21000), FirstObservation: ptr(ms(-15000)), Settled: ptr(ms(0)),
 		Checks: 3000, Failed: 6, FailedByClass: map[string]int{"refused": 5, "timeout": 1},
-		LastFailure: ptr(ms(-14900)), SlowestMs: 44, LagMs: 9}
+		LastFailure: ptr(ms(-14900)), SlowestMs: new(44.0), LagMs: new(9.0)}
 	t.Run("a run that reached its steady window", func(t *testing.T) {
 		r := record(settled(sampleFacts(t)))
 		if diff := cmp.Diff(&whole, r.Install, cmpopts.EquateEmpty()); diff != "" {
@@ -382,6 +382,16 @@ func TestRecordInstall(t *testing.T) {
 		}
 		if len(r.Windows) != 3 || r.Windows[0].Name != "steady" {
 			t.Errorf("windows %+v; the install window is never among them", r.Windows)
+		}
+	})
+	t.Run("an install window whose probe gave neither ms nor lag", func(t *testing.T) {
+		f := settled(sampleFacts(t))
+		f.decision.Windows[0].SlowestMs, f.decision.Windows[0].HasSlowest = 0, false
+		f.decision.Windows[0].LagMs, f.decision.Windows[0].HasLag = 0, false
+		want := whole
+		want.SlowestMs, want.LagMs = nil, nil
+		if diff := cmp.Diff(&want, record(f).Install, cmpopts.EquateEmpty()); diff != "" {
+			t.Errorf("install (-want +got):\n%s", diff)
 		}
 	})
 	t.Run("a run that ended before the install had settled", func(t *testing.T) {
@@ -655,5 +665,12 @@ func TestRecordImageWithoutDigest(t *testing.T) {
 		if im.Digest != "" || len(im.RunBy) != 0 {
 			t.Errorf("image %+v: a digest that was never read must match no workload", im)
 		}
+	}
+}
+
+func TestRecordWithoutMsOrLag(t *testing.T) {
+	w := windowRecord(verdict.WindowResult{Name: verdict.Deploy, Checks: 100, SlowestMs: 0, LagMs: 0, HasLag: true})
+	if w.SlowestMs != nil || w.LagMs == nil || *w.LagMs != 0 {
+		t.Errorf("SlowestMs %v, LagMs %v; want nil and 0", w.SlowestMs, w.LagMs)
 	}
 }

@@ -408,8 +408,8 @@ func installLines(r Run) []string {
 	}
 	lines = append(lines, line)
 
-	lines = append(lines, indent+"slowest "+slowestCell(in.Checks, in.Failed, in.SlowestMs)+
-		", behind "+behindCell(in.Checks, in.LagMs))
+	lines = append(lines, indent+"slowest "+slowestCell(in.SlowestMs)+
+		", behind "+behindCell(in.LagMs))
 
 	for _, s := range in.SettleRestartedBy {
 		lines = append(lines, wrap(indent, "the settle time started again: "+s)...)
@@ -467,21 +467,22 @@ func thousands(n int) string {
 
 func millis(ms float64) string { return strconv.FormatFloat(math.Round(ms), 'f', 0, 64) + " ms" }
 
-// slowestCell writes a window's slowest pass as the console prints it, and "-" when every check
-// failed, so that no pass is claimed where none was.
-func slowestCell(checks, failed int, slowestMs float64) string {
-	if checks == failed {
+// slowestCell writes a window's slowest check that passed as the console prints it, and "-" when
+// the probe gave none, so that no pass is claimed where none was reported.
+func slowestCell(ms *float64) string {
+	if ms == nil {
 		return "-"
 	}
-	return millis(slowestMs)
+	return millis(*ms)
 }
 
-// behindCell writes a window's furthest lag as the console prints it, and "-" when it had no check.
-func behindCell(checks int, lagMs float64) string {
-	if checks == 0 {
+// behindCell writes a window's furthest lag as the console prints it, and "-" when the probe gave
+// none.
+func behindCell(ms *float64) string {
+	if ms == nil {
 		return "-"
 	}
-	return millis(lagMs)
+	return millis(*ms)
 }
 
 func resultWord(s string) string {
@@ -518,8 +519,8 @@ func windowsTable(r Run) []string {
 		if w.Name == "steady" {
 			after = "-"
 		}
-		slowest := slowestCell(w.Checks, w.Failed, w.SlowestMs)
-		behind := behindCell(w.Checks, w.LagMs)
+		slowest := slowestCell(w.SlowestMs)
+		behind := behindCell(w.LagMs)
 		rows = append(rows, []string{w.Name, length, thousands(w.Checks), thousands(w.Failed), after, slowest, behind, resultWord(w.Result)})
 	}
 	widths := make([]int, len(header))

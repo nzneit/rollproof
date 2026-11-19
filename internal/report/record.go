@@ -44,7 +44,9 @@ type Reason struct {
 
 // Window is one window with its result and its counts. A nil time is one
 // that never came: the start of a window that did not run, or the first
-// failure of a window with none.
+// failure of a window with none. A nil SlowestMs or LagMs is a figure that
+// the probe did not give: result.json writes it as null and the console as
+// "-".
 type Window struct {
 	Name              string         `json:"name"`
 	Start             *time.Time     `json:"start"`
@@ -56,13 +58,15 @@ type Window struct {
 	CrossedStart      int            `json:"crossed_start"`
 	FailedByClass     map[string]int `json:"failed_by_class"`
 	FirstFailure      *time.Time     `json:"first_failure"`
-	SlowestMs         float64        `json:"slowest_ms"`
-	LagMs             float64        `json:"lag_ms"`
+	SlowestMs         *float64       `json:"slowest_ms"`
+	LagMs             *float64       `json:"lag_ms"`
 }
 
 // Install is the install as the report states it, apart from the windows. A
 // nil time is one that never came. The counts are the install window's, all
-// zero when the probe gave no observation.
+// zero when the probe gave no observation. A nil SlowestMs or LagMs is a
+// figure that the probe did not give: result.json writes it as null and the
+// console as "-".
 type Install struct {
 	Ready             time.Time      `json:"ready"`
 	FirstObservation  *time.Time     `json:"first_observation"`
@@ -72,8 +76,8 @@ type Install struct {
 	Failed            int            `json:"failed"`
 	FailedByClass     map[string]int `json:"failed_by_class"`
 	LastFailure       *time.Time     `json:"last_failure"`
-	SlowestMs         float64        `json:"slowest_ms"`
-	LagMs             float64        `json:"lag_ms"`
+	SlowestMs         *float64       `json:"slowest_ms"`
+	LagMs             *float64       `json:"lag_ms"`
 }
 
 // Transition is one transition that ran. Command is how its command ended:

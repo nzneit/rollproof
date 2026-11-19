@@ -121,11 +121,13 @@ func ParseLine(text string, written, asked time.Time) Line {
 		if !isNumber(r) || !unmarshalStrict(r, &obs.Ms) || obs.Ms < 0 {
 			return bad("ms is not a number of 0 or more")
 		}
+		obs.HasMs = true
 	}
 	if r, ok := fields["lag"]; ok {
 		if !isNumber(r) || !unmarshalStrict(r, &obs.Lag) || obs.Lag < 0 {
 			return bad("lag is not a number of 0 or more")
 		}
+		obs.HasLag = true
 	}
 	if r, ok := fields["v"]; ok {
 		var v int

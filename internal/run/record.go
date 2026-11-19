@@ -117,7 +117,8 @@ func installRecord(f facts) *report.Install {
 			continue
 		}
 		in.FirstObservation, in.Checks, in.Failed = timePtr(w.Start), w.Checks, w.Failed
-		in.LastFailure, in.SlowestMs, in.LagMs = timePtr(w.LastFailure), w.SlowestMs, w.LagMs
+		in.LastFailure = timePtr(w.LastFailure)
+		in.SlowestMs, in.LagMs = floatPtr(w.SlowestMs, w.HasSlowest), floatPtr(w.LagMs, w.HasLag)
 		in.FailedByClass = classCopy(w.ByClass)
 		break
 	}
@@ -182,7 +183,8 @@ func podText(w verdict.WindowName, p watch.PodNote, what string) string {
 func windowRecord(w verdict.WindowResult) report.Window {
 	out := report.Window{Name: string(w.Name), Start: timePtr(w.Start), End: timePtr(w.End),
 		Result: string(w.Result), Checks: w.Checks, Failed: w.Failed, FailedAfterFinish: w.AfterFinish,
-		CrossedStart: w.Crossed, FirstFailure: timePtr(w.FirstFailure), SlowestMs: w.SlowestMs, LagMs: w.LagMs,
+		CrossedStart: w.Crossed, FirstFailure: timePtr(w.FirstFailure),
+		SlowestMs: floatPtr(w.SlowestMs, w.HasSlowest), LagMs: floatPtr(w.LagMs, w.HasLag),
 		FailedByClass: classCopy(w.ByClass)}
 	return out
 }
@@ -205,6 +207,15 @@ func timePtr(t time.Time) *time.Time {
 		return nil
 	}
 	return &t
+}
+
+// floatPtr returns v as a pointer when has is true, so that the record tells a figure of 0 from one
+// the probe did not give, and nil otherwise.
+func floatPtr(v float64, has bool) *float64 {
+	if !has {
+		return nil
+	}
+	return new(v)
 }
 
 func transitionRecords(trs []transitionFacts) []report.Transition {
