@@ -158,6 +158,11 @@ type transition struct {
 	// unsupported holds the workloads watched at some moment of the transition whose object at
 	// that moment did not update by rolling.
 	unsupported map[Workload]bool
+	// named holds, for a transition whose window ended as a stall, the objects its Incomplete
+	// lines name and the ReplicaSets the Tracker maps to each named Deployment, each as kind/name
+	// with the kind in lower case. It is taken when the window ends, so it names exactly what the
+	// details name. Nil while the window is open and for a window that did not stall.
+	named map[string]bool
 }
 
 // NewTracker returns a Tracker with nothing in it. It does no I/O and reads no clock: it is told
@@ -380,52 +385,14 @@ func (t *Tracker) State(now time.Time) (Transition, bool) {
 }
 
 // stallObjects returns the objects that the last transition's stall names, each as kind/name with
-// the kind in lower case: the workloads that take part and are not complete, or are deleted with
-// pods left; the ReplicaSets that are the controllers of such a Deployment; and the pods of those
-// workloads that are not gone and are not ready or are stopping. It is empty when the last
-// transition did not stall.
+// the kind in lower case, as the stall's details took them: the workloads, ReplicaSets and pods
+// its Incomplete lines name. It is empty when the last transition did not stall.
 func (t *Tracker) stallObjects() map[string]bool {
 	tr := t.current()
 	if tr == nil || !tr.t.Stalled {
 		return nil
 	}
-	named := map[string]bool{}
-	var stalled []Workload
-	for _, w := range t.takingPart() {
-		rec := t.workloads[w]
-		if !rec.gone.IsZero() {
-			if t.podsLeft(w) {
-				named[w.String()] = true
-				stalled = append(stalled, w)
-			}
-			continue
-		}
-		if done, _ := Complete(rec.obj); !done {
-			named[w.String()] = true
-			stalled = append(stalled, w)
-		}
-	}
-	for rs, d := range t.owners {
-		for _, w := range stalled {
-			if w.Kind == "deployment" && w.Name == d {
-				named["replicaset/"+rs] = true
-				break
-			}
-		}
-	}
-	for _, p := range t.pods {
-		if !p.gone.IsZero() {
-			continue
-		}
-		w, ok := t.podWorkload(p)
-		if !ok || !named[w.String()] {
-			continue
-		}
-		if !podReady(p.obj) || !p.deleting.IsZero() {
-			named["pod/"+p.name] = true
-		}
-	}
-	return named
+	return tr.named
 }
 
 // endIfDue ends the open transition's window when its time has come by at: Settle after it
@@ -449,20 +416,20 @@ func (t *Tracker) endIfDue(at time.Time) {
 }
 
 // endWindow ends the open transition's window at end, as a stall when stalled holds. It keeps the
-// transition's counts and, for a stall, the details of what is not complete, from the records as
-// they are now; later changes of the records cannot alter them. When endIfDue ends the window,
-// the records hold every change told before end and none told at end, because the window is half
-// open. A pod created or gone exactly at end is then left out, although "at or before the bound"
-// would count it. That fails closed: it can only lower the counts, so no-pod-replaced is given
-// more often, not less. When a change in the settle time stalls the window, the records include
-// that change.
+// transition's counts and, for a stall, the details of what is not complete and the objects those
+// details name, from the records as they are now; later changes of the records cannot alter them.
+// When endIfDue ends the window, the records hold every change told before end and none told at
+// end, because the window is half open. A pod created or gone exactly at end is then left out,
+// although "at or before the bound" would count it. That fails closed: it can only lower the
+// counts, so no-pod-replaced is given more often, not less. When a change in the settle time
+// stalls the window, the records include that change.
 func (t *Tracker) endWindow(end time.Time, stalled bool) {
 	tr := t.current()
 	tr.t.Ended = end
 	tr.t.Stalled = stalled
 	tr.t = t.summary(tr, end)
 	if stalled {
-		t.details(&tr.t, end)
+		tr.named = t.details(&tr.t, end)
 	}
 }
 

@@ -123,3 +123,63 @@ func TestTransitionStallNamesTheLastEvent(t *testing.T) {
 		})
 	}
 }
+
+// A stall can name only a stopping pod of a complete workload (counts_test.go's "the details are
+// taken after the change that caused the stall"); the event about that pod is then the last event.
+func TestTransitionStallNamesAStoppingPodsLastEvent(t *testing.T) {
+	w, client, clock := startWatcher(t, nil, append(base(),
+		event("orders", "e1", "Pod", "orders-a-1", "Warning", "FailedKillPod", "kill failed", at(1), time.Time{}, time.Time{}))...)
+	ctx := t.Context()
+	exited := make(chan struct{})
+	res := make(chan Transition, 1)
+	go func() { res <- w.Transition(ctx, verdict.Deploy, clock.Now(), exited) }()
+	until(t, w, clock, func(s Transition) bool { return s.Name == verdict.Deploy })
+	update(t, client, deployment("orders", 2, 1, 2, 2, 2, 2)) // a new spec, not observed yet
+	close(exited)
+	clock.Advance(289 * time.Second)
+	update(t, client, deployment("orders", 2, 2, 2, 2, 2, 2)) // complete at +289 s
+	until(t, w, clock, func(s Transition) bool { return s.Finished.Equal(at(289)) })
+	// The old pod is told to stop just past limits.timeout: the settle time starts again and the
+	// window stalls, with the Deployment complete and only that pod in the details.
+	clock.Advance(12 * time.Second) // +301 s
+	update(t, client, pod("orders-a-1", "a1", "ReplicaSet", "orders-a", true, true))
+	tr := receive(t, res)
+	if !tr.Stalled {
+		t.Fatalf("stalled %v; want a stall", tr.Stalled)
+	}
+	wantIncomplete := "pod orders-a-1 has been stopping for 0.0 s and is not gone"
+	if len(tr.Incomplete) != 1 || tr.Incomplete[0] != wantIncomplete {
+		t.Errorf("incomplete %q; want just %q", tr.Incomplete, wantIncomplete)
+	}
+	if got, want := tr.LastEvent, "pod/orders-a-1: FailedKillPod: kill failed"; got != want {
+		t.Errorf("last event %q, want %q", got, want)
+	}
+}
+
+// A stall whose events cannot be listed gives no last event and the same stall.
+func TestTransitionStallWithoutListableEvents(t *testing.T) {
+	w, client, clock := startWatcher(t, nil, base()...)
+	client.PrependReactor("list", "events", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("connection refused")
+	})
+	ctx := t.Context()
+	exited := make(chan struct{})
+	res := make(chan Transition, 1)
+	go func() { res <- w.Transition(ctx, verdict.Deploy, clock.Now(), exited) }()
+	until(t, w, clock, func(s Transition) bool { return s.Name == verdict.Deploy })
+	update(t, client, deployment("orders", 2, 2, 2, 0, 2, 3)) // one new pod wanted, none updated
+	if _, err := client.AppsV1().ReplicaSets("orders").Create(ctx, replicaSet("orders-b", "orders"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().Pods("orders").Create(ctx, pod("orders-b-1", "b1", "ReplicaSet", "orders-b", false, false), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	close(exited)
+	tr := drive(t, clock, res)
+	if !tr.Stalled || tr.LastEvent != "" {
+		t.Errorf("stalled %v, last event %q; want a stall and no last event", tr.Stalled, tr.LastEvent)
+	}
+	if got := tr.Conditions(true)[0].Text; got != "did not finish within limits.timeout" {
+		t.Errorf("the stall's text %q changed", got)
+	}
+}

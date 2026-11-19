@@ -178,23 +178,35 @@ func (t *Tracker) takingPart() []Workload {
 }
 
 // details fills s's Incomplete and Unschedulable from the records as they are now, for the
-// workloads that take part in the open transition, with the stopping times counted to at.
-func (t *Tracker) details(s *Transition, at time.Time) {
+// workloads that take part in the open transition, with the stopping times counted to at. It
+// returns the objects those sentences name, each as kind/name with the kind in lower case, and,
+// for each Deployment they name, the ReplicaSets the Tracker maps to it.
+func (t *Tracker) details(s *Transition, at time.Time) map[string]bool {
 	part := t.takingPart()
-	s.Incomplete = t.incomplete(part, at)
+	var named map[string]bool
+	s.Incomplete, named = t.incomplete(part, at)
 	s.Unschedulable = t.unschedulable(part)
+	for rs, d := range t.owners {
+		if named["deployment/"+d] {
+			named["replicaset/"+rs] = true
+		}
+	}
+	return named
 }
 
 // incomplete returns, at the moment at, a sentence for each thing that keeps the workloads ws from
 // being complete, ws being those that take part, in their order. A workload that exists and is
 // not complete gives kubectl's message, then a sentence for each of its pods that is not gone and
 // not ready; one that is gone gives the number of its pods that are not gone. Then each of their
-// pods that is stopping and not gone gives how long it has been stopping.
-func (t *Tracker) incomplete(ws []Workload, at time.Time) []string {
+// pods that is stopping and not gone gives how long it has been stopping. It also returns the
+// objects those sentences name, each as kind/name with the kind in lower case: the workloads and
+// the pods.
+func (t *Tracker) incomplete(ws []Workload, at time.Time) ([]string, map[string]bool) {
 	part := make(map[Workload]bool, len(ws))
 	for _, w := range ws {
 		part[w] = true
 	}
+	named := map[string]bool{}
 	pods := t.sortedPods()
 	var out []string
 	for _, w := range ws {
@@ -208,6 +220,7 @@ func (t *Tracker) incomplete(ws []Workload, at time.Time) []string {
 		if !rec.gone.IsZero() {
 			if len(mine) > 0 {
 				out = append(out, fmt.Sprintf("%s was deleted and %d of its pods are not gone", w, len(mine)))
+				named[w.String()] = true
 			}
 			continue
 		}
@@ -216,9 +229,11 @@ func (t *Tracker) incomplete(ws []Workload, at time.Time) []string {
 			continue
 		}
 		out = append(out, w.String()+": "+msg)
+		named[w.String()] = true
 		for _, p := range mine {
 			if !podReady(p.obj) {
 				out = append(out, podSentence(p.obj))
+				named["pod/"+p.name] = true
 			}
 		}
 	}
@@ -226,9 +241,10 @@ func (t *Tracker) incomplete(ws []Workload, at time.Time) []string {
 		if w, ok := t.podWorkload(p); ok && part[w] && !p.deleting.IsZero() && p.gone.IsZero() {
 			out = append(out, fmt.Sprintf("pod %s has been stopping for %.1f s and is not gone",
 				p.name, at.Sub(p.deleting).Seconds()))
+			named["pod/"+p.name] = true
 		}
 	}
-	return out
+	return out, named
 }
 
 // podSentence says a pod's phase, why it is not scheduled, and the state of each of its
@@ -322,7 +338,8 @@ func (t *Tracker) InstallState(began, exited, now time.Time) (Install, bool, err
 		return Install{}, false, t.nothingWatched()
 	case !now.Before(began.Add(t.o.Timeout)):
 		text := "the install was not ready within limits.timeout"
-		for _, s := range t.incomplete(part, now) {
+		lines, _ := t.incomplete(part, now)
+		for _, s := range lines {
 			text += "\n" + s
 		}
 		return Install{}, false, verdict.Condition{Code: verdict.InstallFailed, Text: text}
