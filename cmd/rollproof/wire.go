@@ -78,6 +78,7 @@ func (w *wiring) create(ctx context.Context, cfg *config.Config, name string, ev
 		Namespace:     cfg.Deploy.Namespace,
 		Timeout:       cfg.Limits.Timeout,
 		Keep:          keep,
+		Evidence:      evidence,
 	}, w.engine)
 	if err != nil {
 		return nil, err
@@ -86,24 +87,29 @@ func (w *wiring) create(ctx context.Context, cfg *config.Config, name string, ev
 	if err != nil {
 		// run deletes no cluster whose Create failed, so this one is deleted here,
 		// unless it is kept or the run's context has ended (section 9, "Name and
-		// lifetime").
-		return nil, failedClientError(ctx, keep, c.Kept(), c.Delete, err)
+		// lifetime"). It leaves its logs in the evidence first.
+		return nil, failedClientError(ctx, keep, c.Kept(), c.CollectLogs, c.Delete, err)
 	}
 	return &session{c: c, client: client, cfg: cfg, evidence: evidence}, nil
 }
 
-// failedClientError is the error of a cluster that was made but whose client could not be: the
-// cluster is deleted unless it is kept or ctx has ended, and the text says so when the delete
-// fails too. A kept cluster's text ends with kept, the sentence its Kept gives. It follows
+// failedClientError is the error of a cluster that was made but whose client could not be: before
+// it keeps or deletes the cluster it takes the cluster's logs with collect, unless ctx has ended,
+// and then the cluster is deleted unless it is kept or ctx has ended; the text says so when the
+// delete fails too. A collection's error adds the sentence LogsNotCollected and its error to the
+// text. A kept cluster's text ends with kept, the sentence its Kept gives. It follows
 // internal/cluster's own clean-up after a failed step.
-func failedClientError(ctx context.Context, keep bool, kept string, del func(context.Context) error, clientErr error) error {
+func failedClientError(ctx context.Context, keep bool, kept string, collect, del func(context.Context) error, clientErr error) error {
 	c := verdict.Condition{Code: verdict.ClusterFailed,
 		Text: "the cluster's API server cannot be reached: " + clientErr.Error()}
-	if keep {
-		c.Text += ". " + capitalised(kept)
+	if ctx.Err() != nil {
 		return c
 	}
-	if ctx.Err() != nil {
+	if cerr := collect(ctx); cerr != nil {
+		c.Text += cluster.LogsNotCollected + cerr.Error()
+	}
+	if keep {
+		c.Text += ". " + capitalised(kept)
 		return c
 	}
 	if err := del(ctx); err != nil {
@@ -111,6 +117,22 @@ func failedClientError(ctx context.Context, keep bool, kept string, del func(con
 		return errors.Join(c, fmt.Errorf("the clean-up after it failed: %w", err))
 	}
 	return c
+}
+
+// storeFailed is the error of images.Store, after the cluster's logs were taken with collect for a
+// cluster-failed error while ctx has not ended; a collection's error adds the sentence
+// LogsNotCollected and its error to the condition's text. Any other error is returned as it is,
+// and collect is not called.
+func storeFailed(ctx context.Context, err error, collect func(context.Context) error) error {
+	c := verdict.AsCondition(err)
+	if c.Code != verdict.ClusterFailed || ctx.Err() != nil {
+		return err
+	}
+	if cerr := collect(ctx); cerr != nil {
+		c.Text += cluster.LogsNotCollected + cerr.Error()
+		return c
+	}
+	return err
 }
 
 // capitalised returns s with its first letter upper-cased, as internal/cluster's sentence is when
@@ -136,7 +158,8 @@ type session struct {
 var _ run.Cluster = (*session)(nil)
 
 // Store packages the tool's own binary as the probe's image and puts the
-// configuration's images in place.
+// configuration's images in place. A set-up that fails takes the cluster's logs
+// into the evidence before the error is returned (storeFailed).
 func (s *session) Store(ctx context.Context) (string, map[string]config.ImageRef, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -145,7 +168,7 @@ func (s *session) Store(ctx context.Context) (string, map[string]config.ImageRef
 	}
 	stored, err := images.Store(ctx, s.c, exe, s.cfg.Images, s.cfg.Limits.Timeout)
 	if err != nil {
-		return "", nil, err
+		return "", nil, storeFailed(ctx, err, s.c.CollectLogs)
 	}
 	return stored.Probe.Ref(), stored.Images, nil
 }

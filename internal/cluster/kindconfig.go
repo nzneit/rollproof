@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"fmt"
+	"io"
 	"time"
 
 	"sigs.k8s.io/kind/pkg/apis/config/v1alpha4"
@@ -19,6 +20,9 @@ type Spec struct {
 	Namespace                              string
 	Timeout                                time.Duration
 	Keep                                   bool
+	// Evidence is where a failed set-up's logs go: kind's under kind/ and the registry's as
+	// registry.log. Nil collects nothing.
+	Evidence func(name string) (io.WriteCloser, error)
 }
 
 const (

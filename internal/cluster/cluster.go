@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -56,6 +57,10 @@ const (
 // LeftBehind ends the failure text of Create when the clean-up after a failed step failed too. It
 // is exported for the command's own failure text, which must not drift from this one.
 const LeftBehind = ". Parts of the run may be left behind; the next run with this name removes them."
+
+// LogsNotCollected is added to a failure's text before the error of a collection that could not
+// finish. It is exported for the command's own failure text, which must not drift from this one.
+const LogsNotCollected = "; the cluster's logs were not all collected: "
 
 // kindCreate and kindDelete are the kind provider's Create and Delete, as step 3 of Create and
 // remove call them. A test replaces them.
@@ -135,14 +140,18 @@ type Cluster struct {
 
 	provider *kindcluster.Provider
 	nodes    []nodes.Node // in the order of Nodes
+	evidence func(name string) (io.WriteCloser, error)
 }
 
 // Create removes whatever an earlier run of this name left, then has the engine pull the node
 // image if its store lacks it, creates the cluster and its registry and returns when every node is
 // ready, DNS runs and both namespaces exist. Each node keeps an attempt to connect that had no
-// answer for 5 s (section 9). On an error it removes the run, unless s.Keep is set or ctx has
-// ended; when that removal fails too, parts stay behind and the text says so. An error is a
-// Condition with ClusterFailed. A name without the prefix rollproof- is an InternalError.
+// answer for 5 s (section 9). kind is always told to keep the nodes of an attempt that failed, so
+// that its logs can be read; the tool deletes them itself. A failure after kind's creation began
+// takes kind's logs and the registry's log into s.Evidence (section 10, "Evidence folder"). On an
+// error it removes the run, unless s.Keep is set or ctx has ended; when that removal fails too,
+// parts stay behind and the text says so. An error is a Condition with ClusterFailed. A name
+// without the prefix rollproof- is an InternalError.
 func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	if err := remove(ctx, e, s.Name, s.RunDir); err != nil {
 		var c verdict.Condition
@@ -161,20 +170,26 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 		Engine:     e,
 		Workers:    s.Workers,
 		provider:   e.provider(),
+		evidence:   s.Evidence,
 	}
 	// kindBegun says that kind's own creation of the cluster has begun: from then on a kept
-	// cluster has a kubeconfig file and a context to name.
+	// cluster has a kubeconfig file and a context to name, and a failure has logs to take.
 	kindBegun := false
 
-	// fail is the failure of a step: it removes what the run made, unless s.Keep is set or ctx has
-	// ended. A kept cluster whose kind creation began ends the text with the sentence Kept gives,
-	// so that the console names its kubeconfig and context (section 9). When the removal fails, the
-	// text says that parts may be left, and the removal's error is joined to the Condition for the
-	// log.
+	// fail is the failure of a step: it takes the cluster's logs into the evidence and removes
+	// what the run made, unless s.Keep is set or ctx has ended. A kept cluster whose kind creation
+	// began ends the text with the sentence Kept gives, so that the console names its kubeconfig
+	// and context (section 9). When the removal fails, the text says that parts may be left, and
+	// the removal's error is joined to the Condition for the log.
 	fail := func(step string, err error) (*Cluster, error) {
 		failure := verdict.Condition{Code: verdict.ClusterFailed, Text: step + ": " + err.Error()}
 		if ctx.Err() != nil {
 			return nil, failure
+		}
+		if kindBegun {
+			if cerr := collectLogs(ctx, e, c.provider, s.Name, s.RunDir, s.Evidence); cerr != nil {
+				failure.Text += LogsNotCollected + cerr.Error()
+			}
 		}
 		if s.Keep {
 			if kindBegun {
@@ -208,7 +223,9 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 		kindcluster.CreateWithV1Alpha4Config(KindConfig(s, e.Rootless)),
 		kindcluster.CreateWithKubeconfigPath(c.Kubeconfig),
 		kindcluster.CreateWithWaitForReady(0),
-		kindcluster.CreateWithRetain(s.Keep),
+		// Always kept by kind, whatever s.Keep says: a failed set-up takes the nodes' logs
+		// before the tool removes them itself.
+		kindcluster.CreateWithRetain(true),
 		kindcluster.CreateWithDisplayUsage(false),
 		kindcluster.CreateWithDisplaySalutation(false),
 	)
