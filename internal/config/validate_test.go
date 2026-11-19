@@ -355,12 +355,13 @@ func TestCustomImageForms(t *testing.T) {
 	custom := func(image string) string {
 		return variant(t, withImages, httpProbe, "probe:\n  custom:\n    image: \""+image+"\"\n    command: [sh]\n")
 	}
-	for _, image := range []string{"${images.probe.ref}", "registry.example/tools/busybox@${images.probe.digest}"} {
+	for _, image := range []string{"${images.probe.ref}", "registry.example/tools/busybox@${images.probe.digest}",
+		"${images.probe.repository}@${images.probe.digest}"} {
 		if _, err := loadText(t, custom(image)); err != nil {
 			t.Errorf("image %q: %v", image, err)
 		}
 	}
-	for _, image := range []string{"${images.probe.repository}", "x${images.probe.ref}"} {
+	for _, image := range []string{"${images.probe.repository}", "x${images.probe.ref}", "a@b@${images.probe.digest}"} {
 		_, err := loadText(t, custom(image))
 		rejected(t, err, "probe.custom.image")
 	}

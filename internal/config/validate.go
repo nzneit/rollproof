@@ -60,12 +60,15 @@ var (
 	imageNameRe   = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$`)
 	headerTokenRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
 	imageRefRe    = regexp.MustCompile(`^\$\{images\.[^}]+\.ref\}$`)
-	imageDigestRe = regexp.MustCompile(`^[^$]+@\$\{images\.[^}]+\.digest\}$`)
+	// imageDigestRe is a reference that ends in @${images.NAME.digest}, whose part before the @ is
+	// a literal repository, with no $ and no @ of its own, or exactly ${images.NAME.repository}.
+	imageDigestRe = regexp.MustCompile(`^(?:[^$@]+|\$\{images\.[^}]+\.repository\})@\$\{images\.[^}]+\.digest\}$`)
 )
 
 // imageHasDigest reports whether probe.custom.image, as Load reads it before the images are
 // stored, names a digest: a reference with @ and a digest, the form ${images.NAME.ref} alone, or
-// a reference that ends in @${images.NAME.digest}.
+// a reference that ends in @${images.NAME.digest}. Before that @ stands a literal repository or
+// ${images.NAME.repository}; a part that holds an @ of its own is refused.
 func imageHasDigest(image string) bool {
 	if imageRefRe.MatchString(image) || imageDigestRe.MatchString(image) {
 		return true

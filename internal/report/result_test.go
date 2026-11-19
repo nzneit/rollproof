@@ -329,8 +329,9 @@ func TestNoNulls(t *testing.T) {
 	// stopped_when_asked is null when the tool did not ask the probe to stop, stopped waiting for
 	// it, or failed while it stopped it (section 10). A transition's command is null for a restart,
 	// and its restart for a deploy and a rollback (plan decision 5). certificate_checked is null for
-	// a custom probe (plan decision 9).
-	keysThatMayBeNull := []string{"certificate_checked", "cluster", "command", "end", "first_failure", "first_observation", "install", "lag_ms", "last_failure", "quickest_stop_ms", "restart", "settled", "slowest_ms", "start", "stopped_when_asked"}
+	// a custom probe only (plan decision 9): a custom probe's null is checked and taken out before
+	// the walk, so that the key is not on this list and an HTTP probe's null is still caught.
+	keysThatMayBeNull := []string{"cluster", "command", "end", "first_failure", "first_observation", "install", "lag_ms", "last_failure", "quickest_stop_ms", "restart", "settled", "slowest_ms", "start", "stopped_when_asked"}
 	for _, r := range []Run{
 		{},
 		{
@@ -338,10 +339,11 @@ func TestNoNulls(t *testing.T) {
 			Windows:     []Window{{Name: "steady"}},
 			Install:     &Install{},
 			Transitions: []Transition{{Name: "deploy", Workloads: []Workload{{Workload: "deployment/orders"}}}},
-			Probes:      []Probe{{Kind: "http"}},
+			Probes:      []Probe{{Kind: "http", CertificateChecked: new(true)}},
 			Releases:    []Release{{Role: "candidate"}},
 			Images:      []Image{{Name: "orders"}},
 		},
+		{Probes: []Probe{{Kind: "custom"}}},
 	} {
 		b, err := encode(r)
 		if err != nil {
@@ -350,6 +352,16 @@ func TestNoNulls(t *testing.T) {
 		var v any
 		if err := json.Unmarshal(b, &v); err != nil {
 			t.Fatal(err)
+		}
+		for _, p := range v.(map[string]any)["probes"].([]any) {
+			p := p.(map[string]any)
+			if p["kind"] != "custom" {
+				continue
+			}
+			if c, ok := p["certificate_checked"]; !ok || c != nil {
+				t.Errorf("a custom probe's certificate_checked is %v (present %v), want null in\n%s", c, ok, b)
+			}
+			delete(p, "certificate_checked")
 		}
 		var found []string
 		nulls(v, "", &found)

@@ -17,18 +17,30 @@ import (
 // lines; the install's checks line, at 99 characters, is written whole.
 const detailWidth = 92
 
+// The lines of what a pass did not exercise that state facts of the built-in probe (section 10),
+// and the one line that a custom probe gives in their place.
+const (
+	notHeldConnections = "connections held open, and requests in flight on a pod after new connections left it"
+	notIngress         = "the path through an ingress, a load balancer or a mesh"
+	notLatency         = "latency below the timeout"
+	notCustomChecks    = "whatever the custom probe does not check"
+)
+
 // notExercised is what a pass did not exercise, in the design's order.
 var notExercised = []string{
 	"the delay before a larger cluster stops routing to a stopping pod",
-	"connections held open, and requests in flight on a pod after new connections left it",
-	"the path through an ingress, a load balancer or a mesh",
+	notHeldConnections,
+	notIngress,
 	"routing that depends on where the client is",
 	"capacity while pods are down, and autoscaling",
 	"storage that attaches to one node at a time",
-	"latency below the timeout",
+	notLatency,
 	"data migrations",
 	"a node drain",
 }
+
+// builtInOnly are the lines of notExercised that only the built-in probe's list holds.
+var builtInOnly = []string{notHeldConnections, notIngress, notLatency}
 
 // Console returns the text a run prints at its end, as section 10 shows it:
 // the verdict line, the releases, images, probe and install, one row for each
@@ -690,8 +702,9 @@ func exercisedLists(r Run) []string {
 }
 
 // notExercisedBy is the fixed list of what a pass did not exercise. With a custom probe, the
-// lines that state facts of the built-in probe, the design's second, third and seventh, give way
-// to one, in the second's place: "whatever the custom probe does not check".
+// lines that only the built-in probe's list holds are left out by their text, and
+// notCustomChecks stands where the first of them stood, so that a line that leaves the list does
+// not move the others.
 func notExercisedBy(r Run) []string {
 	custom := false
 	for _, p := range r.Probes {
@@ -700,8 +713,16 @@ func notExercisedBy(r Run) []string {
 	if !custom {
 		return notExercised
 	}
-	return slices.Concat(notExercised[:1], []string{"whatever the custom probe does not check"},
-		notExercised[3:6], notExercised[7:])
+	var out []string
+	for _, n := range notExercised {
+		switch {
+		case !slices.Contains(builtInOnly, n):
+			out = append(out, n)
+		case !slices.Contains(out, notCustomChecks):
+			out = append(out, notCustomChecks)
+		}
+	}
+	return out
 }
 
 // unreached reports whether every workload of tr has Probed yes or no and no
