@@ -78,9 +78,9 @@ func (f *follower) counts() (lines, jsonText int) {
 	return int(f.lines.Load()), int(f.jsonText.Load())
 }
 
-// run follows the log until it has ended for good or ctx ends. It returns the moment the last
-// stream ended, read with now when that stream returned: never later because of a wait for the
-// pod's status. It is zero when no stream opened.
+// run follows the log until it has ended for good or ctx ends. It returns the moment the log
+// ended: when a stream's end was its end, the moment that stream returned, read with now and
+// never later because of a wait for the pod's status; when an opening failed last, now.
 //
 // It opens the log from its start until a line has been read, and after that from the second of
 // the last line read; a failed opening is tried again after pollEvery while the container runs.
@@ -112,22 +112,23 @@ func (f *follower) run(ctx context.Context) (ended time.Time) {
 		}
 		rc, err := f.open(ctx, since)
 		if err != nil {
+			// No stream's end was the end of the log here, so the end is now.
 			switch {
 			case ctx.Err() != nil:
 				if reopen {
 					f.gap(time.Time{})
 				}
-				return ended
+				return f.now()
 			case !f.running(ctx):
 				if reopen {
 					f.gap(time.Time{})
 				}
-				return ended
+				return f.now()
 			case !pause(ctx, pollEvery):
 				if reopen {
 					f.gap(time.Time{})
 				}
-				return ended
+				return f.now()
 			}
 			continue
 		}

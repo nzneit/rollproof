@@ -355,14 +355,15 @@ func TestRunHTTPResolvesOnce(t *testing.T) {
 	}
 }
 
-// serveOn starts an HTTP server on addr that counts its requests, and returns its address.
-func serveOn(t *testing.T, addr string, hits *atomic.Int64) string {
+// serveOn starts an HTTP server on addr that calls hit for each request, and returns its
+// address.
+func serveOn(t *testing.T, addr string, hit func()) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) })}
+	srv := &http.Server{Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit() })}
 	t.Cleanup(func() { srv.Close() })
 	go srv.Serve(ln)
 	return ln.Addr().String()
@@ -372,24 +373,40 @@ func serveOn(t *testing.T, addr string, hits *atomic.Int64) string {
 // first answered, does not replace it (section 6, "Names").
 func TestRunHTTPKeepsTheFirstAddress(t *testing.T) {
 	var firstHits, secondHits atomic.Int64
-	firstAddr := serveOn(t, "127.0.0.1:0", &firstHits)
+	reached := make(chan struct{}) // a request has reached the first server
+	var reachedOnce sync.Once
+	firstAddr := serveOn(t, "127.0.0.1:0", func() {
+		firstHits.Add(1)
+		reachedOnce.Do(func() { close(reached) })
+	})
 	_, port, err := net.SplitHostPort(firstAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The second server is on the same port at a second loopback address, so a dial to it can be
 	// told from a dial to the first.
-	secondAddr := serveOn(t, "127.0.0.2:"+port, &secondHits)
+	secondAddr := serveOn(t, "127.0.0.2:"+port, func() { secondHits.Add(1) })
 	var calls atomic.Int64
-	replaceLookup(t, func(context.Context, string) ([]string, error) {
-		switch n := calls.Add(1); {
-		case n == 1:
-			time.Sleep(300 * time.Millisecond) // let other requests begin their own lookups
+	secondBegan := make(chan struct{}) // a second lookup has begun
+	var secondOnce sync.Once
+	replaceLookup(t, func(ctx context.Context, _ string) ([]string, error) {
+		if calls.Add(1) == 1 {
+			// The first lookup answers only once another request has begun its own lookup.
+			select {
+			case <-secondBegan:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 			return []string{"127.0.0.1"}, nil
-		default:
-			time.Sleep(500 * time.Millisecond) // answer after the first lookup has been kept
-			return []string{"127.0.0.2"}, nil
 		}
+		secondOnce.Do(func() { close(secondBegan) })
+		// A later lookup answers only once the first address was kept and a request reached it.
+		select {
+		case <-reached:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return []string{"127.0.0.2"}, nil
 	})
 	obs := runFor(t, testOptions("http://probe-target.test:"+port+"/"), 800*time.Millisecond).observations(t)
 	if n := calls.Load(); n < 2 {

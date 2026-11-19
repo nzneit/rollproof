@@ -435,7 +435,7 @@ const fakeFailsLine = "the fake run returns 1"
 var sigintIgnored = signal.Ignored(syscall.SIGINT)
 
 // skipIfSIGINTIgnored skips a test that sends SIGINT to a child that would
-// inherit SIGINT ignored. The tool then ends by the design's fallback, exit 130
+// inherit SIGINT ignored. The tool then ends by raise's fallback, exit 130
 // after 2 s, and not by the signal.
 func skipIfSIGINTIgnored(t *testing.T) {
 	t.Helper()

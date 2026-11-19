@@ -2,6 +2,7 @@ package watch
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -168,4 +169,28 @@ func TestInstallSettlingBeforeTheInstallIsReady(t *testing.T) {
 		}
 	}()
 	NewTracker(options()).InstallSettling(at(5), at(20))
+}
+
+// The lists of an ended settling belong to the caller: overwriting them changes nothing in the
+// answer of a later call.
+func TestInstallSettlingOwnsItsLists(t *testing.T) {
+	o := options()
+	o.Timeout = 20 * time.Second
+	tr := readyAt2(t, o)
+	play(tr, []ev{set(18, deployment("orders", 1, 1, 2, 2, 1, 2))}) // the install fails at +20 s
+	tr.watchDown("pods", at(3))                                     // missed changes in the window
+	got, ended := tr.InstallSettling(at(30), at(30))
+	if !ended || len(got.Restarts) == 0 || len(got.Before) == 0 || len(got.InWindow) == 0 {
+		t.Fatalf("settling %+v, ended %v; want an ended one with restarts, conditions before and in the window", got, ended)
+	}
+	want := got
+	want.Restarts, want.Before, want.InWindow = slices.Clone(got.Restarts), slices.Clone(got.Before), slices.Clone(got.InWindow)
+	changed := verdict.Condition{Code: verdict.Interrupted, Text: "changed by the caller"}
+	got.Restarts[0] = "changed by the caller"
+	got.Before[0] = changed
+	got.InWindow[0] = changed
+	again, _ := tr.InstallSettling(at(30), at(31))
+	if diff := cmp.Diff(want, again, cmpopts.EquateEmpty()); diff != "" {
+		t.Errorf("a later call after the caller changed the lists (-want +got):\n%s", diff)
+	}
 }

@@ -408,4 +408,9 @@ func TestLastFailure(t *testing.T) {
 	if got := d.Windows[1].LastFailure; !got.IsZero() {
 		t.Errorf("the steady window's LastFailure = %v, want zero", got)
 	}
+	// The failure that began before the install window is counted in it, and is its first.
+	if w := d.Windows[0]; w.Checks != 3004 || w.Failed != 4 || !w.FirstFailure.Equal(at(-16*sec)) {
+		t.Errorf("the install window has %d checks, %d failed, the first at %v; want 3004, 4, and %v",
+			w.Checks, w.Failed, w.FirstFailure, at(-16*sec))
+	}
 }

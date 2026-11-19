@@ -906,6 +906,32 @@ func TestStopAfterAStartThatPanicked(t *testing.T) {
 	}
 }
 
+// A Start that panics before its run exists, in the create of its pod, followed nothing: Stop
+// gives an error, so that the stop is not read as one that the probe obeyed, and gives it again
+// at a second call. It closes Events.
+func TestStopAfterAStartThatPanickedBeforeItsRun(t *testing.T) {
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s.client.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		panic("a fault of the API client")
+	})
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Start did not panic")
+			}
+		}()
+		s.pod.Start(context.Background())
+	}()
+	const want = "the probe's start failed before its log was followed"
+	for _, call := range []string{"Stop", "second Stop"} {
+		f, err := s.pod.Stop(context.Background())
+		if err == nil || err.Error() != want || f != (Facts{}) {
+			t.Errorf("%s = %+v, %v; want no facts and the error %q", call, f, err, want)
+		}
+	}
+	closedWithin(t, s.pod.Events(), time.Second)
+}
+
 // slowClient is a client whose pod gets and deletes, once slow is set, wait until their context
 // ends. client-go's fake gives its reactors no context, and holds its lock while one runs.
 type slowClient struct {
@@ -1099,6 +1125,82 @@ func TestStopWhileThePodsStatusLags(t *testing.T) {
 			t.Errorf("event %d = %+v, want the gap, first at the last line read", i+2, e)
 		}
 	}
+}
+
+// holdStopDeletes makes the stop's delete of the probe's pod, the one with a grace period, keep
+// the pod, which reads as it did, and calls held when held is not nil. The replace that Start
+// makes, with a grace period of 0, deletes as the fake client does.
+func (s probeSetup) holdStopDeletes(held func()) {
+	s.client.PrependReactor("delete", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		g := a.(k8stesting.DeleteAction).GetDeleteOptions().GracePeriodSeconds
+		if g == nil || *g == 0 {
+			return false, nil, nil
+		}
+		if held != nil {
+			held()
+		}
+		return true, nil, nil
+	})
+}
+
+// No stream's end was the end of the log when every opening after the last stream failed, or
+// when none opened: the probe did not stop when asked, whatever the moment the last stream ended
+// (section 6).
+func TestStopWhenNoStreamEndedTheLog(t *testing.T) {
+	t.Run("a stream ends before the ask, and every opening fails until the pod is gone after the drain", func(t *testing.T) {
+		const drain = 200 * time.Millisecond
+		s := newProbe(t, &fakeLog{}, runningStatus(), drain, 5*time.Second)
+		failing := make(chan struct{})
+		var opens atomic.Int32
+		var once sync.Once
+		s.pod.open = func(context.Context, *time.Time) (io.ReadCloser, error) {
+			if opens.Add(1) == 1 {
+				return io.NopCloser(strings.NewReader(logLine(logAt(400), `{"ok":true}`))), nil
+			}
+			once.Do(func() { close(failing) })
+			return nil, errors.New("the API server refused the log")
+		}
+		var deleted atomic.Bool
+		s.holdStopDeletes(func() { deleted.Store(true) })
+		s.client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			if !deleted.Load() {
+				return false, nil, nil
+			}
+			// The first reading after the stop's delete finds the pod gone, a second after the
+			// ask by the clock, which is after the drain.
+			s.clock.Set(logAt(1700))
+			return true, nil, apierrors.NewNotFound(corev1.Resource("pods"), "probe")
+		})
+		s.clock.Set(logAt(700))
+		if _, err := s.pod.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-failing: // the stream ended before the ask, and the reopen it owes fails
+		case <-time.After(2 * time.Second):
+			t.Fatal("the log was not opened again")
+		}
+		go allEvents(s.pod.Events())
+		f, err := s.pod.Stop(context.Background())
+		if err != nil || f.StoppedWhenAsked {
+			t.Errorf("Stop = %+v, %v; want StoppedWhenAsked false and no error", f, err)
+		}
+	})
+	t.Run("no opening succeeds, and the wait runs out", func(t *testing.T) {
+		s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 100*time.Millisecond)
+		s.pod.open = func(context.Context, *time.Time) (io.ReadCloser, error) {
+			return nil, errors.New("the API server refused the log")
+		}
+		s.holdStopDeletes(nil)
+		go allEvents(s.pod.Events())
+		if _, err := s.pod.Start(context.Background()); condition(err).Code != verdict.ProbeNotStarted {
+			t.Fatalf("Start = %v, want probe-not-started", err)
+		}
+		f, err := s.pod.Stop(context.Background())
+		if err != nil || f.StoppedWhenAsked {
+			t.Errorf("Stop after the failed Start = %+v, %v; want StoppedWhenAsked false and no error", f, err)
+		}
+	})
 }
 
 // An event goes into Events while it has room, also after the run's context ended: the gap that

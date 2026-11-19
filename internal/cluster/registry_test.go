@@ -51,6 +51,32 @@ func TestStartRegistryCountsItsOwnLimit(t *testing.T) {
 	}
 }
 
+// The limit covers the registry container's start too: a start that used the whole limit is said
+// to have done so, and no deadline that no request met is named.
+func TestStartRegistryWhenTheContainersStartUsedTheLimit(t *testing.T) {
+	// The fake engine's run returns only after the limit has passed, as a slow pull of the image
+	// would; its inspect names an address for the nodes.
+	script := filepath.Join(t.TempDir(), "engine")
+	body := "#!/bin/sh\n" +
+		"if [ \"$1\" = run ]; then\n" +
+		"  sleep 0.5\n" +
+		"fi\n" +
+		"if [ \"$1\" = inspect ]; then\n" +
+		"  echo '[{\"NetworkSettings\":{\"Networks\":{\"kind\":{\"IPAddress\":\"10.0.0.2\"}}}}]'\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const limit = 200 * time.Millisecond
+	push, node, err := startRegistry(context.Background(), Engine{Binary: script},
+		"rollproof-test-registry", "registry:3", limit)
+	want := "the registry's container started after its limit of 200ms ran out"
+	if err == nil || err.Error() != want {
+		t.Errorf("startRegistry = %q, %q, %v; want the error %q", push, node, err, want)
+	}
+}
+
 // The registry wait reports the last answer the registry gave, not the deadline's end of a request
 // in flight; it names the deadline only when no answer came at all.
 func TestWaitForRegistryReportsTheLastAnswer(t *testing.T) {

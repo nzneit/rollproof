@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1405,6 +1406,48 @@ func TestASignalDuringTheProbesStart(t *testing.T) {
 	w.probeStopNotJudged(noteNotAsked)
 }
 
+// A Start that failed other than by its context had begun its own stop, also when a signal came
+// meanwhile: Stop is asked for what that stop left. When the signal cut that stop, the entry says
+// so; when the stop had completed, its Facts are kept.
+func TestASignalDuringAFailedStartsStop(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		stopErr error
+	}{
+		{"the signal cut the stop", context.Canceled},
+		{"the stop had completed", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			w.hooks["start"] = cancel
+			w.probe.startErr = verdict.Condition{Code: verdict.ProbeNotStarted, Text: "no observation within limits.timeout"}
+			w.probe.stopErr = c.stopErr
+			w.probe.facts = probe.Facts{Lines: 3, JSONTextLines: 1, StoppedWhenAsked: true}
+			w.probe.linesRead, w.probe.jsonTextRead = 7, 2
+			if code := w.run(ctx); code != 2 {
+				t.Errorf("exit %d, want 2", code)
+			}
+			if diff := cmp.Diff([]string{"interrupted"}, w.result().codes()); diff != "" {
+				t.Errorf("reasons (-want +got):\n%s", diff)
+			}
+			if n := w.calls.count("probe-stop"); n != 1 {
+				t.Errorf("the probe's Stop was called %d times, want 1", n)
+			}
+			if c.stopErr != nil {
+				w.probeStopNotJudged(noteCutBySignal)
+				return
+			}
+			r := w.result()
+			if len(r.Probes) != 1 || r.Probes[0].StoppedWhenAsked == nil || !*r.Probes[0].StoppedWhenAsked ||
+				r.Probes[0].Lines != 3 || r.Probes[0].JSONLinesWithoutOK != 1 {
+				t.Errorf("probes %+v, want one with the Facts of the stop: stopped when asked, 3 lines, 1 JSON text", r.Probes)
+			}
+		})
+	}
+}
+
 // Section 7, "When the tool fails": a command that still runs is stopped before the probe.
 func TestCommandsEndBeforeTheProbeStops(t *testing.T) {
 	w := newWorld(t)
@@ -1610,6 +1653,52 @@ func TestADecisionAfterASignalThatPanics(t *testing.T) {
 	}
 }
 
+// The decision that places a signal beside a failure of the tool panics after Decide, while it
+// keeps the pods of a first failure that the probe's last lines brought: that decision keeps
+// nothing, so the verdict kept is the one decided at the failure, and the signal is reported once,
+// as one after the verdict.
+func TestADecisionThatPanicsWhileItKeepsThePods(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var armed atomic.Bool
+	w.hooks["transition-deploy"] = func() {
+		w.clock.Advance(2 * time.Second)
+		at := w.clock.Now().Add(-time.Second).Sub(t0)
+		w.probe.last = []probe.Event{failureAt(at, at)} // a failed check in the deploy window
+		panic("the watcher broke")
+	}
+	w.hooks["probe-stop"] = func() {
+		armed.Store(true)
+		cancel()
+	}
+	w.hooks["pods-at"] = func() {
+		if armed.Load() {
+			panic("the watch unit broke")
+		}
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			t.Fatalf("Run panicked: %v", p)
+		}
+	}()
+	if code := w.run(ctx); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if n := r.count("interrupted"); n != 0 {
+		t.Errorf("%d interrupted reasons, want none: the decision that placed the signal kept nothing; reasons %q", n, r.codes())
+	}
+	if n := w.calls.count("probe-stop"); n != 1 {
+		t.Errorf("the probe's Stop was called %d times, want 1", n)
+	}
+	want := []string{"the tool failed after the verdict was decided: the watch unit broke",
+		"interrupted after the verdict was decided"}
+	if diff := cmp.Diff(want, r.Warnings); diff != "" {
+		t.Errorf("warnings (-want +got):\n%s", diff)
+	}
+}
+
 // Counts is read once, by the first record: a rewrite of result.json for a later warning gives
 // the same counts, also when the probe's counts have moved on since.
 func TestTheProbesCountsAreReadOnce(t *testing.T) {
@@ -1803,6 +1892,25 @@ func TestAFailedStartWhoseStopFailedWarns(t *testing.T) {
 	}
 	if n := w.calls.count("probe-stop"); n != 1 {
 		t.Errorf("the probe's Stop was called %d times after a failed start, want 1", n)
+	}
+	w.probeStopNotJudged(noteStopFailed)
+}
+
+// A Start that panicked before its log was followed gives an error at Stop: the tool did not
+// finish asking, so the probe's stop is not judged and its pod may still be there.
+func TestAStartThatPanicsWhoseStopGivesAnError(t *testing.T) {
+	w := newWorld(t)
+	w.hooks["start"] = func() { panic("the probe unit broke") }
+	w.probe.stopErr = errors.New("the probe's start failed before its log was followed")
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if codes := r.codes(); !slices.Contains(codes, "internal-error") {
+		t.Errorf("reasons %q, want internal-error among them", codes)
+	}
+	if len(r.Warnings) != 1 || !strings.Contains(r.Warnings[0], "its pod may still be there") {
+		t.Errorf("warnings %q, want the stop's one", r.Warnings)
 	}
 	w.probeStopNotJudged(noteStopFailed)
 }

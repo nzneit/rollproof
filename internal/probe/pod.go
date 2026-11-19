@@ -476,8 +476,8 @@ func (p *Pod) end(f Facts, err error) {
 // at most stopMargin. After Start, before it asks the probe to stop, it reads the pod once more,
 // so that an exit since the watcher's last reading is still a fault. Before Start it closes
 // Events, gives no Facts and no error, and ends the Pod, so that a later Start gives an error.
-// After a Start that panicked once its follower and watcher ran, it stops them and the pod as
-// after Start, without that last reading.
+// After a Start that panicked, it stops what that Start ran as after Start, without that last
+// reading, or, when no log was followed yet, closes Events and gives an error.
 func (p *Pod) Stop(ctx context.Context) (Facts, error) {
 	p.mu.Lock()
 	stage, r := p.state, p.run
@@ -489,8 +489,15 @@ func (p *Pod) Stop(ctx context.Context) (Facts, error) {
 	p.state = stageEnded
 	p.mu.Unlock()
 	switch {
+	case r == nil && stage == stageStarting:
+		// A Start that panicked before its run existed: no log was followed, and its pod, when
+		// the create had succeeded, is left as it is.
+		err := errors.New("the probe's start failed before its log was followed")
+		p.end(Facts{}, err)
+		p.closeEvents()
+		return Facts{}, err
 	case r == nil:
-		// Before Start, or after a Start that panicked before its run existed: nothing runs.
+		// Before Start: nothing runs.
 		p.closeEvents()
 		return Facts{}, nil
 	case stage == stageStarted:
@@ -560,8 +567,9 @@ func (p *Pod) halt(ctx context.Context, r *probeRun) (Facts, error) {
 
 	// When the wait ran out, the follower's last stream may have ended inside the drain while the
 	// pod's status lagged: the rule then reads when it ended. A stream that the cut itself ended
-	// did not end before the wait ran out, whatever the clock says. A stop that its context ended
-	// is not judged.
+	// did not end before the wait ran out, whatever the clock says. When an opening failed last,
+	// no stream's end was the end of the log, and the follower gives the moment it returned. A
+	// stop that its context ended is not judged.
 	stopped := ctxErr == nil && (endedBefore || r.endedAt.Sub(asked) < p.o.Drain) &&
 		(ranOut.IsZero() || r.endedAt.Before(ranOut))
 

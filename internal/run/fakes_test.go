@@ -391,9 +391,11 @@ func (f *fakeWatcher) wait(ctx context.Context, exited <-chan struct{}) {
 	}
 }
 
-// PodsAt records the moment it was asked about and gives the scripted pods.
+// PodsAt records the moment it was asked about, runs the hook "pods-at" and gives the scripted
+// pods.
 func (f *fakeWatcher) PodsAt(at time.Time) (stopping, starting []watch.PodNote) {
 	f.podsAt = append(f.podsAt, at)
+	f.w.hook("pods-at")
 	return f.stopping, f.starting
 }
 

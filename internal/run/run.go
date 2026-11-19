@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -331,15 +332,16 @@ func (s *runState) installStep(ctx context.Context) bool {
 
 // startProbe performs step 9: the probe and its first observation. The goroutine that reads the
 // probe's events starts before the probe does, so that no event waits for a reader; it is the
-// only reader of them until the probe is stopped. A start that failed has stopped the probe,
-// unless a signal ended the run, and Stop is asked for what that stop left.
+// only reader of them until the probe is stopped. A start that failed, other than by its
+// context, has begun its own stop, and Stop gives what that stop left without a new call, also
+// after a signal; a start that its context ended left the pod as it is (section 6).
 func (s *runState) startProbe(ctx context.Context) bool {
 	p := s.cluster.Probe(s.cfg, s.probeImage, s.ev.file("probe.log"))
 	s.probe = p
 	s.readEvents(p.Events())
 	st, err := p.Start(ctx)
 	if err != nil {
-		if ctx.Err() == nil {
+		if ctx.Err() == nil || !errors.Is(err, ctx.Err()) {
 			s.takeStop(ctx)
 		}
 		return s.beforeFail(ctx, err)
@@ -671,8 +673,9 @@ func (s *runState) decide(final bool) verdict.Decision {
 	if final {
 		d = s.passedWithAWindowOpen(t, d)
 	}
-	s.decision = d
+	// The pods are kept before the decision is, so that a decision that panicked kept nothing.
 	s.keepFirstFailures(d)
+	s.decision = d
 	return d
 }
 
