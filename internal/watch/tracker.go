@@ -133,6 +133,9 @@ type podRecord struct {
 type transition struct {
 	t      Transition
 	exited time.Time // when its command exited; zero until then
+	// finishes counts the times it came to be finished, also when a settle restart and a new
+	// finish fall at one moment and leave Finished as it was.
+	finishes int
 	// atStart holds the pods that the transition may replace: those recorded at Begin whose
 	// first sight is at or before its start and that were not gone by then.
 	atStart map[types.UID]bool
@@ -337,14 +340,15 @@ func (t *Tracker) windowOpen() bool {
 	return tr != nil && tr.t.Ended.IsZero()
 }
 
-// openFinish gives the open transition's name and Finished. At is zero when no window is open or
-// the open transition has not finished.
-func (t *Tracker) openFinish() Finish {
+// openFinish gives the open transition's name and Finished, and how many times it has come to be
+// finished. At is zero and the count is 0 when no window is open; At is zero when the open
+// transition is not finished now.
+func (t *Tracker) openFinish() (Finish, int) {
 	if !t.windowOpen() {
-		return Finish{}
+		return Finish{}, 0
 	}
 	tr := t.current()
-	return Finish{Name: tr.t.Name, At: tr.t.Finished}
+	return Finish{Name: tr.t.Name, At: tr.t.Finished}, tr.finishes
 }
 
 // State returns the transition so far, and whether its window has ended: it finished and the
@@ -466,6 +470,7 @@ func (t *Tracker) afterChange(c change, at time.Time) {
 	}
 	if t.finished() {
 		tr.t.Finished = at
+		tr.finishes++
 	}
 }
 

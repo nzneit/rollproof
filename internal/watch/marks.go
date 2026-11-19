@@ -86,22 +86,25 @@ func (q *finishQueue) run(stop <-chan struct{}) {
 	}
 }
 
-// noteFinish queues a Finish when the open transition has come to be finished at a moment other
-// than the last one queued for it. Call it under mu after each call into tr that can finish a
-// transition.
+// noteFinish queues a Finish when the open transition has come to be finished more times than
+// the Finishes queued for it, also when it came to be finished again at the moment of the last
+// one. Call it under mu after each call into tr that can finish a transition: each such call
+// finishes it at most once.
 func (w *Watcher) noteFinish() {
-	f := w.tr.openFinish()
-	if f.At.IsZero() || f.At.Equal(w.queued) {
+	f, n := w.tr.openFinish()
+	if n <= w.queued {
 		return
 	}
-	w.queued = f.At
+	w.queued = n
 	w.finishes.push(f)
 }
 
 // podList is a PodList of every pod that the Tracker holds and that is not gone, by name. Its
 // items are copies of the pods, so that it can be encoded after the caller's lock is released.
 func (t *Tracker) podList() corev1.PodList {
-	list := corev1.PodList{TypeMeta: metav1.TypeMeta{Kind: "PodList", APIVersion: "v1"}}
+	// Items is never nil, so that a namespace with no pod gives a list, as the API server does.
+	list := corev1.PodList{TypeMeta: metav1.TypeMeta{Kind: "PodList", APIVersion: "v1"},
+		Items: []corev1.Pod{}}
 	for _, p := range t.pods {
 		if p.gone.IsZero() {
 			list.Items = append(list.Items, *p.obj)

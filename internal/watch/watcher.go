@@ -33,10 +33,11 @@ type Options struct {
 	Workers             int
 	Service             *types.NamespacedName
 	Now                 func() time.Time
-	// Evidence opens a file of the evidence folder by a name that may hold folders, such
-	// as pods/deploy-before.json. The Watcher writes the pod lists through it,
-	// and ignores its errors and its writers' errors: a caller that needs them
-	// wraps the writer, as run's evidence does. Nil writes nothing.
+	// Evidence opens a file of the evidence folder by a name that may hold
+	// folders, such as pods/deploy-before.json. The Watcher writes the pod
+	// lists through it, and ignores its errors and its writers' errors: a
+	// caller that needs them wraps the writer, as run's evidence does. Nil
+	// writes nothing. It may be called from several goroutines at once.
 	Evidence func(name string) (io.WriteCloser, error)
 }
 
@@ -52,8 +53,8 @@ type Watcher struct {
 	// while it is held, so that tr is told its times in order. Nothing that waits is done under it.
 	mu sync.Mutex
 	tr *Tracker
-	// queued is the last moment queued on finishes for the open transition; zero when none was.
-	queued time.Time
+	// queued is how many Finishes of the open transition have been queued on finishes.
+	queued int
 	// finishes is the queue behind Finishes. Its goroutine runs from Start until Stop.
 	finishes *finishQueue
 	// service is the Service whose endpoints Transition reads: Options.Service unless UseService
@@ -144,8 +145,9 @@ func Start(ctx context.Context, client kubernetes.Interface, o Options) (*Watche
 	return w, nil
 }
 
-// Stop stops following. It returns when no goroutine of the Watcher runs and the channel of
-// Finishes is closed; a Finish not received by then is dropped. It is safe to call twice.
+// Stop stops following. It returns when every goroutine that Start began has ended and the
+// channel of Finishes is closed; a Finish not received by then is dropped. It is safe to call
+// twice.
 func (w *Watcher) Stop() {
 	w.stopOnce.Do(func() {
 		close(w.stop)
@@ -228,7 +230,7 @@ func (w *Watcher) InstallSettled(ctx context.Context, first time.Time) Settling 
 func (w *Watcher) Transition(ctx context.Context, name verdict.WindowName, began time.Time, exited <-chan struct{}) Transition {
 	w.mu.Lock()
 	w.tr.Begin(name, began)
-	w.queued = time.Time{}
+	w.queued = 0
 	before := w.tr.podList()
 	w.mu.Unlock()
 	var writes sync.WaitGroup

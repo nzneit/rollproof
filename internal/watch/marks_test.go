@@ -2,10 +2,12 @@ package watch
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -212,5 +214,148 @@ func TestPodListsBeforeAndAfter(t *testing.T) {
 		if d := cmp.Diff(want, got); d != "" {
 			t.Errorf("%s (-want +got):\n%s", name, d)
 		}
+	}
+}
+
+// receiveFinishes takes n values from w.Finishes, failing the test when one does not come within
+// 1 s of real time.
+func receiveFinishes(t *testing.T, w *Watcher, n int) []Finish {
+	t.Helper()
+	var got []Finish
+	for range n {
+		select {
+		case f := <-w.Finishes():
+			got = append(got, f)
+		case <-time.After(time.Second):
+			t.Fatalf("finish %d of %d did not come within 1 s; got %+v", len(got)+1, n, got)
+		}
+	}
+	return got
+}
+
+// A change of spec of the watched Deployment, told at the very moment the transition finished,
+// starts its settle time again and finishes it again at once: two Finishes, both at that moment.
+func TestFinishesWhenTheSettleTimeStartsAgainAtTheSameMoment(t *testing.T) {
+	w, client, clock := startWatcher(t, nil, base()...)
+	exited, res := startDeploy(t, w, client, clock)
+	close(exited)
+	var f time.Time
+	until(t, w, clock, func(s Transition) bool { f = s.Finished; return !f.IsZero() })
+	update(t, client, deployment("orders", 3, 3, 2, 2, 2, 2)) // the clock is still at f
+	until(t, w, clock, func(s Transition) bool { return len(s.SettleRestarts) == 1 && s.Finished.Equal(f) })
+
+	drive(t, clock, res)
+	got := receiveFinishes(t, w, 2)
+	want := []Finish{{Name: verdict.Deploy, At: f}, {Name: verdict.Deploy, At: f}}
+	if d := cmp.Diff(want, got); d != "" {
+		t.Errorf("finishes (-want +got):\n%s", d)
+	}
+}
+
+// The last condition, met when the second of two deleted pods is gone, gives a Finish at that
+// moment: the gone path notes it.
+func TestFinishesWhenAPodIsGone(t *testing.T) {
+	w, client, clock := startWatcher(t, nil, base()...)
+	ctx := t.Context()
+	exited := make(chan struct{})
+	res := make(chan Transition, 1)
+	go func() { res <- w.Transition(ctx, verdict.Deploy, clock.Now(), exited) }()
+	until(t, w, clock, func(s Transition) bool { return s.Name == verdict.Deploy })
+	clock.Advance(time.Second)
+	update(t, client, deployment("orders", 2, 1, 2, 2, 2, 2))
+	if _, err := client.AppsV1().ReplicaSets("orders").Create(ctx, replicaSet("orders-b", "orders"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []*corev1.Pod{
+		pod("orders-b-1", "b1", "ReplicaSet", "orders-b", true, false),
+		pod("orders-b-2", "b2", "ReplicaSet", "orders-b", true, false),
+	} {
+		if _, err := client.CoreV1().Pods("orders").Create(ctx, p, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	update(t, client, pod("orders-a-1", "a1", "ReplicaSet", "orders-a", true, true))
+	update(t, client, pod("orders-a-2", "a2", "ReplicaSet", "orders-a", true, true))
+	update(t, client, deployment("orders", 2, 2, 2, 2, 2, 2))
+	close(exited)
+	// Every condition but the last holds: the command has exited, the rollout is complete, and the
+	// two old pods are deleted and not gone.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		w.mu.Lock()
+		tr := w.tr.current()
+		ready := !tr.exited.IsZero() && w.tr.workloads[orders].generation == 2 &&
+			w.tr.pods["a1"] != nil && !w.tr.pods["a1"].deleting.IsZero() &&
+			w.tr.pods["a2"] != nil && !w.tr.pods["a2"].deleting.IsZero() &&
+			w.tr.pods["b1"] != nil && w.tr.pods["b2"] != nil
+		finished := tr.t.Finished
+		w.mu.Unlock()
+		if ready {
+			if !finished.IsZero() {
+				t.Fatalf("finished at %v while two deleted pods are not gone", finished)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the deploy's changes were not told within 5 s")
+		}
+	}
+	clock.Advance(2 * time.Second)
+	for _, name := range []string{"orders-a-1", "orders-a-2"} {
+		if err := client.CoreV1().Pods("orders").Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tr := drive(t, clock, res)
+	if !tr.Finished.Equal(at(3)) {
+		t.Errorf("finished %v, want +3 s", tr.Finished)
+	}
+	want := []Finish{{Name: verdict.Deploy, At: at(3)}}
+	if d := cmp.Diff(want, receiveFinishes(t, w, 1)); d != "" {
+		t.Errorf("finishes (-want +got):\n%s", d)
+	}
+}
+
+// A transition whose ctx ends before its window has ended still writes its after list.
+func TestPodListAfterWhenCtxEnds(t *testing.T) {
+	ev := newEvidence()
+	w, _, clock := startWatcherWith(t, func(o *Options) { o.Evidence = ev.open }, nil, base()...)
+	ctx, cancel := context.WithCancel(t.Context())
+	res := make(chan Transition, 1)
+	go func() { res <- w.Transition(ctx, verdict.Deploy, clock.Now(), make(chan struct{})) }()
+	until(t, w, clock, func(s Transition) bool { return s.Name == verdict.Deploy })
+	cancel()
+	receive(t, res)
+	var list corev1.PodList
+	if err := json.Unmarshal([]byte(ev.text(t, "pods/deploy-after.json")), &list); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range list.Items {
+		got = append(got, p.Name)
+	}
+	if d := cmp.Diff([]string{"orders-a-1", "orders-a-2"}, got); d != "" {
+		t.Errorf("pods/deploy-after.json (-want +got):\n%s", d)
+	}
+}
+
+// A namespace with no pod gives a list with no items, not a null one, indented at two spaces and
+// ended by a newline.
+func TestPodListsOfAnEmptyNamespace(t *testing.T) {
+	ev := newEvidence()
+	w, _, clock := startWatcherWith(t, func(o *Options) { o.Evidence = ev.open }, nil,
+		deployment("orders", 1, 1, 0, 0, 0, 0))
+	ctx, cancel := context.WithCancel(t.Context())
+	res := make(chan Transition, 1)
+	go func() { res <- w.Transition(ctx, verdict.Deploy, clock.Now(), make(chan struct{})) }()
+	text := ev.text(t, "pods/deploy-before.json")
+	cancel()
+	receive(t, res)
+	for _, want := range []string{"\n  \"kind\": \"PodList\",\n", "\n  \"items\": []\n"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("pods/deploy-before.json does not hold %q:\n%s", want, text)
+		}
+	}
+	if !strings.HasSuffix(text, "}\n") {
+		t.Errorf("pods/deploy-before.json does not end with a newline:\n%s", text)
 	}
 }
