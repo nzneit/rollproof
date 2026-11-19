@@ -22,6 +22,20 @@ var (
 	containerLogs   = Engine.logs
 )
 
+// logs returns the container's output, standard error included. found is false, with no error,
+// when the engine's inspect does not find the container.
+func (e Engine) logs(ctx context.Context, container string) (log string, found bool, err error) {
+	out, err := e.run(ctx, "logs", container)
+	if err == nil {
+		return out, true, nil
+	}
+	// An inspect that failed because ctx ended says nothing about the container.
+	if _, ierr := e.run(ctx, "inspect", container); ierr != nil && ctx.Err() == nil {
+		return "", false, nil
+	}
+	return out, true, err
+}
+
 // collectLogs writes kind's logs of the cluster's nodes and the registry container's log into
 // evidence: kind's into a folder under runDir, copied file by file to kind/<path> and the folder
 // then removed, and the registry's as registry.log. It goes on after an error and joins them. A
