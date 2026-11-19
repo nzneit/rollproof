@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -63,6 +64,84 @@ func TestPodSpec(t *testing.T) {
 		if g := *podSpec(PodOptions{Drain: c.drain}).Spec.TerminationGracePeriodSeconds; g != c.grace {
 			t.Errorf("drain %v: grace %d s, want %d s", c.drain, g, c.grace)
 		}
+	}
+}
+
+const customImage = "registry.example/tools/busybox@sha256:6d9ac9237a84afe1516540f40a0fafdc86859b2141954b4d643af7066d598b74"
+
+// customOptions is a custom probe's pod as section 6's example writes it.
+func customOptions() PodOptions {
+	return PodOptions{
+		Image:   customImage,
+		Command: []string{"sh", "-c", `trap 'exit 0' TERM; while true; do if nc -z -w1 "$TARGET" 5432; then echo '{"ok":true}'; else echo '{"ok":false,"class":"refused"}'; fi; sleep 0.1; done`},
+		Env: []corev1.EnvVar{
+			{Name: "TARGET", Value: "orders-db.orders"},
+			{Name: "TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "probe-token"}, Key: "token"}}},
+		},
+		ServiceAccountToken: true,
+		Drain:               10 * time.Second,
+	}
+}
+
+func TestPodSpecCustom(t *testing.T) {
+	got, err := yaml.Marshal(podSpec(customOptions()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const path = "testdata/pod-custom.golden.yaml"
+	if *update {
+		if err := os.WriteFile(path, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("%s differs\n--- got\n%s--- want\n%s", path, got, want)
+	}
+}
+
+// A custom probe's pod differs from the built-in probe's only in its image, command, args, env,
+// drain and token (section 6).
+func TestCustomPodKeepsTheBuiltInSettings(t *testing.T) {
+	custom := podSpec(customOptions())
+	builtIn := podSpec(PodOptions{Image: probeImage, Args: []string{"probe", "http"}, Drain: 7 * time.Second})
+	if d := cmp.Diff(builtIn.ObjectMeta, custom.ObjectMeta); d != "" {
+		t.Errorf("metadata differs (-built-in +custom):\n%s", d)
+	}
+	bc, cc := builtIn.Spec.Containers[0], custom.Spec.Containers[0]
+	if cc.Name != "probe" || cc.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Errorf("container %q, pull policy %q; want probe, IfNotPresent", cc.Name, cc.ImagePullPolicy)
+	}
+	if d := cmp.Diff(bc.SecurityContext, cc.SecurityContext); d != "" {
+		t.Errorf("security context differs (-built-in +custom):\n%s", d)
+	}
+	if d := cmp.Diff(builtIn.Spec.NodeSelector, custom.Spec.NodeSelector); d != "" {
+		t.Errorf("node selector differs:\n%s", d)
+	}
+	if d := cmp.Diff(builtIn.Spec.Tolerations, custom.Spec.Tolerations); d != "" {
+		t.Errorf("tolerations differ:\n%s", d)
+	}
+	if custom.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Errorf("restart policy %q, want Never", custom.Spec.RestartPolicy)
+	}
+	if g := *custom.Spec.TerminationGracePeriodSeconds; g != 10 {
+		t.Errorf("grace %d s, want the custom probe's drain, 10 s", g)
+	}
+	if !slices.Equal(cc.Command, customOptions().Command) || cc.Args != nil {
+		t.Errorf("command %q, args %q; want the configured command and no args", cc.Command, cc.Args)
+	}
+	if d := cmp.Diff(customOptions().Env, cc.Env); d != "" {
+		t.Errorf("env differs:\n%s", d)
+	}
+	if a := custom.Spec.AutomountServiceAccountToken; a == nil || !*a || custom.Spec.ServiceAccountName != "" {
+		t.Errorf("token %v, service account %q; want the default service account's token mounted", a, custom.Spec.ServiceAccountName)
+	}
+	if a := builtIn.Spec.AutomountServiceAccountToken; a == nil || *a || bc.Command != nil || bc.Env != nil {
+		t.Errorf("the built-in probe's pod has token %v, command %q, env %v; want none of them", a, bc.Command, bc.Env)
 	}
 }
 

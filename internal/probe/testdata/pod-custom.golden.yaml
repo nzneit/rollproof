@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app.kubernetes.io/name: rollproof-probe
+  name: probe
+  namespace: rollproof-probe
+spec:
+  automountServiceAccountToken: true
+  containers:
+  - command:
+    - sh
+    - -c
+    - trap 'exit 0' TERM; while true; do if nc -z -w1 "$TARGET" 5432; then echo '{"ok":true}';
+      else echo '{"ok":false,"class":"refused"}'; fi; sleep 0.1; done
+    env:
+    - name: TARGET
+      value: orders-db.orders
+    - name: TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: probe-token
+    image: registry.example/tools/busybox@sha256:6d9ac9237a84afe1516540f40a0fafdc86859b2141954b4d643af7066d598b74
+    imagePullPolicy: IfNotPresent
+    name: probe
+    resources: {}
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      runAsNonRoot: true
+      runAsUser: 65532
+      seccompProfile:
+        type: RuntimeDefault
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 10
+  tolerations:
+  - effect: NoSchedule
+    key: node-role.kubernetes.io/control-plane
+    operator: Exists
+status: {}

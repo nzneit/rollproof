@@ -52,7 +52,8 @@ const ClockBound = 2 * time.Second
 var stopMargin = 5 * time.Second
 
 // PodOptions is what the probe's pod needs: its image by digest, its arguments, the drain,
-// limits.timeout for the start, and where every raw line goes with its timestamp.
+// limits.timeout for the start, and where every raw line goes with its timestamp. The command,
+// env and service-account token are a custom probe's; the built-in probe's pod has none of them.
 type PodOptions struct {
 	Client              kubernetes.Interface
 	Image               string
@@ -60,6 +61,16 @@ type PodOptions struct {
 	Drain, StartTimeout time.Duration
 	Raw                 io.Writer
 	Now                 func() time.Time
+
+	// Command is the probe container's command, as a pod's container means it: it replaces
+	// the image's entrypoint. Nil keeps the entrypoint, as the built-in probe does.
+	Command []string
+	// Env is the probe container's environment, as a pod's container means it, entries
+	// with valueFrom included. Nil gives the container no variable of the tool's.
+	Env []corev1.EnvVar
+	// ServiceAccountToken says whether the probe's pod mounts the token of its namespace's default
+	// service account: true for a custom probe, false for the built-in probe.
+	ServiceAccountToken bool
 }
 
 // Pod is a probe that runs as a pod on the control-plane node. It implements Probe. Start and
@@ -616,6 +627,7 @@ func podSpec(o PodOptions) *corev1.Pod {
 	no, yes := false, true
 	user := int64(65532)
 	grace := wholeSeconds(o.Drain)
+	token := o.ServiceAccountToken
 	return &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -624,11 +636,13 @@ func podSpec(o PodOptions) *corev1.Pod {
 			Labels:    map[string]string{"app.kubernetes.io/name": "rollproof-probe"},
 		},
 		Spec: corev1.PodSpec{
-			AutomountServiceAccountToken: &no,
+			AutomountServiceAccountToken: &token,
 			Containers: []corev1.Container{{
 				Name:            "probe",
 				Image:           o.Image,
+				Command:         o.Command,
 				Args:            o.Args,
+				Env:             o.Env,
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				SecurityContext: &corev1.SecurityContext{
 					RunAsNonRoot:             &yes,
