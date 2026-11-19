@@ -1348,7 +1348,7 @@ tool.
 | `probe.http.expect-status` | 200 to 299 | A redirect or an error page is not an answer from the workload |
 | `limits.steady` | 10 s | Long enough to show that the probe and the workload work before anything changes: 2,000 checks at the default rate. It is not a control for a failure that is rare without any rollout; the paragraph below the table is for that |
 | `limits.settle` | 15 s | It covers what begins only after a transition has finished: a second rollout, a controller that acts a little late, a new pod that fails soon after it became ready, and a probe's late results. The experiments do not size it. Their failures after a rollout reported done ended within about 3 s, but they are counted from `kubectl rollout status`, which returns before old pods are gone, and the tool waits for those. 15 s is a first value, and a fixture is to confirm it or change it (section 14, point 7). The install settles for the same time under the probe, in the install window (section 7). There it covers the moment a cluster takes to route to a Service that the install has just created, about a second in the first plan's runs, and the first moments of the probe's own pod. Nothing sizes it for that either. Every run that reaches its steady window reports how long before it the last failed check came, which shows how much of the time was needed |
-| `limits.timeout` | 5 minutes | The length of Helm's default timeout for one operation. It is not the same bound: Helm applies its timeout to each hook separately, and this limit covers a whole transition from its start, hooks included. The tool passes the value to Helm as its `--timeout` (section 7). One limit covers, each on its own: the wait for the cluster to be ready, a node's pull of an image, a chart's fetch, a `setup` command, the install, the probe's start and a transition |
+| `limits.timeout` | 5 minutes | The length of Helm's default timeout for one operation. It is not the same bound: Helm applies its timeout to each hook separately, and this limit covers a whole transition from its start, hooks included. The tool passes the value to Helm as its `--timeout` (section 7). One limit covers, each on its own: the engine's pull of the node image, its pull of the registry image, the wait for the registry to answer, the wait for the cluster to be ready, a node's pull of an image, a chart's fetch, a `setup` command, the install, the probe's start and a transition |
 | `limits.silence` | 5 s | While it works, the built-in probe writes a line within one request timeout, and at the defaults at least one a second. A custom probe that checks less often raises it, and raises `limits.steady` and `limits.settle` with it |
 
 There is no failure budget. A pass means that the probe reported no failure in the steady window
@@ -1540,7 +1540,9 @@ under test: the probes, the update strategy, the grace period and the shutdown h
 The tool starts a registry container on the cluster's network, after the cluster exists, and
 writes its address into every node's registry settings. This is what makes an image reference by
 digest resolve. The registry's own image is `cluster.registry-image`, which has a default pinned
-by digest (section 8).
+by digest (section 8). When the engine does not hold that image yet, the tool has the engine pull
+it first, within `limits.timeout`. The wait for the registry's answer then has a `limits.timeout`
+of its own, counted from the container's start.
 
 The node settings name the registry by its address on the cluster's network, not by a name.
 Behind a proxy, kind passes the proxy variables into its nodes and exempts the network's
@@ -1663,7 +1665,9 @@ does not get in their way.
 - **The engine's own pulls.** The tool cannot configure the runner's container engine. That
   engine pulls the node image and the registry image, and for the action the tool's own image. The
   caller gives them as full mirror references, logs the engine in beforehand when that is needed,
-  and makes the engine trust a mirror's private certificate authority.
+  and makes the engine trust a mirror's private certificate authority. The tool asks the engine
+  for the first two itself, each only when the engine does not hold it yet and each within
+  `limits.timeout` (section 8), so that kind finds the node image already there.
 - **Helm's own pulls.** A chart registry that needs a login or a private certificate authority is
   set up for Helm by the caller, before the step. The tool passes Helm no login and no
   certificate flag. Helm reads its repositories and its registry logins from its own files on the
@@ -2337,9 +2341,10 @@ the fourth on gets a plan of its own. The first plan covers steps 1 to 3.
    the change to the host's citation check so that it skips `projects/`, and this spec.
 2. **Proofs.** Open points 1 and 8 to 12 of section 14, and what point 5 says of the command
    lines in each Helm major, as throwaway experiments or readings. The other open points are
-   proved where they are needed: points 2 and 19 with step 5, points 3, 4 and 20 with step 6, the
-   fixture runs of point 5 with steps 3 and 4, and each fact of point 21 with the step that
-   builds on it. Step 4 builds the fixture for point 7, and the measurements of points 7 and 16
+   proved where they are needed: points 2 and 19 with step 5, points 3, 4 and 20 and point 24's
+   node setting under Docker with step 6, the fixture runs of point 5 with steps 3 and 4, and each
+   fact of point 21 with the step that builds on it.
+   Step 4 builds the fixture for point 7, and the measurements of points 7 and 16
    come with the fixture series in step 7. A proof that needs a run on GitHub Actions waits for
    the maintainer's word.
 3. **A walking skeleton.** `config`, `cluster`, `images` for local images and the probe's own,
@@ -2628,7 +2633,12 @@ which step proves which point.
       from one address as often as the built-in probe does.
     - A connection whose first answer takes longer than 5 s is believed to wait for the
       kernel's next attempt, about 7 s after the first. Nothing in the fixtures does that.
-    - The value was set on nodes of rootless nerdctl only. Docker and Podman are not tried.
+    - The value was set on nodes of rootless nerdctl only. Docker and Podman are not tried. A
+      reading of kind, Docker, Podman, runc, crun and the kernel, on 2026-11-19, expects rootful
+      Docker and Podman to accept it on the kernels of GitHub's hosted runners: kind runs its
+      nodes privileged, so neither engine makes `/proc/sys` read-only, and the kernel checks the
+      capability against the user namespace that owns the node's network. A run with step 6 is to
+      show it, at the maintainer's ruling.
     - With the setting and the revision's code together, the nine runs of the five fixtures
       that reached the probe had no late timeout, and every failure of the probe's start came
       in its first 2 s. In one run every check of the first 0.7 s timed out, 145 of them, and
@@ -2678,9 +2688,9 @@ which step proves which point.
       creation by `limits.timeout` on its own, but the code counted one deadline from before kind
       created the nodes, so a slow creation used up the waits for the registry and for the nodes'
       readiness. The code now follows section 8. A creation that hangs can therefore take kind's
-      own time and twice `limits.timeout` before it fails, and longer when the registry's image
-      is slow to pull: the registry's limit covers the pull, but the tool checks it only once the
-      container has started. What lost: **a limit of its own for the cluster's creation**, a new
+      own time and up to four times `limits.timeout` before it fails: the pulls of the node image
+      and of the registry image, the registry's answer and the nodes' readiness (point 28). What
+      lost: **a limit of its own for the cluster's creation**, a new
       setting for a fault of the code; and **a larger `limits.timeout` in the fixture that met
       it**, which would hide the fault.
 
@@ -2707,6 +2717,21 @@ which step proves which point.
     - **Commands after a failure of the tool.** The tool stopped the probe, and only then a
       command that was still running, which went on changing the cluster for up to 15 seconds.
       It now stops the command first (section 7).
+
+28. **The engine's pulls, a ruling of 2026-11-19.** The next plan's final review found that the
+    registry's limit counted the pull of its image without cutting it short, so that a slow pull
+    failed the step only after the container had started, and kind's own pull of the node image
+    had no limit at all. The maintainer asked whether a setting of its own for pulls would serve
+    better, and chose one limit. The tool now has the engine pull the node image before kind
+    creates the cluster, and the registry image before it starts the registry, each only when
+    the engine does not hold it yet and each within `limits.timeout`, as a node's pull is
+    (section 8). kind then finds the node image already there and does not pull it. The wait for
+    the registry's answer has a `limits.timeout` of its own, counted from the container's start.
+    What lost: **a setting of its own for pulls**, because its name says every pull while the
+    kubelet's pulls inside the install and the transitions cannot be parted from those steps'
+    limits, and because a key added later breaks no configuration where a key removed does; and
+    **the review's fix**, which counted the registry's limit from the container's start and left
+    the pull without a limit.
 
 ## 15. Not in the first release
 
