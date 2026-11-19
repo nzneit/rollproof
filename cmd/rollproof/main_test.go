@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"rollproof/internal/cluster"
 	"rollproof/internal/config"
@@ -187,10 +188,10 @@ deploy:
     release: orders
     previous: { chart: ./chart }
     candidate: { chart: ./chart }
+registries: [{ host: registry.example }]
 probe:
-  custom:
-    image: registry.example/tools/busybox@sha256:` + strings.Repeat("0", 64) + `
-    command: [sh, -c, "sleep 3600"]
+  http:
+    url: http://orders.orders.svc/
 `
 	if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
@@ -202,7 +203,7 @@ probe:
 			t.Fatalf("%s: exit %d, want 2\n%s", flag, code, stderr.String())
 		}
 		final, codes, texts := readResult(t, out)
-		if !final || len(codes) != 1 || codes[0] != "config-rejected" || texts[0] != "not built yet: probe.custom" {
+		if !final || len(codes) != 1 || codes[0] != "config-rejected" || texts[0] != "not built yet: registries" {
 			t.Errorf("%s: final %v, reasons %q %q", flag, final, codes, texts)
 		}
 	}
@@ -396,6 +397,126 @@ func TestSessionSetup(t *testing.T) {
 	}
 	if diff := cmp.Diff([]string{"commands/setup", "commands/setup-2"}, names); diff != "" {
 		t.Errorf("evidence names (-want +got):\n%s", diff)
+	}
+}
+
+// customConfig is a configuration whose probe is a custom one, with a command, an argument and an
+// env entry that takes its value from a Secret.
+func customConfig() *config.Config {
+	return &config.Config{Limits: config.Limits{Timeout: time.Minute}, Probe: config.Probe{Custom: &config.Custom{
+		Image:   "registry.example/tools/busybox@sha256:" + strings.Repeat("0", 64),
+		Command: []string{"sh", "-c", "loop"}, Args: []string{"a"},
+		Env: []config.EnvVar{{Name: "TOKEN", ValueFrom: map[string]any{"secretKeyRef": map[string]any{"name": "probe-token", "key": "token"}}}}}}}
+}
+
+// httpConfig is a configuration whose probe is the built-in one, with a request timeout of 2 s.
+func httpConfig() *config.Config {
+	return &config.Config{Limits: config.Limits{Timeout: time.Minute}, Probe: config.Probe{HTTP: &config.HTTP{
+		URL: "http://orders.orders.svc/", Rate: 200, Timeout: 2 * time.Second, ExpectMin: 200, ExpectMax: 299}}}
+}
+
+// badEnvConfig is a custom probe's configuration whose env entry a pod cannot hold.
+func badEnvConfig() *config.Config {
+	cfg := customConfig()
+	cfg.Probe.Custom.Env = []config.EnvVar{{Name: "TOKEN", ValueFrom: map[string]any{"secretKeyRef": "S3CRET-VALUE"}}}
+	return cfg
+}
+
+// envRejected fails the test unless err is a config-rejected condition about probe.custom.env
+// that does not quote the planted value.
+func envRejected(t *testing.T, err error) {
+	t.Helper()
+	var c verdict.Condition
+	if !errors.As(err, &c) {
+		t.Fatalf("error %v, want a verdict.Condition", err)
+	}
+	if c.Code != verdict.ConfigRejected || !strings.HasPrefix(c.Text, "probe.custom.env") || strings.Contains(c.Text, "S3CRET-VALUE") {
+		t.Errorf("condition %s %q, want config-rejected about probe.custom.env with no value", c.Code, c.Text)
+	}
+}
+
+func TestPodOptions(t *testing.T) {
+	const probeImage = "rollproof.test/rollproof@sha256:fff"
+	custom := customConfig()
+	o, err := podOptions(custom, probeImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Image != custom.Probe.Custom.Image {
+		t.Errorf("image %q, want the custom image", o.Image)
+	}
+	if diff := cmp.Diff([]string{"sh", "-c", "loop"}, o.Command); diff != "" {
+		t.Errorf("command (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"a"}, o.Args); diff != "" {
+		t.Errorf("args (-want +got):\n%s", diff)
+	}
+	if len(o.Env) != 1 || o.Env[0].ValueFrom == nil || o.Env[0].ValueFrom.SecretKeyRef == nil ||
+		o.Env[0].ValueFrom.SecretKeyRef.Name != "probe-token" {
+		t.Errorf("env %+v, want TOKEN from the Secret probe-token", o.Env)
+	}
+	if !o.ServiceAccountToken || o.Drain != 10*time.Second {
+		t.Errorf("token %v, drain %s; want the default token and 10s", o.ServiceAccountToken, o.Drain)
+	}
+
+	builtIn := httpConfig()
+	o, err = podOptions(builtIn, probeImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Image != probeImage || o.Command != nil || o.Env != nil {
+		t.Errorf("image %q, command %q, env %v; want the probe image and no command or env", o.Image, o.Command, o.Env)
+	}
+	if diff := cmp.Diff(probe.HTTPArgs(httpOptions(builtIn.Probe.HTTP)), o.Args); diff != "" {
+		t.Errorf("args (-want +got):\n%s", diff)
+	}
+	if o.ServiceAccountToken || o.Drain != 7*time.Second {
+		t.Errorf("token %v, drain %s; want no token and 7s", o.ServiceAccountToken, o.Drain)
+	}
+
+	_, err = podOptions(badEnvConfig(), probeImage)
+	envRejected(t, err)
+}
+
+// A custom env that a pod cannot hold is rejected by check, before a cluster
+// exists (README "Interfaces between tasks").
+func TestCheckRejectsACustomEnv(t *testing.T) {
+	envRejected(t, (&wiring{}).check(context.Background(), badEnvConfig()))
+}
+
+// Both probes write their pod's evidence into the run's evidence folder under
+// the names that probe gives, and read the API with the session's client
+// (Task 10's review).
+func TestProbeOptionsCarryTheSession(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		cfg  *config.Config
+	}{{"built-in", httpConfig()}, {"custom", customConfig()}} {
+		t.Run(row.name, func(t *testing.T) {
+			var names []string
+			s := &session{client: fake.NewClientset(), cfg: row.cfg, evidence: func(name string) (io.WriteCloser, error) {
+				names = append(names, name)
+				return &recordingEvidence{}, nil
+			}}
+			raw := &bytes.Buffer{}
+			o, err := s.probeOptions(row.cfg, "rollproof.test/rollproof@sha256:fff", raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if o.Client != s.client || o.Raw != raw || o.StartTimeout != time.Minute || o.Now == nil {
+				t.Errorf("client %v, raw %v, start timeout %s, now set %v; want the session's, the run's and a minute",
+					o.Client, o.Raw, o.StartTimeout, o.Now != nil)
+			}
+			if o.Evidence == nil {
+				t.Fatal("no Evidence")
+			}
+			if _, err := o.Evidence("probe-pod.json"); err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff([]string{"probe-pod.json"}, names); diff != "" {
+				t.Errorf("evidence names (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

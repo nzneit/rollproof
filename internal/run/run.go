@@ -70,7 +70,11 @@ type Cluster interface {
 	Setup(ctx context.Context) deploy.Result
 	Watcher(ctx context.Context, cfg *config.Config) (Watcher, error)
 	Target(ctx context.Context, cfg *config.Config) (probe.Target, error)
-	Probe(cfg *config.Config, probeImage string, raw io.Writer) probe.Probe
+	// Probe returns the probe that the configuration names, not yet started: the built-in
+	// probe on probeImage, or the custom probe on its own image. raw receives the
+	// probe's lines. An error is a configuration that the probe's pod cannot be
+	// written from; run places it before the install window and starts no probe.
+	Probe(cfg *config.Config, probeImage string, raw io.Writer) (probe.Probe, error)
 	Facts() report.Cluster
 	Kept() string
 	// EndCommands ends every command of the run that is still being stopped and closes its
@@ -302,17 +306,21 @@ func (s *runState) setUp(ctx context.Context) bool {
 	if !s.installStep(ctx) || s.interrupted(ctx) {
 		return false
 	}
-	// Step 8: the probe's target, checked after the install, because the chart's
-	// Service exists only once the previous release is installed.
-	t, err := c.Target(ctx, cfg)
-	if err != nil {
-		return s.beforeFail(ctx, err)
+	// Step 8: the built-in probe's target, checked after the install, because the
+	// chart's Service exists only once the previous release is installed. A custom
+	// probe has none: watch is told of no Service, and whether a workload is
+	// probed is not known (decision 8).
+	if cfg.Probe.HTTP != nil {
+		t, err := c.Target(ctx, cfg)
+		if err != nil {
+			return s.beforeFail(ctx, err)
+		}
+		s.target = t
+		if s.interrupted(ctx) {
+			return false
+		}
 	}
-	s.target = t
-	if s.interrupted(ctx) {
-		return false
-	}
-	s.watcher.UseService(t.Service)
+	s.watcher.UseService(s.target.Service)
 	if s.interrupted(ctx) {
 		return false
 	}
@@ -357,14 +365,20 @@ func (s *runState) restartOnly() bool {
 	return slices.Equal(s.deployer.Transitions(), []verdict.WindowName{verdict.Restart})
 }
 
-// startProbe performs step 9: the probe and its first observation. The goroutine that reads the
-// probe's events starts before the probe does, so that no event waits for a reader; it is the
-// only reader of them until the probe is stopped. A start that failed other than by its
-// context has ended the probe itself, and Stop gives the Facts and the error that it kept, also
-// after a signal; a start that gave its context's error left the pod as it is (section 6), and
-// Stop is not asked.
+// startProbe performs step 9: the probe and its first observation. A probe that Cluster.Probe
+// cannot make is placed before the install window, and nothing is created or started. The
+// goroutine that reads the probe's events starts before the probe does, so that no event waits
+// for a reader; it is the only reader of them until the probe is stopped. A start that failed
+// other than by its context has ended the probe itself, and Stop gives the Facts and the error
+// that it kept, also after a signal; a start that gave its context's error left the pod as it is
+// (section 6), and Stop is not asked.
 func (s *runState) startProbe(ctx context.Context) bool {
-	p := s.cluster.Probe(s.cfg, s.probeImage, s.ev.file("probe.log"))
+	raw := s.ev.file("probe.log")
+	p, err := s.cluster.Probe(s.cfg, s.probeImage, raw)
+	if err != nil {
+		_ = raw.Close() // the evidence file warns when it cannot be closed
+		return s.beforeFail(ctx, err)
+	}
 	s.probe = p
 	s.readEvents(p.Events())
 	st, err := p.Start(ctx)

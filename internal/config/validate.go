@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"k8s.io/apimachinery/pkg/labels"
 )
@@ -58,7 +59,20 @@ func exists(p string) bool {
 var (
 	imageNameRe   = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$`)
 	headerTokenRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+	imageRefRe    = regexp.MustCompile(`^\$\{images\.[^}]+\.ref\}$`)
+	imageDigestRe = regexp.MustCompile(`^[^$]+@\$\{images\.[^}]+\.digest\}$`)
 )
+
+// imageHasDigest reports whether probe.custom.image, as Load reads it before the images are
+// stored, names a digest: a reference with @ and a digest, the form ${images.NAME.ref} alone, or
+// a reference that ends in @${images.NAME.digest}.
+func imageHasDigest(image string) bool {
+	if imageRefRe.MatchString(image) || imageDigestRe.MatchString(image) {
+		return true
+	}
+	_, err := name.NewDigest(image)
+	return err == nil
+}
 
 var reservedNamespaces = map[string]bool{
 	"kube-system": true, "kube-public": true, "kube-node-lease": true,
@@ -166,6 +180,9 @@ func validate(c *Config, x *index) error {
 		}
 		if err := checkCommand("probe.custom.command", cu.Command, false, x); err != nil {
 			return err
+		}
+		if !imageHasDigest(cu.Image) {
+			return x.reject("probe.custom.image", "must name a digest: REPOSITORY@sha256:…, ${images.NAME.ref}, or a reference that ends in @${images.NAME.digest}")
 		}
 	}
 

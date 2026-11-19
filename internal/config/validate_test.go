@@ -82,6 +82,9 @@ func TestValidateRejects(t *testing.T) {
 		{"a comma in a values file's path", candidateBlock, candidateBlock + "      values:\n        - test/values,S3CRET-VALUE.yaml\n", "deploy.helm.candidate.values[0]"},
 		{"a selector that does not parse", ns, ns + "  selector: app in S3CRET-VALUE\n", "deploy.selector"},
 		{"a custom probe with no image", httpProbe, "probe:\n  custom:\n    command: [sh, -c, \"echo S3CRET-VALUE\"]\n", "probe.custom.image"},
+		{"a custom image with no digest", httpProbe, "probe:\n  custom:\n    image: registry.example/tools/S3CRET-VALUE\n    command: [sh]\n", "probe.custom.image"},
+		{"a custom image with a tag", httpProbe, "probe:\n  custom:\n    image: registry.example/tools/busybox:S3CRET-VALUE\n    command: [sh]\n", "probe.custom.image"},
+		{"a custom image with a short digest", httpProbe, "probe:\n  custom:\n    image: registry.example/tools/S3CRET-VALUE@sha256:abc\n    command: [sh]\n", "probe.custom.image"},
 		{"a header name with an equals sign", "      X-Planted: S3CRET-VALUE\n", "      \"S3CRET-VALUE=x\": v\n", "probe.http.headers (line 17): a header name must be a token"},
 		{"a header name with a space", "      X-Planted: S3CRET-VALUE\n", "      \"X Planted\": v\n", "probe.http.headers (line 17): a header name must be a token"},
 		{"a header value with a line break", "      X-Planted: S3CRET-VALUE\n", "      X-Planted: \"a\\nS3CRET-VALUE\"\n", "probe.http.headers.X-Planted (line 18): must not hold a line break or NUL"},
@@ -342,5 +345,23 @@ func TestArchiveWithOneImage(t *testing.T) {
 	}
 	if got, want := c.Images["orders"].Archive, filepath.Join(real, "S3CRET-VALUE.tar"); got != want {
 		t.Errorf("archive %q, want %q", got, want)
+	}
+}
+
+// A custom image names a digest in one of three forms; a form that leaves the digest to chance is
+// rejected (section 8, "What else is rejected").
+func TestCustomImageForms(t *testing.T) {
+	withImages := variant(t, base, "deploy:\n", "images: { probe: { local: \"probe:dev\" } }\ndeploy:\n")
+	custom := func(image string) string {
+		return variant(t, withImages, httpProbe, "probe:\n  custom:\n    image: \""+image+"\"\n    command: [sh]\n")
+	}
+	for _, image := range []string{"${images.probe.ref}", "registry.example/tools/busybox@${images.probe.digest}"} {
+		if _, err := loadText(t, custom(image)); err != nil {
+			t.Errorf("image %q: %v", image, err)
+		}
+	}
+	for _, image := range []string{"${images.probe.repository}", "x${images.probe.ref}"} {
+		_, err := loadText(t, custom(image))
+		rejected(t, err, "probe.custom.image")
 	}
 }

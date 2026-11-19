@@ -135,6 +135,7 @@ type world struct {
 type fakeCluster struct {
 	w                                                       *world
 	storeErr, deployerErr, watcherErr, targetErr, deleteErr error
+	probeErr                                                error
 	images                                                  map[string]config.ImageRef
 	setup                                                   deploy.Result
 	target                                                  probe.Target
@@ -188,11 +189,11 @@ func (c *fakeCluster) Target(ctx context.Context, cfg *config.Config) (probe.Tar
 	return c.target, c.targetErr
 }
 
-// Probe records "probe", runs its hook and gives the fake probe.
-func (c *fakeCluster) Probe(cfg *config.Config, probeImage string, raw io.Writer) probe.Probe {
+// Probe records "probe", runs its hook and gives the fake probe and the scripted error.
+func (c *fakeCluster) Probe(cfg *config.Config, probeImage string, raw io.Writer) (probe.Probe, error) {
 	c.w.calls.add("probe")
 	c.w.hook("probe")
-	return c.w.probe
+	return c.w.probe, c.probeErr
 }
 
 // Facts gives the cluster as the record states it, and records nothing.

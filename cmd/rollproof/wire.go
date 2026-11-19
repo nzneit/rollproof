@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"rollproof/internal/cluster"
@@ -42,9 +43,15 @@ func realUnits(keep bool) run.Units {
 // wiring is what one run's real units share: the engine that Check found.
 type wiring struct{ engine cluster.Engine }
 
-// check finds the container engine, which Create then uses, and checks that
+// check rejects a custom probe's env that a pod cannot hold, before a cluster
+// exists, finds the container engine, which Create then uses, and checks that
 // Helm is on the PATH when the configuration uses it.
 func (w *wiring) check(ctx context.Context, cfg *config.Config) error {
+	if cu := cfg.Probe.Custom; cu != nil {
+		if _, err := customEnv(cu.Env); err != nil {
+			return err
+		}
+	}
 	e, err := cluster.CheckRunner(ctx)
 	if err != nil {
 		return err
@@ -213,17 +220,62 @@ func (s *session) Target(ctx context.Context, cfg *config.Config) (probe.Target,
 	return probe.CheckTarget(ctx, s.client, cfg.Probe.HTTP.URL)
 }
 
-// Probe makes the built-in probe's pod.
-func (s *session) Probe(cfg *config.Config, probeImage string, raw io.Writer) probe.Probe {
-	return probe.NewPod(probe.PodOptions{
-		Client:       s.client,
-		Image:        probeImage,
-		Args:         probe.HTTPArgs(httpOptions(cfg.Probe.HTTP)),
-		Drain:        cfg.Probe.HTTP.Timeout + 5*time.Second,
-		StartTimeout: cfg.Limits.Timeout,
-		Raw:          raw,
-		Now:          time.Now,
-	})
+// Probe makes the pod of the probe that the configuration names, the built-in
+// or a custom one, from probeOptions.
+func (s *session) Probe(cfg *config.Config, probeImage string, raw io.Writer) (probe.Probe, error) {
+	o, err := s.probeOptions(cfg, probeImage, raw)
+	if err != nil {
+		return nil, err
+	}
+	return probe.NewPod(o), nil
+}
+
+// probeOptions are podOptions with what the session adds for both probes: its
+// client, limits.timeout for the start, raw for the probe's lines, the clock,
+// and the run's evidence, into which the probe writes its pod's evidence under
+// the names it gives (probe-pod.json, probe-pod/…).
+func (s *session) probeOptions(cfg *config.Config, probeImage string, raw io.Writer) (probe.PodOptions, error) {
+	o, err := podOptions(cfg, probeImage)
+	if err != nil {
+		return probe.PodOptions{}, err
+	}
+	o.Client, o.StartTimeout, o.Raw, o.Now, o.Evidence = s.client, cfg.Limits.Timeout, raw, time.Now, s.evidence
+	return o, nil
+}
+
+// customDrain is how long a custom probe gets from SIGTERM to its pod's end (section 6, "Stop").
+const customDrain = 10 * time.Second
+
+// podOptions are the image, command, arguments, environment, token and drain of
+// the probe's pod. The built-in probe: probeImage, its HTTP arguments, no token,
+// a drain of the request timeout plus 5 s. A custom probe: its image as
+// resolved, its command and args, its env with valueFrom kept, the namespace's
+// default token, a drain of 10 s. An env that a pod cannot hold is
+// config-rejected.
+func podOptions(cfg *config.Config, probeImage string) (probe.PodOptions, error) {
+	if cu := cfg.Probe.Custom; cu != nil {
+		env, err := customEnv(cu.Env)
+		if err != nil {
+			return probe.PodOptions{}, err
+		}
+		return probe.PodOptions{Image: cu.Image, Command: cu.Command, Args: cu.Args, Env: env,
+			ServiceAccountToken: true, Drain: customDrain}, nil
+	}
+	return probe.PodOptions{
+		Image: probeImage,
+		Args:  probe.HTTPArgs(httpOptions(cfg.Probe.HTTP)),
+		Drain: cfg.Probe.HTTP.Timeout + 5*time.Second,
+	}, nil
+}
+
+// customEnv is a custom probe's env as a container's, or a config-rejected condition whose text,
+// probe.CustomEnv's, names the entry by its index and name and quotes no value.
+func customEnv(env []config.EnvVar) ([]corev1.EnvVar, error) {
+	out, err := probe.CustomEnv(env)
+	if err != nil {
+		return nil, verdict.Condition{Code: verdict.ConfigRejected, Text: err.Error()}
+	}
+	return out, nil
 }
 
 // Facts is what the cluster says of itself, for the report.

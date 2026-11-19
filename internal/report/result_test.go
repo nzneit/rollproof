@@ -121,7 +121,7 @@ func passRun() Run {
 				{Key: "probe.http.timeout", Value: "2s", Default: "2s"},
 				{Key: "probe.http.expect-status", Value: "200-299", Default: "200-299"},
 			},
-			Lines: 78, CertificateChecked: true, StoppedWhenAsked: new(true),
+			Lines: 78, CertificateChecked: new(true), StoppedWhenAsked: new(true),
 		}},
 		Releases: []Release{
 			{Role: "previous", Chart: "orders", Version: "1.4.2", Source: "oci://registry.example/charts/orders"},
@@ -328,8 +328,9 @@ func TestProbeStoppedWhenAskedNull(t *testing.T) {
 func TestNoNulls(t *testing.T) {
 	// stopped_when_asked is null when the tool did not ask the probe to stop, stopped waiting for
 	// it, or failed while it stopped it (section 10). A transition's command is null for a restart,
-	// and its restart for a deploy and a rollback (plan decision 5).
-	keysThatMayBeNull := []string{"cluster", "command", "end", "first_failure", "first_observation", "install", "lag_ms", "last_failure", "quickest_stop_ms", "restart", "settled", "slowest_ms", "start", "stopped_when_asked"}
+	// and its restart for a deploy and a rollback (plan decision 5). certificate_checked is null for
+	// a custom probe (plan decision 9).
+	keysThatMayBeNull := []string{"certificate_checked", "cluster", "command", "end", "first_failure", "first_observation", "install", "lag_ms", "last_failure", "quickest_stop_ms", "restart", "settled", "slowest_ms", "start", "stopped_when_asked"}
 	for _, r := range []Run{
 		{},
 		{

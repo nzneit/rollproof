@@ -21,7 +21,7 @@ func TestNotBuilt(t *testing.T) {
 		{"setup", "deploy:\n", "setup:\n  - [kubectl, apply, -f, test/prerequisites.yaml]\ndeploy:\n", nil},
 		{"the commands driver", helmBlock, commandsBlock("    install: [kubectl, apply, -k, overlays/previous]\n" +
 			"    deploy: [kubectl, apply, -k, overlays/candidate]\n    rollback: [kubectl, apply, -k, overlays/previous]\n"), nil},
-		{"a custom probe", httpProbe, customProbe(""), []string{"probe.custom"}},
+		{"a custom probe", httpProbe, customProbe(""), nil},
 		{"an image from an archive", "deploy:\n", "images:\n  orders:\n    archive: orders.tar\ndeploy:\n", nil},
 		{"an image from an archive with as", "deploy:\n", "images:\n  orders:\n    archive: orders.tar\n    as: registry.example/team/orders\ndeploy:\n", []string{"images.orders.as"}},
 		{"an image with as", "deploy:\n", "images:\n  orders:\n    local: orders:candidate\n    as: registry.example/team/orders\ndeploy:\n", []string{"images.orders.as"}},

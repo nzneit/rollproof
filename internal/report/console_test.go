@@ -166,6 +166,19 @@ func commandsRun() Run {
 	return r
 }
 
+// customRun is a pass judged by a custom probe, whose reach the tool does not know.
+func customRun() Run {
+	r := passRun()
+	r.Probes = []Probe{{Kind: "custom", Target: "registry.example/tools/busybox@sha256:" + strings.Repeat("0", 64),
+		EnvNames: []string{"TOKEN", "TARGET"}, CommandCount: 3, Lines: 86, StoppedWhenAsked: new(true)}}
+	for i := range r.Transitions {
+		for j := range r.Transitions[i].Workloads {
+			r.Transitions[i].Workloads[j].Probed = "not known"
+		}
+	}
+	return r
+}
+
 func TestConsoleExamples(t *testing.T) {
 	// The three examples of section 10 are copied from the design and are never rewritten.
 	for _, c := range []struct {
@@ -190,6 +203,7 @@ func TestConsoleExamples(t *testing.T) {
 		{"testdata/console-custom-no-ms-or-lag.golden.txt", customNoMsOrLagRun()},
 		{"testdata/console-restart.golden.txt", restartRun()},
 		{"testdata/console-commands.golden.txt", commandsRun()},
+		{"testdata/console-custom.golden.txt", customRun()},
 	} {
 		t.Run(c.path, func(t *testing.T) { golden(t, c.path, []byte(Console(c.run))) })
 	}
@@ -212,8 +226,13 @@ func TestConsoleLines(t *testing.T) {
 			"status 200-299\n            12 lines were JSON objects with no ok field\n"},
 		{"one JSON line with no ok", passRun, func(r *Run) { r.Probes[0].JSONLinesWithoutOK = 1 },
 			"status 200-299\n            1 line was a JSON object with no ok field\n"},
-		{"https", passRun, func(r *Run) { r.Probes[0].CertificateChecked = false },
+		{"https", passRun, func(r *Run) { r.Probes[0].CertificateChecked = new(false) },
 			"status 200-299\n            the server's certificate was not verified\n"},
+		{"a custom probe with one item and no env", customRun, func(r *Run) {
+			r.Probes[0].CommandCount, r.Probes[0].ArgsCount, r.Probes[0].EnvNames = 1, 1, nil
+		}, "            command: 1 item; args: 1 item; env: none\n"},
+		{"an env name with a control character", customRun, func(r *Run) { r.Probes[0].EnvNames = []string{"TO\x1bKEN", "TARGET"} },
+			"; env: TO KEN, TARGET\n"},
 		{"a note of the target", passRun, func(r *Run) { r.Probes[0].Notes = []string{affinity} },
 			"status 200-299\n            " + affinity + "\n"},
 		{"a probe that did not stop", passRun, func(r *Run) { r.Probes[0].StoppedWhenAsked = new(false) },

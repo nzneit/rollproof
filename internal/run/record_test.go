@@ -375,7 +375,7 @@ func TestRecordProbe(t *testing.T) {
 	want := report.Probe{
 		Kind: "http", Target: "GET http://orders.orders.svc/work?ms=20",
 		Headers: []string{"Host", "X-Token"}, Lines: 78, JSONLinesWithoutOK: 2,
-		CertificateChecked: true, StoppedWhenAsked: new(true), Notes: f.target.Notes,
+		CertificateChecked: new(true), StoppedWhenAsked: new(true), Notes: f.target.Notes,
 	}
 	if diff := cmp.Diff(want, got.Probes[0], cmpopts.EquateEmpty(), cmpopts.IgnoreFields(report.Probe{}, "Settings")); diff != "" {
 		t.Errorf("probe (-want +got):\n%s", diff)
@@ -393,18 +393,49 @@ func TestRecordProbe(t *testing.T) {
 	f.probe.StoppedWhenAsked = true
 
 	f.cfg.Probe.HTTP.URL = "https://orders.orders.svc/work"
-	if record(f).Probes[0].CertificateChecked {
+	if *record(f).Probes[0].CertificateChecked {
 		t.Error("certificate_checked is true for an https URL")
 	}
 	for _, u := range []string{"HTTPS://orders.orders.svc/work", "Https://orders.orders.svc/work", "https://orders.orders.svc/work", "ht\ttp://%zz"} {
 		f.cfg.Probe.HTTP.URL = u
-		if record(f).Probes[0].CertificateChecked {
+		if *record(f).Probes[0].CertificateChecked {
 			t.Errorf("certificate_checked is true for the URL %q", u)
 		}
 	}
 	f.cfg.Probe.HTTP.URL = "HTTP://orders.orders.svc/work"
-	if !record(f).Probes[0].CertificateChecked {
+	if !*record(f).Probes[0].CertificateChecked {
 		t.Error("certificate_checked is false for an http URL")
+	}
+}
+
+// A custom probe's entry is named by its image and gives its env's names, in the configuration's
+// order, and the counts of its command and args; it has no settings and no certificate check
+// (decision 9). Its counts, stop and notes follow the rule of the built-in probe's.
+func TestCustomProbeRecord(t *testing.T) {
+	const image = "registry.example/tools/busybox@sha256:6d9ac9237a84afe1516540f40a0fafdc86859b2141954b4d643af7066d598b74"
+	f := sampleFacts(t)
+	f.cfg.Probe = config.Probe{Custom: &config.Custom{Image: image, Command: []string{"sh", "-c", "loop S3CRET"},
+		Args: []string{"S3CRET"}, Env: []config.EnvVar{{Name: "TOKEN", Value: "S3CRET"}, {Name: "TARGET", Value: "orders.orders"}}}}
+	f.target = probe.Target{}
+	f.probe = probe.Facts{Lines: 40, StoppedWhenAsked: true}
+	want := report.Probe{Kind: "custom", Target: image, EnvNames: []string{"TOKEN", "TARGET"}, CommandCount: 3, ArgsCount: 1,
+		Lines: 40, CertificateChecked: nil, StoppedWhenAsked: new(true)}
+	got := record(f).Probes
+	if len(got) != 1 {
+		t.Fatalf("%d probes, want 1", len(got))
+	}
+	if diff := cmp.Diff(want, got[0], cmpopts.EquateEmpty()); diff != "" {
+		t.Errorf("probe (-want +got):\n%s", diff)
+	}
+
+	f.probeStop = notAsked
+	f.probeLines = 12
+	p := record(f).Probes[0]
+	if p.StoppedWhenAsked != nil || p.Lines != 12 {
+		t.Errorf("stopped_when_asked %v, lines %d; want null and the 12 lines of Counts", p.StoppedWhenAsked, p.Lines)
+	}
+	if diff := cmp.Diff([]string{noteNotAsked}, p.Notes); diff != "" {
+		t.Errorf("notes (-want +got):\n%s", diff)
 	}
 }
 

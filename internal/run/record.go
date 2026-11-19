@@ -103,8 +103,13 @@ func record(f facts) report.Run {
 		}
 		r.Settings = append(r.Settings, x)
 	}
-	if h := f.cfg.Probe.HTTP; h != nil && f.probeBegun {
-		r.Probes = []report.Probe{probeRecord(f, h, probeSettings)}
+	if f.probeBegun {
+		switch {
+		case f.cfg.Probe.HTTP != nil:
+			r.Probes = []report.Probe{probeRecord(f, f.cfg.Probe.HTTP, probeSettings)}
+		case f.cfg.Probe.Custom != nil:
+			r.Probes = []report.Probe{customRecord(f, f.cfg.Probe.Custom)}
+		}
 	}
 	r.Images = imageRecords(f)
 	return r
@@ -265,22 +270,40 @@ func restartAnswer(rs *watch.Restart) *string {
 	return nil
 }
 
-// probeRecord returns the probe's entry. When the tool asked the probe to stop and Stop returned
-// no error, the counts and stopped_when_asked are those of its Facts. Otherwise
-// stopped_when_asked is null, the counts are those that Counts gave, and a note after the
-// target's says why (section 10).
+// probeRecord returns the built-in probe's entry, with its counts, its stop and its notes as
+// withStop gives them.
 func probeRecord(f facts, h *config.HTTP, settings []report.Setting) report.Probe {
 	var names []string
 	for k := range h.Headers { // names only: a header's value is never read
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	p := report.Probe{
+	return withStop(f, report.Probe{
 		Kind: "http", Target: "GET " + h.URL, Settings: settings, Headers: names,
 		// On http there is no certificate to check, so none is left unchecked.
-		CertificateChecked: certificateChecked(h.URL),
+		CertificateChecked: new(certificateChecked(h.URL)),
 		Notes:              f.target.Notes,
+	})
+}
+
+// customRecord returns a custom probe's entry: its image as resolved, the names of its env
+// entries in the configuration's order, and the counts of its command and args, never their
+// values (section 8, "Secrets"). It has no settings and no certificate check, which the tool does
+// not know (decision 9); its counts, its stop and its notes are as withStop gives them.
+func customRecord(f facts, cu *config.Custom) report.Probe {
+	var names []string
+	for _, e := range cu.Env {
+		names = append(names, e.Name)
 	}
+	return withStop(f, report.Probe{Kind: "custom", Target: cu.Image, EnvNames: names,
+		CommandCount: len(cu.Command), ArgsCount: len(cu.Args), Notes: f.target.Notes})
+}
+
+// withStop gives p the probe's counts and stop. When the tool asked the probe to stop and Stop
+// returned no error, the counts and stopped_when_asked are those of its Facts. Otherwise
+// stopped_when_asked is null, the counts are those that Counts gave, and a note after p's own
+// says why (section 10).
+func withStop(f facts, p report.Probe) report.Probe {
 	if f.probeStop == asked {
 		p.Lines, p.JSONLinesWithoutOK = f.probe.Lines, f.probe.JSONTextLines
 		p.StoppedWhenAsked = new(f.probe.StoppedWhenAsked)
@@ -288,7 +311,7 @@ func probeRecord(f facts, h *config.HTTP, settings []report.Setting) report.Prob
 	}
 	p.Lines, p.JSONLinesWithoutOK = f.probeLines, f.probeJSONText
 	// A new slice, so that the target's own notes are not written into.
-	p.Notes = append(append([]string(nil), f.target.Notes...), f.probeStop.note())
+	p.Notes = append(append([]string(nil), p.Notes...), f.probeStop.note())
 	return p
 }
 

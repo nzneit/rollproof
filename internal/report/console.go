@@ -153,6 +153,7 @@ func cleanRun(r Run) Run {
 	for _, x := range r.Probes {
 		x.Kind, x.Target = clean(x.Kind), clean(x.Target)
 		x.Settings, x.Notes = cleanSettings(x.Settings), cleanAll(x.Notes)
+		x.EnvNames = cleanAll(x.EnvNames)
 		c.Probes = append(c.Probes, x)
 	}
 	c.Releases = nil
@@ -285,10 +286,14 @@ func setUp(r Run) []string {
 		}
 		word := "probe"
 		for _, p := range r.Probes {
-			if p.Kind != "http" {
+			switch p.Kind {
+			case "http":
+				add(word, "built-in HTTP: "+p.Target)
+			case "custom":
+				add(word, "custom: "+p.Target)
+			default:
 				continue
 			}
-			add(word, "built-in HTTP: "+p.Target)
 			word = ""
 			lines = append(lines, probeLines(p)...)
 		}
@@ -336,11 +341,54 @@ func settingValue(s []Setting, key string) string {
 	return ""
 }
 
-// probeLines are the lines under the probe's target, each indented 12 spaces. The line that says
-// the probe did not stop when asked comes only when StoppedWhenAsked is false; when it is nil,
-// the tool did not judge the stop, and the probe's notes say why.
+// probeLines are the lines under the probe's target, each indented 12 spaces: the built-in probe's
+// settings, or a custom probe's sentence and the counts of its command and args with the names of
+// its env, and then the lines that both share. The certificate's line comes only when
+// CertificateChecked is false, never for a custom probe, whose checks the tool does not know. The
+// line that says the probe did not stop when asked comes only when StoppedWhenAsked is false; when
+// it is nil, the tool did not judge the stop, and the probe's notes say why.
 func probeLines(p Probe) []string {
 	const indent = "            "
+	var lines []string
+	if p.Kind == "custom" {
+		env := "none"
+		if len(p.EnvNames) > 0 {
+			env = strings.Join(p.EnvNames, ", ")
+		}
+		lines = []string{indent + "a custom probe judged this run; the tool does not know what it checks",
+			indent + "command: " + items(p.CommandCount) + "; args: " + items(p.ArgsCount) + "; env: " + env}
+	} else {
+		lines = []string{indent + httpSettingsLine(p)}
+	}
+	switch {
+	case p.JSONLinesWithoutOK == 1:
+		lines = append(lines, indent+"1 line was a JSON object with no ok field")
+	case p.JSONLinesWithoutOK != 0:
+		lines = append(lines, indent+strconv.Itoa(p.JSONLinesWithoutOK)+" lines were JSON objects with no ok field")
+	}
+	if p.CertificateChecked != nil && !*p.CertificateChecked {
+		lines = append(lines, indent+"the server's certificate was not verified")
+	}
+	for _, n := range p.Notes {
+		lines = append(lines, indent+clean(n))
+	}
+	if p.StoppedWhenAsked != nil && !*p.StoppedWhenAsked {
+		lines = append(lines, indent+"the probe did not stop when asked; checks still in flight were not reported")
+	}
+	return lines
+}
+
+// items writes a count of a list's items: 1 item, 3 items.
+func items(n int) string {
+	if n == 1 {
+		return "1 item"
+	}
+	return strconv.Itoa(n) + " items"
+}
+
+// httpSettingsLine is the built-in probe's settings: its rate, the time between checks, its
+// timeout and the statuses it expects.
+func httpSettingsLine(p Probe) string {
 	rate := settingValue(p.Settings, "probe.http.rate")
 	every := ""
 	if n, err := strconv.ParseFloat(rate, 64); err == nil && n > 0 {
@@ -351,25 +399,9 @@ func probeLines(p Probe) []string {
 			every = fmt.Sprintf(" (one check every %.1f ms)", ms)
 		}
 	}
-	lines := []string{indent + rate + " a second" + every + ", timeout " +
+	return rate + " a second" + every + ", timeout " +
 		spaced(settingValue(p.Settings, "probe.http.timeout")) + ", status " +
-		settingValue(p.Settings, "probe.http.expect-status")}
-	switch {
-	case p.JSONLinesWithoutOK == 1:
-		lines = append(lines, indent+"1 line was a JSON object with no ok field")
-	case p.JSONLinesWithoutOK != 0:
-		lines = append(lines, indent+strconv.Itoa(p.JSONLinesWithoutOK)+" lines were JSON objects with no ok field")
-	}
-	if !p.CertificateChecked {
-		lines = append(lines, indent+"the server's certificate was not verified")
-	}
-	for _, n := range p.Notes {
-		lines = append(lines, indent+clean(n))
-	}
-	if p.StoppedWhenAsked != nil && !*p.StoppedWhenAsked {
-		lines = append(lines, indent+"the probe did not stop when asked; checks still in flight were not reported")
-	}
-	return lines
+		settingValue(p.Settings, "probe.http.expect-status")
 }
 
 // installLines are the install's lines: the first has "install" in the first
@@ -651,10 +683,25 @@ func exercisedLists(r Run) []string {
 	if hasWindowThatRan(r, "deploy") && !hasWindowThatRan(r, "rollback") {
 		lines = append(lines, "  the candidate's shutdown and the installed release's start-up, because the run has no rollback")
 	}
-	for _, n := range notExercised {
+	for _, n := range notExercisedBy(r) {
 		lines = append(lines, "  "+n)
 	}
 	return lines
+}
+
+// notExercisedBy is the fixed list of what a pass did not exercise. With a custom probe, the
+// lines that state facts of the built-in probe, the design's second, third and seventh, give way
+// to one, in the second's place: "whatever the custom probe does not check".
+func notExercisedBy(r Run) []string {
+	custom := false
+	for _, p := range r.Probes {
+		custom = custom || p.Kind == "custom"
+	}
+	if !custom {
+		return notExercised
+	}
+	return slices.Concat(notExercised[:1], []string{"whatever the custom probe does not check"},
+		notExercised[3:6], notExercised[7:])
 }
 
 // unreached reports whether every workload of tr has Probed yes or no and no

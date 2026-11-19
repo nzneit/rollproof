@@ -224,6 +224,9 @@ func TestEachBeforeFailure(t *testing.T) {
 			w.watcher.installErr = verdict.Condition{Code: verdict.NothingWatched,
 				Text: "15 s after the install command returned, namespace orders held no Deployment, StatefulSet or DaemonSet"}
 		}, "nothing-watched", then("watcher", "install", "install-ready", "end-commands", "watch-stop", "delete")},
+		{"probe options", func(w *world) {
+			w.cluster.probeErr = verdict.Condition{Code: verdict.ConfigRejected, Text: "probe.custom.env[0]: not a form a pod's env takes"}
+		}, "config-rejected", then("watcher", "install", "install-ready", "target", "probe", "end-commands", "watch-stop", "delete")},
 		{"probe not started", func(w *world) {
 			w.probe.startErr = verdict.Condition{Code: verdict.ProbeNotStarted, Text: "no observation within limits.timeout"}
 		}, "probe-not-started", then("watcher", "install", "install-ready", "target", "probe", "start", "probe-stop", "end-commands", "watch-stop", "delete")},
@@ -275,16 +278,72 @@ func TestSetupStoppedBySignal(t *testing.T) {
 
 func TestNotBuilt(t *testing.T) {
 	w := newWorld(t)
-	w.cfg.Probe = config.Probe{Custom: &config.Custom{
-		Image: "registry.example/tools/busybox@sha256:" + strings.Repeat("0", 64)}}
+	w.cfg.Registries = []config.Registry{{Host: "registry.example"}}
 	if code := w.run(context.Background()); code != 2 {
 		t.Fatalf("exit %d, want 2", code)
 	}
 	if diff := cmp.Diff([]string{"load"}, w.calls.list()); diff != "" {
 		t.Errorf("calls (-want +got):\n%s", diff)
 	}
-	if window, text := w.result().windowOf("config-rejected"); window != "" || text != "not built yet: probe.custom" {
+	if window, text := w.result().windowOf("config-rejected"); window != "" || text != "not built yet: registries" {
 		t.Errorf("config-rejected in window %q with text %q", window, text)
+	}
+}
+
+// A custom probe has no target check, and watch is told of no Service: whether a workload is
+// probed is not known (decision 8). result.json names the probe by its image and gives its env's
+// names and the counts of its command and args, never their values (section 8, "Secrets").
+func TestCustomProbeHasNoTargetCheck(t *testing.T) {
+	w := newWorld(t)
+	image := "registry.example/tools/busybox@sha256:" + strings.Repeat("0", 64)
+	w.cfg.Probe = config.Probe{Custom: &config.Custom{Image: image, Command: []string{"sh", "-c", "echo S3CRET-VALUE"},
+		Env: []config.EnvVar{{Name: "TOKEN", ValueFrom: map[string]any{"secretKeyRef": map[string]any{"name": "probe-token", "key": "token"}}}}}}
+	for _, name := range []verdict.WindowName{verdict.Deploy, verdict.Rollback} {
+		tr := w.watcher.transitions[name]
+		tr.Workloads = slices.Clone(tr.Workloads)
+		tr.Workloads[0].Probed = "not known"
+		w.watcher.transitions[name] = tr
+	}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if slices.Contains(w.calls.list(), "target") {
+		t.Errorf("the target was checked for a custom probe: calls %q", w.calls.list())
+	}
+	if w.watcher.service != nil {
+		t.Errorf("UseService was given %v, want nil", w.watcher.service)
+	}
+	if calls := w.watcher.useCalls; len(calls) == 0 || calls[len(calls)-1] != "install-ready" {
+		t.Errorf("UseService came after %q, want install-ready last", calls)
+	}
+	b, err := os.ReadFile(filepath.Join(w.out, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"S3CRET-VALUE", "probe-token"} {
+		if strings.Contains(string(b), value) {
+			t.Errorf("result.json holds %q", value)
+		}
+	}
+	var file map[string]any
+	if err := json.Unmarshal(b, &file); err != nil {
+		t.Fatal(err)
+	}
+	p := file["probes"].([]any)[0].(map[string]any)
+	want := map[string]any{"kind": "custom", "target": image, "env_names": []any{"TOKEN"},
+		"command_count": 3.0, "args_count": 0.0, "certificate_checked": nil}
+	for k, v := range want {
+		if diff := cmp.Diff(v, p[k]); diff != "" {
+			t.Errorf("probes[0].%s (-want +got):\n%s", k, diff)
+		}
+	}
+	if _, ok := p["certificate_checked"]; !ok {
+		t.Error("probes[0] has no certificate_checked")
+	}
+	tr := file["transitions"].([]any)[0].(map[string]any)
+	probed := tr["workloads"].([]any)[0].(map[string]any)["probed"]
+	if probed != "not known" {
+		t.Errorf("transitions[0].workloads[0].probed is %v, want not known", probed)
 	}
 }
 

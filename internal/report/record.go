@@ -124,7 +124,10 @@ type Probe struct {
 	ArgsCount          int       `json:"args_count"`
 	Lines              int       `json:"lines"`
 	JSONLinesWithoutOK int       `json:"json_lines_without_ok"`
-	CertificateChecked bool      `json:"certificate_checked"`
+	// CertificateChecked is whether the probe checked the server's certificate: false for the
+	// built-in probe on https, true on http. Nil, null in result.json, for a custom probe, whose
+	// checks the tool does not know.
+	CertificateChecked *bool `json:"certificate_checked"`
 	// StoppedWhenAsked is true when the probe stopped within the drain after the tool asked it;
 	// false when it did not. Null when the tool did not ask it, stopped waiting for it because a
 	// signal came, or failed while it stopped it; Notes then says which.
