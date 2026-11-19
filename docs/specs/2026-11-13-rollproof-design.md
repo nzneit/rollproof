@@ -2688,9 +2688,10 @@ which step proves which point.
       creation by `limits.timeout` on its own, but the code counted one deadline from before kind
       created the nodes, so a slow creation used up the waits for the registry and for the nodes'
       readiness. The code now follows section 8. A creation that hangs can therefore take kind's
-      own time and up to four times `limits.timeout` before it fails: the pulls of the node image
-      and of the registry image, the registry's answer and the nodes' readiness (point 28). What
-      lost: **a limit of its own for the cluster's creation**, a new
+      own time and up to four times `limits.timeout` before it fails, while the engine answers its
+      own commands: the pulls of the node image and of the registry image, the registry's answer
+      and the nodes' readiness (point 28). What lost: **a limit of its own for the cluster's
+      creation**, a new
       setting for a fault of the code; and **a larger `limits.timeout` in the fixture that met
       it**, which would hide the fault.
 

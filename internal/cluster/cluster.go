@@ -138,11 +138,11 @@ type Cluster struct {
 }
 
 // Create removes whatever an earlier run of this name left, then has the engine pull the node
-// image, creates the cluster and its registry and returns when every node is ready, DNS runs and
-// both namespaces exist. Each node keeps an attempt to connect that had no answer for 5 s
-// (section 9). On an error it removes the run, unless s.Keep is set or ctx has ended; when that
-// removal fails too, parts stay behind and the text says so. An error is a Condition with
-// ClusterFailed. A name without the prefix rollproof- is an InternalError.
+// image if its store lacks it, creates the cluster and its registry and returns when every node is
+// ready, DNS runs and both namespaces exist. Each node keeps an attempt to connect that had no
+// answer for 5 s (section 9). On an error it removes the run, unless s.Keep is set or ctx has
+// ended; when that removal fails too, parts stay behind and the text says so. An error is a
+// Condition with ClusterFailed. A name without the prefix rollproof- is an InternalError.
 func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	if err := remove(ctx, e, s.Name, s.RunDir); err != nil {
 		var c verdict.Condition
@@ -193,6 +193,8 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 		return fail("make the run's folder", err)
 	}
 
+	// The reference kind is given, so that kind's own check finds the image there and does not
+	// pull it again, outside the limit.
 	ref := s.NodeImage
 	if ref == "" {
 		ref = DefaultNodeImage()

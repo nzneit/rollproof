@@ -29,8 +29,9 @@ const (
 // startRegistry starts the container NAME-registry from image on the engine's network for kind,
 // published on a free port of the runner's loopback, and returns when GET /v2/ answers 200. push
 // is the registry as the runner reaches it, 127.0.0.1:PORT; node is the same registry as the
-// nodes reach it, ADDRESS:5000. It first pulls image with pullIfMissing and limit, and it then
-// waits at most limit, counted from the container's start, for an answer.
+// nodes reach it, ADDRESS:5000. It first has the engine pull image when its store lacks it,
+// within limit, and it then waits at most limit, counted from the container's start, for an
+// answer.
 func startRegistry(ctx context.Context, e Engine, name, image string, limit time.Duration) (push, node string, err error) {
 	if err := e.pullIfMissing(ctx, image, limit); err != nil {
 		return "", "", err

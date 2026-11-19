@@ -14,8 +14,8 @@ import (
 	"time"
 )
 
-// startRegistry's wait for the registry counts limit from its own call: a registry that answers
-// nothing is given the whole limit, and no more than one poll beyond it.
+// startRegistry's wait for the registry counts limit from the container's start: a registry that
+// answers nothing is given the whole limit, and no more than one poll beyond it.
 func TestStartRegistryCountsItsOwnLimit(t *testing.T) {
 	// The fake engine starts no container: it exits 0 for every command, and its inspect names an
 	// address for the nodes. The port that startRegistry picked on the runner stays free, so
