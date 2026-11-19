@@ -100,6 +100,24 @@ func TestCreateKindRetries(t *testing.T) {
 	}
 }
 
+// Step 6 of Create: the wait for the nodes counts limits.timeout from its own start, so a cluster
+// whose creation was slow does not shorten it.
+func TestWaitReadyCountsItsOwnLimit(t *testing.T) {
+	const limit = 1500 * time.Millisecond
+	start := time.Now()
+	err := waitReady(context.Background(), k8sfake.NewClientset(), 1, limit)
+	took := time.Since(start)
+	if err == nil {
+		t.Fatal("waitReady gave no error")
+	}
+	if !strings.Contains(err.Error(), "at the deadline 0 of 1 nodes were Ready") {
+		t.Errorf("error %q, want it to give the counts at the deadline", err)
+	}
+	if took < limit || took >= 3*time.Second {
+		t.Errorf("waitReady took %v, want at least %v and less than 3s", took, limit)
+	}
+}
+
 // Step 7 of Create: a namespace that exists already, such as default, counts as made; any other
 // failure is the step's.
 func TestEnsureNamespaces(t *testing.T) {
@@ -149,6 +167,7 @@ func TestKept(t *testing.T) {
 func TestCreateFailureTexts(t *testing.T) {
 	const name = "rollproof-test-unit"
 	gone := errors.New("the engine is gone")
+	pullFailed := errors.New("docker.io/kindest/node:v0@sha256:0 could not be pulled within 1m0s")
 	for _, tc := range []struct {
 		name            string
 		setup           func(t *testing.T, runDir string)
@@ -156,6 +175,9 @@ func TestCreateFailureTexts(t *testing.T) {
 		writeKubeconfig bool    // what kind's Create writes before it fails
 		creates         []error // what each attempt of kind's Create returns, in order
 		deletes         []error // what each call of kind's Delete returns, in order: step 1's first
+		pull            error   // what the pull of the node image returns
+		pullAfterRunDir bool    // the pull of the node image checks that the run's folder exists when it is called
+		wantImage       string  // what the pull of the node image is given, when not empty
 		want            func(runDir string) string
 		joined          error // an error that the returned error holds beside the Condition, for the log
 	}{
@@ -185,6 +207,16 @@ func TestCreateFailureTexts(t *testing.T) {
 			deletes: []error{nil, errors.New("exit status 1"), nil},
 			want: func(string) string {
 				return "create the kind cluster: " + missedLine(1).Error() + "; delete the failed attempt 1: exit status 1" + inotifyHint
+			},
+		},
+		{
+			name:            "the node image's pull fails",
+			pull:            pullFailed,
+			pullAfterRunDir: true,
+			deletes:         []error{nil, nil},
+			wantImage:       DefaultNodeImage(),
+			want: func(string) string {
+				return "pull the node image: " + pullFailed.Error()
 			},
 		},
 		{
@@ -224,6 +256,19 @@ func TestCreateFailureTexts(t *testing.T) {
 				deletes++
 				return tc.deletes[deletes-1]
 			}
+			oldPull := pullImage
+			t.Cleanup(func() { pullImage = oldPull })
+			var pulledImage string
+			var pulledLimit time.Duration
+			pullImage = func(_ Engine, _ context.Context, image string, limit time.Duration) error {
+				pulledImage, pulledLimit = image, limit
+				if tc.pullAfterRunDir {
+					if _, err := os.Stat(runDir); err != nil {
+						t.Errorf("the pull of the node image was asked for before the run's folder was made: %v", err)
+					}
+				}
+				return tc.pull
+			}
 			if tc.setup != nil {
 				tc.setup(t, runDir)
 			}
@@ -245,6 +290,9 @@ func TestCreateFailureTexts(t *testing.T) {
 			}
 			if creates != len(tc.creates) || deletes != len(tc.deletes) {
 				t.Errorf("%d creates and %d deletes, want %d and %d", creates, deletes, len(tc.creates), len(tc.deletes))
+			}
+			if tc.wantImage != "" && (pulledImage != tc.wantImage || pulledLimit != time.Minute) {
+				t.Errorf("the pull of the node image was given %q and %v, want %q and %v", pulledImage, pulledLimit, tc.wantImage, time.Minute)
 			}
 		})
 	}

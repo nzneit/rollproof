@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -53,8 +54,11 @@ type resultFile struct {
 	} `json:"install"`
 	Warnings []string `json:"warnings"`
 	Probes   []struct {
-		Target string `json:"target"`
-		Lines  int    `json:"lines"`
+		Target             string   `json:"target"`
+		Lines              int      `json:"lines"`
+		JSONLinesWithoutOK int      `json:"json_lines_without_ok"`
+		StoppedWhenAsked   *bool    `json:"stopped_when_asked"` // nil for null
+		Notes              []string `json:"notes"`
 	} `json:"probes"`
 	Transitions []struct {
 		Name    string `json:"name"`
@@ -113,7 +117,9 @@ func (r resultFile) windowOf(code string) (window, text string) {
 func TestPass(t *testing.T) {
 	w := newWorld(t)
 	w.hooks["probe-stop"] = func() {
-		if w.result().Final {
+		// The probe is stopped on a goroutine of its own: the hook reports with t.Error.
+		r, ok := w.resultFromHook()
+		if ok && r.Final {
 			t.Error("result.json was final before the probe was stopped")
 		}
 	}
@@ -497,7 +503,7 @@ func TestSignalWhileStoppingTheProbe(t *testing.T) {
 			}
 			w.hooks["probe-stop"] = cancel
 			if code := w.run(ctx); code != row.exit {
-				t.Fatalf("exit %d, want %d", code, row.exit)
+				t.Errorf("exit %d, want %d", code, row.exit)
 			}
 			r := w.result()
 			if window, _ := r.windowOf("interrupted"); window != "rollback" {
@@ -703,6 +709,9 @@ func TestWindowMarks(t *testing.T) {
 	}
 	if err := json.Unmarshal(b, &marks); err != nil {
 		t.Fatal(err)
+	}
+	if len(marks) != 4 {
+		t.Fatalf("%d window marks, want 4", len(marks))
 	}
 	var names []string
 	for _, m := range marks {
@@ -1145,9 +1154,11 @@ func TestARefusedFinalKeepsTheVerdictsClass(t *testing.T) {
 			}
 			w.hooks["probe-stop"] = func() {
 				// Removing the folder after the first result.json refuses the final write for
-				// root as well, which a read-only folder does not.
+				// root as well, which a read-only folder does not. The probe is stopped on a
+				// goroutine of its own: the hook reports with t.Error.
 				if err := os.RemoveAll(w.out); err != nil {
-					t.Fatal(err)
+					t.Error(err)
+					return
 				}
 			}
 			if code := w.run(context.Background()); code != row.want {
@@ -1287,6 +1298,460 @@ func TestTheProbesStopErrorIsAWarning(t *testing.T) {
 	if !strings.Contains(w.stdout.String(), "the pod delete was refused") {
 		t.Errorf("the console does not print the warning:\n%s", w.stdout.String())
 	}
+	// The stop failed without a signal: the tool did not finish asking, and does not judge the probe.
+	w.probeStopNotJudged(noteStopFailed)
+}
+
+// The notes of a probe entry whose stop the tool did not judge, exact (section 10).
+const (
+	noteNotAsked    = "the run was interrupted, so the tool did not ask the probe to stop"
+	noteCutBySignal = "the run was interrupted while the tool waited for the probe to stop"
+	noteStopFailed  = "the tool failed while it stopped the probe"
+)
+
+// probeStopNotJudged fails the test unless result.json's one probe entry has stopped_when_asked
+// null, the counts that the probe's Counts gives, and note as its last note, and unless the
+// console printed note and no "did not stop when asked".
+func (w *world) probeStopNotJudged(note string) {
+	w.t.Helper()
+	r := w.result()
+	if len(r.Probes) != 1 {
+		w.t.Fatalf("probes %+v, want one", r.Probes)
+	}
+	p := r.Probes[0]
+	if p.StoppedWhenAsked != nil {
+		w.t.Errorf("stopped_when_asked is %v, want null", *p.StoppedWhenAsked)
+	}
+	if p.Lines != w.probe.linesRead || p.JSONLinesWithoutOK != w.probe.jsonTextRead {
+		w.t.Errorf("lines %d and json_lines_without_ok %d, want the %d and %d that Counts gives",
+			p.Lines, p.JSONLinesWithoutOK, w.probe.linesRead, w.probe.jsonTextRead)
+	}
+	if len(p.Notes) == 0 || p.Notes[len(p.Notes)-1] != note {
+		w.t.Errorf("notes %q, want %q last", p.Notes, note)
+	}
+	if out := w.stdout.String(); !strings.Contains(out, note) || strings.Contains(out, "did not stop when asked") {
+		w.t.Errorf("the console does not print the note %q, or says that the probe did not stop when asked:\n%s", note, out)
+	}
+}
+
+func TestASignalLeavesTheProbeUnasked(t *testing.T) {
+	w := newWorld(t)
+	w.probe.linesRead, w.probe.jsonTextRead = 7, 1
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	u := w.units()
+	u.Clock = &lateClock{fakeClock: w.clock, before: cancel} // the signal comes in the steady window
+	code := Run(ctx, Options{ConfigPath: filepath.Join(w.cfg.Dir, "rollproof.yaml"), Out: w.out,
+		Stdout: &w.stdout, Stderr: &w.stderr, Version: "test", Getenv: func(string) string { return "" }}, u)
+	if code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	if window, _ := w.result().windowOf("interrupted"); window != "steady" {
+		t.Errorf("interrupted in window %q, want steady", window)
+	}
+	if n := w.calls.count("probe-stop"); n != 0 {
+		t.Errorf("the probe's Stop was called %d times, want 0", n)
+	}
+	if n := w.calls.count("delete"); n != 0 {
+		t.Errorf("Delete called %d times, want 0: the cluster stays after a signal", n)
+	}
+	w.probeStopNotJudged(noteNotAsked)
+}
+
+func TestASignalDuringTheStop(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.probe.facts = probe.Facts{Lines: 3, StoppedWhenAsked: false}
+	w.probe.linesRead, w.probe.jsonTextRead = 7, 1
+	w.hooks["probe-stop"] = func() {
+		cancel()
+		w.probe.stopErr = context.Canceled // Stop gives up when its context ends
+	}
+	if code := w.run(ctx); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	w.probeStopNotJudged(noteCutBySignal)
+}
+
+func TestAStopThatPanicsIsTheToolsFault(t *testing.T) {
+	w := newWorld(t)
+	w.probe.linesRead, w.probe.jsonTextRead = 7, 1
+	w.hooks["probe-stop"] = func() { panic("the probe unit broke") }
+	if code := w.run(context.Background()); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	if codes := w.result().codes(); !slices.Contains(codes, "internal-error") {
+		t.Errorf("reasons %q, want internal-error among them", codes)
+	}
+	w.probeStopNotJudged(noteStopFailed)
+}
+
+func TestASignalDuringTheProbesStart(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.probe.startWaits = true
+	w.probe.linesRead, w.probe.jsonTextRead = 7, 1
+	w.hooks["start"] = cancel
+	if code := w.run(ctx); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	if diff := cmp.Diff([]string{"interrupted"}, w.result().codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	if n := w.calls.count("probe-stop"); n != 0 {
+		t.Errorf("the probe's Stop was called %d times, want 0", n)
+	}
+	w.probeStopNotJudged(noteNotAsked)
+}
+
+// A Start that failed other than by its context had begun its own stop, also when a signal came
+// meanwhile: Stop is asked for what that stop left. When the signal cut that stop, the entry says
+// so; when the stop had completed, its Facts are kept.
+func TestASignalDuringAFailedStartsStop(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		stopErr error
+	}{
+		{"the signal cut the stop", context.Canceled},
+		{"the stop had completed", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			w.hooks["start"] = cancel
+			w.probe.startErr = verdict.Condition{Code: verdict.ProbeNotStarted, Text: "no observation within limits.timeout"}
+			w.probe.stopErr = c.stopErr
+			w.probe.facts = probe.Facts{Lines: 3, JSONTextLines: 1, StoppedWhenAsked: true}
+			w.probe.linesRead, w.probe.jsonTextRead = 7, 2
+			if code := w.run(ctx); code != 2 {
+				t.Errorf("exit %d, want 2", code)
+			}
+			if diff := cmp.Diff([]string{"interrupted"}, w.result().codes()); diff != "" {
+				t.Errorf("reasons (-want +got):\n%s", diff)
+			}
+			if n := w.calls.count("probe-stop"); n != 1 {
+				t.Errorf("the probe's Stop was called %d times, want 1", n)
+			}
+			if c.stopErr != nil {
+				w.probeStopNotJudged(noteCutBySignal)
+				return
+			}
+			r := w.result()
+			if len(r.Probes) != 1 || r.Probes[0].StoppedWhenAsked == nil || !*r.Probes[0].StoppedWhenAsked ||
+				r.Probes[0].Lines != 3 || r.Probes[0].JSONLinesWithoutOK != 1 {
+				t.Errorf("probes %+v, want one with the Facts of the stop: stopped when asked, 3 lines, 1 JSON text", r.Probes)
+			}
+		})
+	}
+}
+
+// Section 7, "When the tool fails": a command that still runs is stopped before the probe.
+func TestCommandsEndBeforeTheProbeStops(t *testing.T) {
+	w := newWorld(t)
+	hold := make(chan struct{})
+	defer close(hold)
+	w.deployer.block = map[string]chan struct{}{"deploy": hold}
+	w.deployer.orCtx = map[string]bool{"deploy": true}
+	started := make(chan struct{})
+	w.hooks["deploy"] = func() { close(started) } // the command's goroutine is inside the command
+	w.watcher.before = func(name verdict.WindowName) {
+		if name == verdict.Deploy {
+			<-started // the deploy command waits on its block or its context
+			panic("the watcher broke")
+		}
+	}
+	w.hooks["probe-stop"] = func() {
+		// The probe is stopped on a goroutine of its own: the hook reports with t.Error.
+		if !w.deployer.cancelled("deploy") {
+			t.Error("the probe was asked to stop while the deploy command's context had not ended")
+		}
+	}
+	if code := w.run(context.Background()); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if len(r.Probes) != 1 || r.Probes[0].StoppedWhenAsked == nil || !*r.Probes[0].StoppedWhenAsked {
+		t.Errorf("probes %+v, want one that stopped when asked", r.Probes)
+	}
+}
+
+// The probe's channel is taken before the stop begins: a panic there leaves no stop running behind
+// it, and the stop is the tool's failure.
+func TestEventsThatPanicsInTheStop(t *testing.T) {
+	w := newWorld(t)
+	w.probe.eventsPanic = true
+	w.probe.linesRead, w.probe.jsonTextRead = 7, 1
+	if code := w.run(context.Background()); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	if codes := w.result().codes(); !slices.Contains(codes, "internal-error") {
+		t.Errorf("reasons %q, want internal-error among them", codes)
+	}
+	w.probeStopNotJudged(noteStopFailed)
+}
+
+// A decision that panics in the stop after a failure of the tool, and again in its handler, is a
+// warning: the verdict was decided when the failure was placed.
+func TestADecisionThatPanicsTwice(t *testing.T) {
+	w := newWorld(t)
+	armed, calls := false, 0
+	w.hooks["transition-deploy"] = func() {
+		armed = true
+		panic("the watcher broke")
+	}
+	defer func(h func()) { decideHook = h }(decideHook)
+	decideHook = func() {
+		if !armed {
+			return
+		}
+		calls++
+		if calls == 2 || calls == 3 { // the first is toolFailed's, which returns
+			panic("the verdict broke")
+		}
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			t.Fatalf("Run panicked: %v", p)
+		}
+	}()
+	code := w.run(context.Background())
+	if code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	r := w.result()
+	found := false
+	for _, x := range r.Warnings {
+		found = found || strings.HasPrefix(x, "the tool failed after the verdict was decided: ")
+	}
+	if !found {
+		t.Errorf("warnings %q, want one that begins %q", r.Warnings, "the tool failed after the verdict was decided: ")
+	}
+}
+
+// Rule 3: a failure of the tool and a signal in one window are both reasons of that window, and the
+// signal is no warning after the verdict.
+func TestAFailureAndASignalInOneWindow(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.hooks["transition-deploy"] = func() {
+		cancel()
+		panic("the watcher broke")
+	}
+	if code := w.run(ctx); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	r := w.result()
+	var inDeploy []string
+	for _, x := range r.Reasons {
+		if x.Window == "deploy" {
+			inDeploy = append(inDeploy, x.Code)
+		}
+	}
+	if !slices.Contains(inDeploy, "internal-error") || !slices.Contains(inDeploy, "interrupted") {
+		t.Errorf("the deploy window's reasons are %q, want internal-error and interrupted", inDeploy)
+	}
+	if slices.Contains(r.Warnings, "interrupted after the verdict was decided") {
+		t.Errorf("warnings %q: the signal was reported after the verdict too", r.Warnings)
+	}
+}
+
+// count is how many of the reasons have the code.
+func (r resultFile) count(code string) int {
+	n := 0
+	for _, x := range r.Reasons {
+		if x.Code == code {
+			n++
+		}
+	}
+	return n
+}
+
+// A signal that comes once the stop after a failure of the tool has begun, and before a panic in
+// that stop, is placed before the handler's decision, as the stop's own path places one.
+func TestASignalBeforeAPanicInTheStopAfterAFailure(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.hooks["install-settled"] = func() { panic("the watch unit broke") }
+	w.probe.eventsPanic = true
+	w.probe.linesRead, w.probe.jsonTextRead = 7, 1
+	w.hooks["events"] = cancel // stopAfterFailure's guard has passed; Events then panics
+	if code := w.run(ctx); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if n := r.count("interrupted"); n != 1 {
+		t.Errorf("%d interrupted reasons, want 1; reasons %q", n, r.codes())
+	}
+	if window, _ := r.windowOf("interrupted"); window != "install" {
+		t.Errorf("interrupted in window %q, want install, the last that began", window)
+	}
+	var faults []string
+	for _, x := range r.Reasons {
+		if x.Code == "internal-error" {
+			faults = append(faults, x.Text)
+		}
+	}
+	if diff := cmp.Diff([]string{"the watch unit broke", "the probe's events broke"}, faults); diff != "" {
+		t.Errorf("internal-error texts (-want +got):\n%s", diff)
+	}
+	if slices.Contains(r.Warnings, "interrupted after the verdict was decided") {
+		t.Errorf("warnings %q: the signal was reported after the verdict too", r.Warnings)
+	}
+	w.probeStopNotJudged(noteStopFailed)
+}
+
+// The decision that places a signal beside a failure of the tool panics: the panic is a warning,
+// the run goes on to its end and writes its final result, and the verdict kept is the one decided
+// at the failure. That verdict does not hold the signal, which is then reported as one after it.
+func TestADecisionAfterASignalThatPanics(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	armed, calls := false, 0
+	w.hooks["transition-deploy"] = func() {
+		armed = true
+		cancel()
+		panic("the watcher broke")
+	}
+	defer func(h func()) { decideHook = h }(decideHook)
+	decideHook = func() {
+		if !armed {
+			return
+		}
+		calls++
+		if calls == 2 { // the first is toolFailed's, which returns; the second places the signal
+			panic("the verdict broke")
+		}
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			t.Fatalf("Run panicked: %v", p)
+		}
+	}()
+	if code := w.run(ctx); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if !r.Final || r.Verdict != "not-verified" {
+		t.Errorf("final %v, verdict %q; want a final not-verified", r.Final, r.Verdict)
+	}
+	if window, text := r.windowOf("internal-error"); window != "deploy" || text != "the watcher broke" {
+		t.Errorf("internal-error in window %q with text %q", window, text)
+	}
+	want := []string{"the tool failed after the verdict was decided: the verdict broke",
+		"interrupted after the verdict was decided"}
+	if diff := cmp.Diff(want, r.Warnings); diff != "" {
+		t.Errorf("warnings (-want +got):\n%s", diff)
+	}
+	if n := w.calls.count("end-commands"); n != 1 {
+		t.Errorf("EndCommands called %d times, want 1: the run did not go on to its end", n)
+	}
+}
+
+// The decision that places a signal beside a failure of the tool panics after Decide, while it
+// keeps the pods of a first failure that the probe's last lines brought: that decision keeps
+// nothing, so the verdict kept is the one decided at the failure, and the signal is reported once,
+// as one after the verdict.
+func TestADecisionThatPanicsWhileItKeepsThePods(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var armed atomic.Bool
+	w.hooks["transition-deploy"] = func() {
+		w.clock.Advance(2 * time.Second)
+		at := w.clock.Now().Add(-time.Second).Sub(t0)
+		w.probe.last = []probe.Event{failureAt(at, at)} // a failed check in the deploy window
+		panic("the watcher broke")
+	}
+	w.hooks["probe-stop"] = func() {
+		armed.Store(true)
+		cancel()
+	}
+	w.hooks["pods-at"] = func() {
+		if armed.Load() {
+			panic("the watch unit broke")
+		}
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			t.Fatalf("Run panicked: %v", p)
+		}
+	}()
+	if code := w.run(ctx); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if n := r.count("interrupted"); n != 0 {
+		t.Errorf("%d interrupted reasons, want none: the decision that placed the signal kept nothing; reasons %q", n, r.codes())
+	}
+	if n := w.calls.count("probe-stop"); n != 1 {
+		t.Errorf("the probe's Stop was called %d times, want 1", n)
+	}
+	want := []string{"the tool failed after the verdict was decided: the watch unit broke",
+		"interrupted after the verdict was decided"}
+	if diff := cmp.Diff(want, r.Warnings); diff != "" {
+		t.Errorf("warnings (-want +got):\n%s", diff)
+	}
+}
+
+// Counts is read once, by the first record: a rewrite of result.json for a later warning gives
+// the same counts, also when the probe's counts have moved on since.
+func TestTheProbesCountsAreReadOnce(t *testing.T) {
+	w := newWorld(t)
+	w.probe.stopErr = errors.New("the pod delete was refused") // the stop gives no Facts to use
+	w.probe.linesRead, w.probe.jsonTextRead = 7, 1
+	w.cluster.deleteErr = errors.New("the engine did not answer") // a warning after the first write
+	w.hooks["delete"] = func() {
+		if p := w.result().Probes; len(p) != 1 || p[0].Lines != 7 || p[0].JSONLinesWithoutOK != 1 {
+			t.Errorf("the first final result.json has probes %+v, want 7 lines and 1", p)
+		}
+		w.probe.linesRead, w.probe.jsonTextRead = 99, 9
+	}
+	if code := w.run(context.Background()); code != 0 {
+		t.Errorf("exit %d, want 0", code)
+	}
+	r := w.result()
+	if !slices.Contains(r.Warnings, "the cluster was not deleted: the engine did not answer") {
+		t.Fatalf("warnings %q: result.json was not written again", r.Warnings)
+	}
+	if p := r.Probes; len(p) != 1 || p[0].Lines != 7 || p[0].JSONLinesWithoutOK != 1 {
+		t.Errorf("the rewritten result.json has probes %+v, want the first counts, 7 lines and 1", p)
+	}
+}
+
+// A signal already placed as a reason is not placed again when a failure of the tool follows it.
+func TestASignalPlacedBeforeAToolFailureIsPlacedOnce(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer func(h func(probe.Event)) { eventHook = h }(eventHook)
+	eventHook = func(probe.Event) {
+		if ctx.Err() != nil {
+			panic("the timeline broke") // the reader fails on the first line after the signal
+		}
+	}
+	u := w.units()
+	u.Clock = &lateClock{fakeClock: w.clock, before: func() {
+		cancel() // the signal comes in the steady window
+		w.probe.send(passes(1, 1)[0])
+	}}
+	code := Run(ctx, Options{ConfigPath: filepath.Join(w.cfg.Dir, "rollproof.yaml"), Out: w.out,
+		Stdout: &w.stdout, Stderr: &w.stderr, Version: "test", Getenv: func(string) string { return "" }}, u)
+	if code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if n := r.count("interrupted"); n != 1 {
+		t.Errorf("%d interrupted reasons, want 1; reasons %q", n, r.codes())
+	}
+	if window, text := r.windowOf("internal-error"); window != "steady" || text != "the timeline broke" {
+		t.Errorf("internal-error in window %q with text %q", window, text)
+	}
 }
 
 // The run reads the probe's events from before the probe starts (section 5). Start sends 5,000
@@ -1405,6 +1870,49 @@ func TestFaultsBeforeAFailedStartAreReasons(t *testing.T) {
 	if n := w.calls.count("probe-stop"); n != 1 {
 		t.Errorf("the probe's Stop was called %d times after a failed start, want 1", n)
 	}
+}
+
+// A start that failed leaves the probe to be stopped; when that stop also fails, the run keeps it
+// as a warning, as it does for any stop error (section 6).
+func TestAFailedStartWhoseStopFailedWarns(t *testing.T) {
+	w := newWorld(t)
+	w.probe.startErr = verdict.Condition{Code: verdict.ProbeNotStarted, Text: "no observation within limits.timeout"}
+	w.probe.stopErr = errors.New("the pod delete was refused")
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if len(r.Warnings) != 1 {
+		t.Fatalf("warnings %q, want the stop's one", r.Warnings)
+	}
+	for _, part := range []string{"the probe could not be stopped", "the pod delete was refused", "its pod may still be there"} {
+		if !strings.Contains(r.Warnings[0], part) {
+			t.Errorf("the warning %q does not hold %q", r.Warnings[0], part)
+		}
+	}
+	if n := w.calls.count("probe-stop"); n != 1 {
+		t.Errorf("the probe's Stop was called %d times after a failed start, want 1", n)
+	}
+	w.probeStopNotJudged(noteStopFailed)
+}
+
+// A Start that panicked before its log was followed gives an error at Stop: the tool did not
+// finish asking, so the probe's stop is not judged and its pod may still be there.
+func TestAStartThatPanicsWhoseStopGivesAnError(t *testing.T) {
+	w := newWorld(t)
+	w.hooks["start"] = func() { panic("the probe unit broke") }
+	w.probe.stopErr = errors.New("the probe's start failed before its log was followed")
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if codes := r.codes(); !slices.Contains(codes, "internal-error") {
+		t.Errorf("reasons %q, want internal-error among them", codes)
+	}
+	if len(r.Warnings) != 1 || !strings.Contains(r.Warnings[0], "its pod may still be there") {
+		t.Errorf("warnings %q, want the stop's one", r.Warnings)
+	}
+	w.probeStopNotJudged(noteStopFailed)
 }
 
 // lateClock is the fake clock except that it runs before once, ahead of the run's first wait,
@@ -1568,8 +2076,8 @@ func TestASettlingWithNoResultIsTheToolsFailure(t *testing.T) {
 	if code := w.run(context.Background()); code != 2 {
 		t.Fatalf("exit %d, want 2", code)
 	}
-	if window, _ := w.result().windowOf("internal-error"); window != "install" {
-		t.Errorf("internal-error in window %q, want install", window)
+	if window, text := w.result().windowOf("internal-error"); window != "install" || text != "the install neither settled nor failed" {
+		t.Errorf("internal-error in window %q with text %q", window, text)
 	}
 	w.probeWasStopped()
 }
@@ -1624,7 +2132,7 @@ func TestWhileTheProbeStopsAfterAToolFailure(t *testing.T) {
 		w.hooks["install-settled"] = func() { panic("the watch unit broke") }
 		w.hooks["probe-stop"] = func() { panic("the probe unit broke") }
 		if code := w.run(context.Background()); code != 2 {
-			t.Fatalf("exit %d, want 2", code)
+			t.Errorf("exit %d, want 2", code)
 		}
 		r := w.result()
 		var texts []string
@@ -1648,7 +2156,7 @@ func TestWhileTheProbeStopsAfterAToolFailure(t *testing.T) {
 		w.hooks["install-settled"] = func() { panic("the watch unit broke") }
 		w.hooks["probe-stop"] = cancel
 		if code := w.run(ctx); code != 2 {
-			t.Fatalf("exit %d, want 2", code)
+			t.Errorf("exit %d, want 2", code)
 		}
 		r := w.result()
 		if diff := cmp.Diff([]string{"interrupted", "internal-error"}, r.codes()); diff != "" {

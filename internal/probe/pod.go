@@ -33,19 +33,22 @@ type Facts struct {
 	ClockDifference      time.Duration
 }
 
-// Probe is one probe of a run, as run holds it: the three operations of Pod, with
+// Probe is one probe of a run, as run holds it: Events, Start, Stop and Counts of Pod, with
 // the same contracts.
 type Probe interface {
 	Events() <-chan Event
 	Start(ctx context.Context) (Started, error)
 	Stop(ctx context.Context) (Facts, error)
+	// run calls Counts when it cannot use Stop's Facts.
+	Counts() (lines, jsonText int)
 }
 
 // ClockBound is the largest difference, either way, between the runtime's timestamp of the first
 // observation and the moment the tool read it.
 const ClockBound = 2 * time.Second
 
-// stopMargin is how long Stop waits past the drain for the probe's log to end.
+// stopMargin is how long Stop waits past the drain for the probe's log to end, and the longest
+// that each of its calls to the API, and its send of a last exit's fault, may wait.
 var stopMargin = 5 * time.Second
 
 // PodOptions is what the probe's pod needs: its image by digest, its arguments, the drain,
@@ -81,7 +84,7 @@ const (
 	stageNew lifeStage = iota
 	stageStarting
 	stageStarted
-	stageEnded // Start failed, or Stop returned
+	stageEnded // Start failed, or Stop was called
 )
 
 var _ Probe = (*Pod)(nil)
@@ -95,8 +98,8 @@ func NewPod(o PodOptions) *Pod {
 
 // Events gives every observation and every fault of the probe, in the log's order,
 // from its first line on. Read it from before Start is called until it is
-// closed: a send waits for its reader. A Start that failed, or a Stop after
-// Start, closes it.
+// closed: a send waits for its reader. A Start that failed closes it, and so
+// does Stop, also before Start and after a Start that panicked.
 func (p *Pod) Events() <-chan Event { return p.events }
 
 // closeEvents closes the channel of Events, once.
@@ -219,7 +222,7 @@ type probeRun struct {
 
 	follower     *follower
 	followerDone chan struct{}
-	endedAt      time.Time // o.Now() when the follower ended; read after followerDone
+	endedAt      time.Time // when the log ended, as the follower's run gave it; read after followerDone
 	watcherDone  chan struct{}
 
 	firstCh, exitCh chan struct{} // closed when the first observation, or an exit before it, is noted
@@ -235,14 +238,37 @@ type probeRun struct {
 }
 
 // send puts e into events, waiting while the channel is full; it gives up when ctx ends, and
-// reports whether e went in.
+// reports whether e went in. While the channel has room e goes in, also after ctx ended, so that
+// what the follower emits when the stop cuts the log, the gap included, reaches the reader.
 func (r *probeRun) send(ctx context.Context, e Event) bool {
+	select {
+	case r.events <- e:
+		return true
+	default:
+	}
 	select {
 	case r.events <- e:
 		return true
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// afterRunStarted is called by Start right after it started the follower and the watcher. A
+// test replaces it to make Start panic there.
+var afterRunStarted = func() {}
+
+// Counts gives how many lines of the probe's log were read so far, and how many of them were
+// JSON objects with no ok field. Safe at any moment, from any goroutine, also while Start or Stop
+// runs or after either panicked. Zeros before Start.
+func (p *Pod) Counts() (lines, jsonText int) {
+	p.mu.Lock()
+	r := p.run
+	p.mu.Unlock()
+	if r == nil {
+		return 0, 0
+	}
+	return r.follower.counts()
 }
 
 // Start creates the probe's pod and returns at its first observation. The error
@@ -254,6 +280,10 @@ func (r *probeRun) send(ctx context.Context, e Event) bool {
 // A pod named probe that an earlier run left is deleted first. When the probe's pod was never
 // created, the error is the API's or ctx's, and the Facts kept say that the probe stopped when
 // asked, because nothing ran to stop.
+//
+// Start is called once, and before Stop: a Start after either gives an error and creates no
+// pod. Counts reads the log's lines while Start runs, and a Stop after a Start that panicked
+// stops what that Start had begun.
 func (p *Pod) Start(ctx context.Context) (Started, error) {
 	p.mu.Lock()
 	if p.state != stageNew {
@@ -279,15 +309,20 @@ func (p *Pod) Start(ctx context.Context) (Started, error) {
 		firstCh: make(chan struct{}), exitCh: make(chan struct{}),
 	}
 	r.follower = newFollower(p.open, p.running, p.o.Raw, p.o.Now, func(e Event) { p.emit(r, e) })
+	// The run is kept from the moment it exists, so that Counts reads it and a Stop after a Start
+	// that panicked stops the follower and the watcher started below.
+	p.mu.Lock()
+	p.run = r
+	p.mu.Unlock()
 	go func() {
-		r.follower.run(runCtx)
-		r.endedAt = p.o.Now()
+		r.endedAt = r.follower.run(runCtx)
 		close(r.followerDone)
 	}()
 	go func() {
 		defer close(r.watcherDone)
 		p.watch(watchCtx, r)
 	}()
+	afterRunStarted()
 
 	var err error
 	select {
@@ -311,14 +346,14 @@ func (p *Pod) Start(ctx context.Context) (Started, error) {
 		return Started{}, err
 	}
 	if err := p.judgeStart(r); err != nil {
-		p.halt(ctx, r, false)
+		p.halt(ctx, r)
 		return Started{}, err
 	}
 	r.mu.Lock()
 	first := r.first
 	r.mu.Unlock()
 	p.mu.Lock()
-	p.state, p.run = stageStarted, r
+	p.state = stageStarted
 	p.mu.Unlock()
 	return Started{First: first}, nil
 }
@@ -439,28 +474,62 @@ func (p *Pod) end(f Facts, err error) {
 // that failed, and at a second call, it gives the Facts and the error
 // that the stop already made left.
 //
-// It reads the log for at most the drain and stopMargin. Before it asks the probe to stop, it
-// reads the pod once more, so that an exit since the watcher's last reading is still a fault.
-// Before Start it gives no Facts and no error.
+// It reads the log for at most the drain and stopMargin, and each call it makes to the API waits
+// at most stopMargin. After Start, before it asks the probe to stop, it reads the pod once more,
+// so that an exit since the watcher's last reading is still a fault. Before Start it closes
+// Events, gives no Facts and no error, and ends the Pod, so that a later Start gives an error.
+// After a Start that panicked, it stops what that Start ran as after Start, without that last
+// reading, or, when no log was followed yet, closes Events and gives an error.
 func (p *Pod) Stop(ctx context.Context) (Facts, error) {
 	p.mu.Lock()
-	if p.state != stageStarted {
+	stage, r := p.state, p.run
+	if stage == stageEnded {
 		f, err := p.facts, p.stopErr
 		p.mu.Unlock()
 		return f, err
 	}
-	r := p.run
 	p.state = stageEnded
 	p.mu.Unlock()
-	return p.halt(ctx, r, true)
+	switch {
+	case r == nil && stage == stageStarting:
+		// A Start that panicked before its run existed: no log was followed, and its pod, when
+		// the create had succeeded, is left as it is.
+		err := errors.New("the probe's start failed before its log was followed")
+		p.end(Facts{}, err)
+		p.closeEvents()
+		return Facts{}, err
+	case r == nil:
+		// Before Start: nothing runs.
+		p.closeEvents()
+		return Facts{}, nil
+	case stage == stageStarted:
+		r.stopWatcher()
+		<-r.watcherDone
+		p.lastExitCheck(ctx, r)
+	}
+	return p.halt(ctx, r)
 }
 
-// halt is the stop of a probe whose pod was created, for Stop and for a Start that failed other
-// than by its context: it ends the watcher, reads the pod once more when lastCheck is set, deletes
-// the pod with the drain as its grace period, reads the log until it ends or the drain and
-// stopMargin have passed, closes Events, and keeps the Facts and the error for a later Stop. A
-// Start that failed has its own error for an exit, so it does not read the pod once more.
-func (p *Pod) halt(ctx context.Context, r *probeRun, lastCheck bool) (Facts, error) {
+// halt is the stop of a run whose follower and watcher were started: it ends the watcher,
+// deletes the pod with the drain as grace, reads the log until it ends or the drain and
+// stopMargin pass, closes Events, keeps the Facts and the error. Each call to the API waits at
+// most stopMargin.
+//
+// It serves Stop, a Start that failed other than by its context, and a Stop after a Start that
+// panicked; ending the watcher again after Stop ended it is harmless. The probe stopped when
+// asked when its log ended before the ask, or within the drain after it, also when the pod's
+// status still read the container as running when the wait ran out. A panic inside halt ends
+// the follower and the watcher and closes Events before it goes on.
+func (p *Pod) halt(ctx context.Context, r *probeRun) (Facts, error) {
+	defer func() {
+		if v := recover(); v != nil {
+			r.cancel()
+			<-r.followerDone
+			<-r.watcherDone
+			p.closeEvents()
+			panic(v)
+		}
+	}()
 	endedBefore := false
 	select {
 	case <-r.followerDone:
@@ -470,25 +539,24 @@ func (p *Pod) halt(ctx context.Context, r *probeRun, lastCheck bool) (Facts, err
 
 	r.stopWatcher()
 	<-r.watcherDone
-	if lastCheck {
-		p.lastExitCheck(ctx, r)
-	}
 
 	r.follower.stopAsked()
 	asked := p.o.Now()
 	grace := wholeSeconds(p.o.Drain)
-	delErr := p.pods().Delete(ctx, "probe", metav1.DeleteOptions{GracePeriodSeconds: &grace})
+	delCtx, cancelDel := context.WithTimeout(ctx, stopMargin)
+	delErr := p.pods().Delete(delCtx, "probe", metav1.DeleteOptions{GracePeriodSeconds: &grace})
+	cancelDel()
 	if apierrors.IsNotFound(delErr) {
 		delErr = nil
 	}
 
 	var ctxErr error
-	stopped := false
+	var ranOut time.Time // o.Now() when the wait ran out; zero when it did not
 	wait := time.NewTimer(p.o.Drain + stopMargin)
 	select {
 	case <-r.followerDone:
-		stopped = endedBefore || r.endedAt.Sub(asked) < p.o.Drain
 	case <-wait.C:
+		ranOut = p.o.Now()
 	case <-ctx.Done():
 		ctxErr = ctx.Err()
 	}
@@ -496,6 +564,14 @@ func (p *Pod) halt(ctx context.Context, r *probeRun, lastCheck bool) (Facts, err
 	r.cancel()
 	<-r.followerDone
 	p.closeEvents()
+
+	// When the wait ran out, the follower's last stream may have ended inside the drain while the
+	// pod's status lagged: the rule then reads when it ended. A stream that the cut itself ended
+	// did not end before the wait ran out, whatever the clock says. When an opening failed last,
+	// no stream's end was the end of the log, and the follower gives the moment it returned. A
+	// stop that its context ended is not judged.
+	stopped := ctxErr == nil && (endedBefore || r.endedAt.Sub(asked) < p.o.Drain) &&
+		(ranOut.IsZero() || r.endedAt.Before(ranOut))
 
 	lines, jsonText := r.follower.counts()
 	r.mu.Lock()
@@ -511,7 +587,8 @@ func (p *Pod) halt(ctx context.Context, r *probeRun, lastCheck bool) (Facts, err
 }
 
 // lastExitCheck reads the pod once, after the watcher has ended, and puts the fault of an exit
-// into events when the watcher had not. The send waits at most stopMargin, or until ctx ends.
+// into events when the watcher had not. The reading and the send each wait at most stopMargin,
+// or until ctx ends.
 func (p *Pod) lastExitCheck(ctx context.Context, r *probeRun) {
 	r.mu.Lock()
 	reported := r.exitReported
@@ -519,7 +596,9 @@ func (p *Pod) lastExitCheck(ctx context.Context, r *probeRun) {
 	if reported {
 		return
 	}
-	x, ended, _ := p.readExit(ctx)
+	readCtx, cancelRead := context.WithTimeout(ctx, stopMargin)
+	x, ended, _ := p.readExit(readCtx)
+	cancelRead()
 	if !ended || ctx.Err() != nil {
 		return
 	}

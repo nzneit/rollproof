@@ -93,10 +93,12 @@ func sampleFacts(t *testing.T) facts {
 			{Role: "candidate", Chart: "orders", Version: "0.1.0", Source: "./chart",
 				ValueFiles: []string{"values-kind.yaml"}, InlineKeys: []string{"image", "readiness"}},
 		},
-		probe:        probe.Facts{Lines: 78, JSONTextLines: 2, StoppedWhenAsked: true, ClockDifference: 300 * time.Millisecond},
-		probeStopped: true,
-		probeBegun:   true,
-		target:       probe.Target{Service: &types.NamespacedName{Namespace: "orders", Name: "orders"}},
+		probe:     probe.Facts{Lines: 78, JSONTextLines: 2, StoppedWhenAsked: true, ClockDifference: 300 * time.Millisecond},
+		probeStop: asked,
+		// What Counts gave: a record whose stop was asked does not use it.
+		probeLines: 80, probeJSONText: 3,
+		probeBegun: true,
+		target:     probe.Target{Service: &types.NamespacedName{Namespace: "orders", Name: "orders"}},
 		images: map[string]config.ImageRef{
 			"previous":  {Repository: "rollproof.test/previous", Digest: "sha256:aaa"},
 			"candidate": {Repository: "rollproof.test/candidate", Digest: "sha256:bbb"},
@@ -310,7 +312,7 @@ func TestRecordProbe(t *testing.T) {
 	want := report.Probe{
 		Kind: "http", Target: "GET http://orders.orders.svc/work?ms=20",
 		Headers: []string{"Host", "X-Token"}, Lines: 78, JSONLinesWithoutOK: 2,
-		CertificateChecked: true, StoppedWhenAsked: true, Notes: f.target.Notes,
+		CertificateChecked: true, StoppedWhenAsked: new(true), Notes: f.target.Notes,
 	}
 	if diff := cmp.Diff(want, got.Probes[0], cmpopts.EquateEmpty(), cmpopts.IgnoreFields(report.Probe{}, "Settings")); diff != "" {
 		t.Errorf("probe (-want +got):\n%s", diff)
@@ -319,6 +321,13 @@ func TestRecordProbe(t *testing.T) {
 	if diff := cmp.Diff(wantKeys, settingKeys(got.Probes[0].Settings)); diff != "" {
 		t.Errorf("probe settings (-want +got):\n%s", diff)
 	}
+
+	// Stop was asked and gave its Facts: a probe that did not stop within the drain is false.
+	f.probe.StoppedWhenAsked = false
+	if p := record(f).Probes[0]; p.StoppedWhenAsked == nil || *p.StoppedWhenAsked || p.Lines != 78 {
+		t.Errorf("probe %+v, want stopped_when_asked false and the 78 lines that Stop gave", p)
+	}
+	f.probe.StoppedWhenAsked = true
 
 	f.cfg.Probe.HTTP.URL = "https://orders.orders.svc/work"
 	if record(f).Probes[0].CertificateChecked {
@@ -401,15 +410,40 @@ func TestRecordProbeOnceTheToolStartedIt(t *testing.T) {
 	}
 }
 
+// A stop that the tool did not ask, did not wait for or did not finish is not judged: null, the
+// counts that Counts gave, and a note after the target's that says which (section 10).
 func TestRecordProbeNotAskedToStop(t *testing.T) {
-	f := sampleFacts(t)
-	f.probe, f.probeStopped = probe.Facts{}, false
-	if got := record(f).Probes; len(got) != 1 || !got[0].StoppedWhenAsked {
-		t.Errorf("probes %+v: a probe that was never asked to stop is reported as one that did not stop", got)
-	}
-	f.probe, f.probeStopped = probe.Facts{StoppedWhenAsked: false}, true
-	if got := record(f).Probes; len(got) != 1 || got[0].StoppedWhenAsked {
-		t.Errorf("probes %+v: a probe that did not stop when asked is reported as one that did", got)
+	const affinity = "the Service sends one client to one pod; every connection of the probe reaches the same pod until that pod is removed"
+	for _, row := range []struct {
+		name string
+		stop probeStop
+		note string
+	}{
+		{"a signal ended the run", notAsked, noteNotAsked},
+		{"a signal came while the tool waited", cutBySignal, noteCutBySignal},
+		{"the tool failed while it stopped the probe", stopFailed, noteStopFailed},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f := sampleFacts(t)
+			f.target.Notes = []string{affinity}
+			f.probeStop = row.stop
+			f.probe = probe.Facts{Lines: 3, StoppedWhenAsked: false}
+			f.probeLines, f.probeJSONText = 7, 1
+			got := record(f).Probes
+			if len(got) != 1 {
+				t.Fatalf("%d probes, want 1", len(got))
+			}
+			if got[0].StoppedWhenAsked != nil {
+				t.Errorf("stopped_when_asked is %v, want null", *got[0].StoppedWhenAsked)
+			}
+			if got[0].Lines != 7 || got[0].JSONLinesWithoutOK != 1 {
+				t.Errorf("lines %d and json_lines_without_ok %d, want the 7 and 1 of Counts",
+					got[0].Lines, got[0].JSONLinesWithoutOK)
+			}
+			if diff := cmp.Diff([]string{affinity, row.note}, got[0].Notes); diff != "" {
+				t.Errorf("notes (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

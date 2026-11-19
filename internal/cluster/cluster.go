@@ -64,6 +64,10 @@ var (
 	kindDelete = (*kindcluster.Provider).Delete
 )
 
+// pullImage is Create's pull of the node image, with the engine's check for an image that its
+// store holds. A test replaces it.
+var pullImage = Engine.pullIfMissing
+
 // joined is the error of several errors, like errors.Join, with "; " between their texts instead
 // of a newline, so that a reason made from it stays on one line.
 type joined []error
@@ -133,15 +137,13 @@ type Cluster struct {
 	nodes    []nodes.Node // in the order of Nodes
 }
 
-// Create removes whatever an earlier run of this name left, then creates the cluster and its
-// registry and returns when every node is ready, DNS runs and both namespaces exist. Each node
-// keeps an attempt to connect that had no answer for 5 s (section 9). On an error it removes the
-// run, unless s.Keep is set or ctx has ended; when that removal fails too, parts stay behind and
-// the text says so. An error is a Condition with ClusterFailed. A name without the prefix
-// rollproof- is an InternalError.
+// Create removes whatever an earlier run of this name left, then has the engine pull the node
+// image if its store lacks it, creates the cluster and its registry and returns when every node is
+// ready, DNS runs and both namespaces exist. Each node keeps an attempt to connect that had no
+// answer for 5 s (section 9). On an error it removes the run, unless s.Keep is set or ctx has
+// ended; when that removal fails too, parts stay behind and the text says so. An error is a
+// Condition with ClusterFailed. A name without the prefix rollproof- is an InternalError.
 func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
-	deadline := time.Now().Add(s.Timeout)
-
 	if err := remove(ctx, e, s.Name, s.RunDir); err != nil {
 		var c verdict.Condition
 		if errors.As(err, &c) && c.Code == verdict.InternalError {
@@ -191,6 +193,16 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 		return fail("make the run's folder", err)
 	}
 
+	// The reference kind is given, so that kind's own check finds the image there and does not
+	// pull it again, outside the limit.
+	ref := s.NodeImage
+	if ref == "" {
+		ref = DefaultNodeImage()
+	}
+	if err := pullImage(e, ctx, ref, s.Timeout); err != nil {
+		return fail("pull the node image", err)
+	}
+
 	kindBegun = true
 	err := createKind(ctx, c.provider, s.Name, c.Kubeconfig,
 		kindcluster.CreateWithV1Alpha4Config(KindConfig(s, e.Rootless)),
@@ -208,7 +220,7 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	if image == "" {
 		image = DefaultRegistryImage
 	}
-	if c.PushRegistry, c.NodeRegistry, err = startRegistry(ctx, e, s.Name, image, deadline); err != nil {
+	if c.PushRegistry, c.NodeRegistry, err = startRegistry(ctx, e, s.Name, image, s.Timeout); err != nil {
 		return fail("start the registry", err)
 	}
 
@@ -235,7 +247,7 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 
 	client, err := c.Client()
 	if err == nil {
-		err = waitReady(ctx, client, 1+s.Workers, deadline)
+		err = waitReady(ctx, client, 1+s.Workers, s.Timeout)
 	}
 	if err != nil {
 		return fail("wait until ready", fmt.Errorf("%w%s", err, inotifyHint))
@@ -300,11 +312,11 @@ func byRole(listed []nodes.Node) ([]nodes.Node, error) {
 	return sorted, nil
 }
 
-// waitReady polls once a second, until deadline, until the cluster has want nodes, each Ready,
-// and kube-system/coredns has all its replicas available. The error at the deadline gives both
-// counts.
-func waitReady(ctx context.Context, client kubernetes.Interface, want int, deadline time.Time) error {
-	waitCtx, cancel := context.WithDeadline(ctx, deadline)
+// waitReady polls once a second, for at most limit from its own call, until the cluster has want
+// nodes, each Ready, and kube-system/coredns has all its replicas available. The error at the
+// deadline gives both counts.
+func waitReady(ctx context.Context, client kubernetes.Interface, want int, limit time.Duration) error {
+	waitCtx, cancel := context.WithDeadline(ctx, time.Now().Add(limit))
 	defer cancel()
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()

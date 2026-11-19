@@ -345,6 +345,31 @@ func TestInstallState(t *testing.T) {
 	}
 }
 
+// The moment the install was ready is the first moment it was found ready: a later call that
+// judges at a later now gives the same Install.Ready (its reuse).
+func TestInstallStateKeepsTheReadyMoment(t *testing.T) {
+	installed := base()
+	for _, obj := range installed[2:] {
+		p := obj.(*corev1.Pod)
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "app", ImageID: "rollproof.test/orders@sha256:old"}}
+	}
+	tr := NewTracker(options())
+	for _, obj := range installed {
+		tr.Set(obj, at(1))
+	}
+	first, ready, err := tr.InstallState(t0, at(3), at(3))
+	if err != nil || !ready {
+		t.Fatalf("the first call: ready %v, err %v; want ready", ready, err)
+	}
+	later, ready, err := tr.InstallState(t0, at(3), at(7))
+	if err != nil || !ready {
+		t.Fatalf("the second call: ready %v, err %v; want ready", ready, err)
+	}
+	if !first.Ready.Equal(at(3)) || !later.Ready.Equal(first.Ready) {
+		t.Errorf("Ready %v then %v, want %v both times", first.Ready, later.Ready, at(3))
+	}
+}
+
 func TestPodsAt(t *testing.T) {
 	tr := feed(options(), base(), rollingUpdate())
 	stopping, starting := tr.PodsAt(at(4.3))

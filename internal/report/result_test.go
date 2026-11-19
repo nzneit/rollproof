@@ -121,7 +121,7 @@ func passRun() Run {
 				{Key: "probe.http.timeout", Value: "2s", Default: "2s"},
 				{Key: "probe.http.expect-status", Value: "200-299", Default: "200-299"},
 			},
-			Lines: 78, CertificateChecked: true, StoppedWhenAsked: true,
+			Lines: 78, CertificateChecked: true, StoppedWhenAsked: new(true),
 		}},
 		Releases: []Release{
 			{Role: "previous", Chart: "orders", Version: "1.4.2", Source: "oci://registry.example/charts/orders"},
@@ -312,8 +312,23 @@ func nulls(v any, key string, found *[]string) {
 	}
 }
 
+// A probe whose stop the tool did not judge has stopped_when_asked null, not false (section 10).
+func TestProbeStoppedWhenAskedNull(t *testing.T) {
+	r := passRun()
+	r.Probes[0].StoppedWhenAsked = nil
+	b, err := encode(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"stopped_when_asked": null`) {
+		t.Errorf("stopped_when_asked is not null in\n%s", b)
+	}
+}
+
 func TestNoNulls(t *testing.T) {
-	timesAndCluster := []string{"cluster", "end", "first_failure", "first_observation", "install", "last_failure", "quickest_stop_ms", "settled", "start"}
+	// stopped_when_asked is null when the tool did not ask the probe to stop, stopped waiting for
+	// it, or failed while it stopped it (section 10).
+	keysThatMayBeNull := []string{"cluster", "end", "first_failure", "first_observation", "install", "last_failure", "quickest_stop_ms", "settled", "start", "stopped_when_asked"}
 	for _, r := range []Run{
 		{},
 		{
@@ -337,7 +352,7 @@ func TestNoNulls(t *testing.T) {
 		var found []string
 		nulls(v, "", &found)
 		for _, k := range found {
-			if !slices.Contains(timesAndCluster, k) {
+			if !slices.Contains(keysThatMayBeNull, k) {
 				t.Errorf("%s is null in\n%s", k, b)
 			}
 		}

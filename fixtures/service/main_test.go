@@ -78,12 +78,29 @@ func TestWorkAndReadyz(t *testing.T) {
 	}
 }
 
-// With FAIL_WORK the handler fails every request while the pod still reports ready.
+// With FAIL_WORK the handler fails every request while the pod still reports ready, and does
+// nothing else: it does not wait on ms, set the pod's header, or add a line end to the body.
 func TestWorkFailsWhenAsked(t *testing.T) {
 	ready, _, done := launch(t, map[string]string{"ADDR": "127.0.0.1:0", "SHUTDOWN": "drain-now", "FAIL_WORK": "true"})
 	addr := listening(t, ready, done)
-	if code, _, err := get(addr, "/work?ms=20"); err != nil || code != 500 {
-		t.Errorf("/work?ms=20: %d, %v; want 500", code, err)
+	began := time.Now()
+	resp, err := client.Get("http://" + addr + "/work?ms=2000")
+	if err != nil {
+		t.Fatalf("/work?ms=2000: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("/work?ms=2000: %v", err)
+	}
+	if resp.StatusCode != 500 || string(body) != "failing" {
+		t.Errorf("/work?ms=2000: %d %q, want 500 %q", resp.StatusCode, body, "failing")
+	}
+	if d := time.Since(began); d >= 2*time.Second {
+		t.Errorf("/work?ms=2000 answered in %v: the failing answer waited on ms", d)
+	}
+	if h := resp.Header.Get("X-Pod"); h != "" {
+		t.Errorf("/work?ms=2000 has X-Pod %q, want none", h)
 	}
 	if code, _, err := get(addr, "/readyz"); err != nil || code != 200 {
 		t.Errorf("/readyz: %d, %v; want 200", code, err)

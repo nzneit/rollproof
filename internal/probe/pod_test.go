@@ -7,6 +7,7 @@ import (
 	"flag"
 	"io"
 	"os"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -18,7 +19,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
 
@@ -173,6 +176,36 @@ func condition(err error) verdict.Condition {
 	return c
 }
 
+// endsWhenDeleted gives the probe of s one log stream: text, and then nothing until the probe's
+// pod is deleted, by Stop or by anyone else, when the stream ends with io.EOF, as a real pod's
+// log ends when its container does (section 14, point 26). Call it before Start.
+func (s probeSetup) endsWhenDeleted(t *testing.T, text string) {
+	t.Helper()
+	deleted, testEnded := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	pods := corev1.SchemeGroupVersion.WithResource("pods")
+	s.client.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if _, err := s.client.Tracker().Get(pods, cluster.ProbeNamespace, "probe"); err == nil {
+			once.Do(func() { close(deleted) })
+		}
+		return false, nil, nil
+	})
+	pr, pw := io.Pipe()
+	t.Cleanup(func() {
+		close(testEnded)
+		pw.Close()
+	})
+	go func() {
+		io.WriteString(pw, text)
+		select {
+		case <-deleted:
+		case <-testEnded:
+		}
+		pw.Close()
+	}()
+	s.pod.open = (&fakeLog{streams: []io.Reader{pr}}).open
+}
+
 // openStream is a stream that gives the line and then stays open until the
 // follower closes it, or until the test ends (ruling C3).
 func openStream(t *testing.T, line string) io.Reader {
@@ -207,8 +240,8 @@ func TestStartReplacesALeftoverPod(t *testing.T) {
 
 func TestStartReturnsAtTheFirstObservation(t *testing.T) {
 	early := logAt(-1000).Format(time.RFC3339Nano)
-	l := newFakeLog(logLine(logAt(100), "starting") + logLine(logAt(400), `{"ok":true,"t":"`+early+`"}`))
-	s := newProbe(t, l, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s.endsWhenDeleted(t, logLine(logAt(100), "starting")+logLine(logAt(400), `{"ok":true,"t":"`+early+`"}`))
 	s.clock.Set(logAt(700))
 	st, err := s.pod.Start(context.Background())
 	if err != nil {
@@ -415,7 +448,9 @@ func TestStopKillsAProbeThatDoesNotStop(t *testing.T) {
 	if took := time.Since(began); took > time.Second {
 		t.Errorf("Stop took %v, want the drain and the margin", took)
 	}
-	allEvents(s.pod.Events()) // returns only when Events is closed
+	// The stream stayed open past the drain, so the log was not read to its end: the gap, which
+	// the follower sends after the stop's cancel, reaches Events while it has room (section 6).
+	checkGap(t, allEvents(s.pod.Events()), 1, []time.Time{logAt(400), logAt(0)}, 0)
 }
 
 func TestStopEndsWithItsContext(t *testing.T) {
@@ -492,7 +527,8 @@ func TestStopReportsAnExitOnce(t *testing.T) {
 		{"the watcher saw it", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			s := newProbe(t, newFakeLog(logLine(logAt(400), `{"ok":true}`)), runningStatus(), 100*time.Millisecond, 5*time.Second)
+			s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+			s.endsWhenDeleted(t, logLine(logAt(400), `{"ok":true}`))
 			if !c.watcherSaw {
 				pollEvery = time.Hour // the watcher reads the pod once, at its start
 			}
@@ -651,7 +687,8 @@ func TestAnAPIErrorIsNoExit(t *testing.T) {
 // A pod deleted by someone else is an exit, once; Stop then finds no pod to
 // delete, and that is no error.
 func TestStopWhenThePodIsGone(t *testing.T) {
-	s := newProbe(t, newFakeLog(logLine(logAt(400), `{"ok":true}`)), runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s.endsWhenDeleted(t, logLine(logAt(400), `{"ok":true}`))
 	s.clock.Set(logAt(700))
 	_, err := s.pod.Start(context.Background())
 	if err != nil {
@@ -681,8 +718,8 @@ func TestEventsAreReadFromTheStart(t *testing.T) {
 		log.WriteString(logLine(logAt(100+i), `{"ok":"yes"}`))
 	}
 	log.WriteString(logLine(logAt(4000), `{"ok":true}`))
-	l := &fakeLog{streams: []io.Reader{openStream(t, log.String())}}
-	s := newProbe(t, l, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s.endsWhenDeleted(t, log.String())
 	s.clock.Set(logAt(4000))
 	read := make(chan []Event, 1)
 	go func() { read <- allEvents(s.pod.Events()) }()
@@ -788,5 +825,399 @@ func TestAStartThatCreatedNoPodStoppedWhenAsked(t *testing.T) {
 	}
 	if f, _ := s.pod.Stop(context.Background()); !f.StoppedWhenAsked {
 		t.Errorf("facts %+v; a probe whose pod was never created stopped when asked", f)
+	}
+}
+
+// closedWithin reads events until it is closed, and fails the test when that takes longer than d.
+func closedWithin(t *testing.T, events <-chan Event, d time.Duration) {
+	t.Helper()
+	timeout := time.After(d)
+	for {
+		select {
+		case _, ok := <-events:
+			if !ok {
+				return
+			}
+		case <-timeout:
+			t.Fatalf("Events was not closed within %v", d)
+		}
+	}
+}
+
+// A Stop before Start closes Events, so that its reader ends, and ends the Pod: a later Start
+// gives an error and creates no pod.
+func TestStopBeforeStartClosesEvents(t *testing.T) {
+	s := newProbe(t, newFakeLog(logLine(logAt(400), `{"ok":true}`)), runningStatus(), 100*time.Millisecond, 5*time.Second)
+	if f, err := s.pod.Stop(context.Background()); err != nil || f != (Facts{}) {
+		t.Errorf("Stop before Start = %+v, %v; want no facts and no error", f, err)
+	}
+	closedWithin(t, s.pod.Events(), time.Second)
+	if f, err := s.pod.Stop(context.Background()); err != nil || f != (Facts{}) {
+		t.Errorf("second Stop = %+v, %v; want no facts and no error", f, err)
+	}
+	if _, err := s.pod.Start(context.Background()); err == nil {
+		t.Error("Start after Stop succeeded, want an error")
+	}
+	for _, a := range s.client.Actions() {
+		if a.GetVerb() == "create" {
+			t.Errorf("Start after Stop created %s", a.GetResource().Resource)
+		}
+	}
+}
+
+func TestEventsClosedWhenNoPodWasCreated(t *testing.T) {
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 300*time.Millisecond)
+	s.client.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("the API server refused the pod")
+	})
+	if _, err := s.pod.Start(context.Background()); err == nil {
+		t.Fatal("Start succeeded although the API server refused the pod")
+	}
+	closedWithin(t, s.pod.Events(), time.Second)
+}
+
+// A Start that panics once the follower and the watcher run leaves them to Stop, which stops
+// them as it stops a started probe, and closes Events.
+func TestStopAfterAStartThatPanicked(t *testing.T) {
+	const drain = 100 * time.Millisecond
+	s := newProbe(t, newFakeLog(logLine(logAt(400), `{"ok":true}`)), runningStatus(), drain, 5*time.Second)
+	old := afterRunStarted
+	afterRunStarted = func() { panic("a fault of Start") }
+	t.Cleanup(func() { afterRunStarted = old })
+	before := goruntime.NumGoroutine()
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Start did not panic")
+			}
+		}()
+		s.pod.Start(context.Background())
+	}()
+	began := time.Now()
+	s.pod.Stop(context.Background())
+	if took, limit := time.Since(began), drain+stopMargin+time.Second; took > limit {
+		t.Errorf("Stop took %v, want at most %v", took, limit)
+	}
+	closedWithin(t, s.pod.Events(), time.Second)
+	for deadline := time.Now().Add(2 * time.Second); goruntime.NumGoroutine() > before; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutines 2 s after Stop, %d before Start", goruntime.NumGoroutine(), before)
+		}
+	}
+}
+
+// A Start that panics before its run exists, in the create of its pod, followed nothing: Stop
+// gives an error, so that the stop is not read as one that the probe obeyed, and gives it again
+// at a second call. It closes Events.
+func TestStopAfterAStartThatPanickedBeforeItsRun(t *testing.T) {
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s.client.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		panic("a fault of the API client")
+	})
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Start did not panic")
+			}
+		}()
+		s.pod.Start(context.Background())
+	}()
+	const want = "the probe's start failed before its log was followed"
+	for _, call := range []string{"Stop", "second Stop"} {
+		f, err := s.pod.Stop(context.Background())
+		if err == nil || err.Error() != want || f != (Facts{}) {
+			t.Errorf("%s = %+v, %v; want no facts and the error %q", call, f, err, want)
+		}
+	}
+	closedWithin(t, s.pod.Events(), time.Second)
+}
+
+// slowClient is a client whose pod gets and deletes, once slow is set, wait until their context
+// ends. client-go's fake gives its reactors no context, and holds its lock while one runs.
+type slowClient struct {
+	kubernetes.Interface
+	slow *atomic.Bool
+}
+
+func (c slowClient) CoreV1() typedcorev1.CoreV1Interface {
+	return slowCore{c.Interface.CoreV1(), c.slow}
+}
+
+type slowCore struct {
+	typedcorev1.CoreV1Interface
+	slow *atomic.Bool
+}
+
+func (c slowCore) Pods(namespace string) typedcorev1.PodInterface {
+	return slowPods{c.CoreV1Interface.Pods(namespace), c.slow}
+}
+
+type slowPods struct {
+	typedcorev1.PodInterface
+	slow *atomic.Bool
+}
+
+func (p slowPods) Get(ctx context.Context, name string, o metav1.GetOptions) (*corev1.Pod, error) {
+	if p.slow.Load() {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return p.PodInterface.Get(ctx, name, o)
+}
+
+func (p slowPods) Delete(ctx context.Context, name string, o metav1.DeleteOptions) error {
+	if p.slow.Load() {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return p.PodInterface.Delete(ctx, name, o)
+}
+
+// An API server that hangs does not hold the stop: the last reading of the pod and the delete
+// each wait at most stopMargin, and the log is read for at most the drain and stopMargin.
+func TestStopBoundsItsAPICalls(t *testing.T) {
+	const drain = 200 * time.Millisecond
+	l := &fakeLog{streams: []io.Reader{openStream(t, logLine(logAt(400), `{"ok":true}`))}}
+	s := newProbe(t, l, runningStatus(), drain, 5*time.Second)
+	old := stopMargin
+	stopMargin = 100 * time.Millisecond
+	t.Cleanup(func() { stopMargin = old })
+	var slow atomic.Bool
+	s.pod.o.Client = slowClient{Interface: s.client, slow: &slow}
+	s.clock.Set(logAt(700))
+	if _, err := s.pod.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	slow.Store(true) // after Start, so that neither Start nor the watcher's first reading waits
+	limit := drain + 3*stopMargin + 500*time.Millisecond
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.pod.Stop(context.Background())
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("Stop = %v, want the error of the delete that ran out of time", err)
+		}
+	case <-time.After(limit):
+		t.Fatalf("Stop did not return within %v", limit)
+	}
+	closedWithin(t, s.pod.Events(), time.Second)
+}
+
+// Counts gives the lines read so far: zeros before Start, the lines read while the probe runs,
+// and after Stop the counts of its Facts.
+func TestCountsWhileTheProbeRuns(t *testing.T) {
+	l := &fakeLog{streams: []io.Reader{openStream(t, logLine(logAt(100), `{"level":"info"}`)+logLine(logAt(400), `{"ok":true}`))}}
+	s := newProbe(t, l, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s.clock.Set(logAt(700))
+	if lines, jsonText := s.pod.Counts(); lines != 0 || jsonText != 0 {
+		t.Errorf("Counts before Start = %d, %d; want zeros", lines, jsonText)
+	}
+	if _, err := s.pod.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if lines, jsonText := s.pod.Counts(); lines != 2 || jsonText != 1 {
+		t.Errorf("Counts while the probe runs = %d, %d; want 2 lines, 1 JSON text", lines, jsonText)
+	}
+	facts, err := s.pod.Stop(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines, jsonText := s.pod.Counts(); lines != facts.Lines || jsonText != facts.JSONTextLines || lines != 2 {
+		t.Errorf("Counts after Stop = %d, %d; want the Facts' %d, %d, and 2 lines", lines, jsonText, facts.Lines, facts.JSONTextLines)
+	}
+}
+
+// Counts survives a Stop that panicked: the run's entry still gives the lines read. The panic
+// leaves nothing of the run behind: the follower has ended and Events is closed.
+func TestCountsAfterAStopThatPanicked(t *testing.T) {
+	l := &fakeLog{streams: []io.Reader{openStream(t, logLine(logAt(100), "starting")+logLine(logAt(400), `{"ok":true}`))}}
+	s := newProbe(t, l, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	var armed atomic.Bool
+	s.client.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if armed.Load() {
+			panic("a fault of the API client")
+		}
+		return false, nil, nil
+	})
+	s.clock.Set(logAt(700))
+	if _, err := s.pod.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	armed.Store(true)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Stop did not panic")
+			}
+		}()
+		s.pod.Stop(context.Background())
+	}()
+	if lines, _ := s.pod.Counts(); lines != 2 {
+		t.Errorf("Counts after a Stop that panicked = %d lines, want 2", lines)
+	}
+	select {
+	case <-s.pod.run.followerDone:
+	default:
+		t.Error("the follower still runs after the Stop that panicked")
+	}
+	closedWithin(t, s.pod.Events(), time.Second)
+}
+
+// The log ends inside the drain, but the pod reads the container as running until after the
+// stop's wait ran out (section 14, point 26): the probe stopped when asked. The log was not read
+// to the end that the pod's status confirms, so the gap still ends Events.
+func TestStopWhileThePodsStatusLags(t *testing.T) {
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pw.Close() })
+	s := newProbe(t, &fakeLog{streams: []io.Reader{pr}}, runningStatus(), 200*time.Millisecond, 5*time.Second)
+	var lagging atomic.Bool
+	deleted := make(chan struct{})
+	var once sync.Once
+	s.client.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if !lagging.Load() {
+			return false, nil, nil
+		}
+		once.Do(func() { close(deleted) })
+		return true, nil, nil // the pod stays, and reads as running
+	})
+	s.client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if lagging.Load() {
+			s.clock.Set(s.clock.Now().Add(time.Second)) // each reading of the pod takes the clock on
+		}
+		return false, nil, nil
+	})
+	s.clock.Set(logAt(700))
+	go io.WriteString(pw, logLine(logAt(400), `{"ok":true}`))
+	if _, err := s.pod.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lagging.Store(true)
+	done := make(chan Facts, 1)
+	go func() {
+		f, _ := s.pod.Stop(context.Background())
+		done <- f
+	}()
+	select {
+	case <-deleted: // the stop was asked
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not delete the pod")
+	}
+	io.WriteString(pw, logLine(logAt(900), `{"ok":true}`))
+	pw.Close() // the stream ends inside the drain, by the clock
+	var facts Facts
+	select {
+	case facts = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return")
+	}
+	if !facts.StoppedWhenAsked {
+		t.Errorf("facts %+v; the log ended inside the drain, so the probe stopped when asked", facts)
+	}
+	events := allEvents(s.pod.Events())
+	if len(events) != 4 || events[0].Obs == nil || events[1].Obs == nil || !events[1].Obs.Written.Equal(logAt(900)) {
+		t.Fatalf("events = %+v, want both observations and the gap's two faults", events)
+	}
+	for i, e := range events[2:] {
+		if f := e.Fault; f == nil || f.Code != verdict.InternalError || f.Text != gapText || (i == 0 && !f.At.Equal(logAt(900))) {
+			t.Errorf("event %d = %+v, want the gap, first at the last line read", i+2, e)
+		}
+	}
+}
+
+// holdStopDeletes makes the stop's delete of the probe's pod, the one with a grace period, keep
+// the pod, which reads as it did, and calls held when held is not nil. The replace that Start
+// makes, with a grace period of 0, deletes as the fake client does.
+func (s probeSetup) holdStopDeletes(held func()) {
+	s.client.PrependReactor("delete", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		g := a.(k8stesting.DeleteAction).GetDeleteOptions().GracePeriodSeconds
+		if g == nil || *g == 0 {
+			return false, nil, nil
+		}
+		if held != nil {
+			held()
+		}
+		return true, nil, nil
+	})
+}
+
+// No stream's end was the end of the log when every opening after the last stream failed, or
+// when none opened: the probe did not stop when asked, whatever the moment the last stream ended
+// (section 6).
+func TestStopWhenNoStreamEndedTheLog(t *testing.T) {
+	t.Run("a stream ends before the ask, and every opening fails until the pod is gone after the drain", func(t *testing.T) {
+		const drain = 200 * time.Millisecond
+		s := newProbe(t, &fakeLog{}, runningStatus(), drain, 5*time.Second)
+		failing := make(chan struct{})
+		var opens atomic.Int32
+		var once sync.Once
+		s.pod.open = func(context.Context, *time.Time) (io.ReadCloser, error) {
+			if opens.Add(1) == 1 {
+				return io.NopCloser(strings.NewReader(logLine(logAt(400), `{"ok":true}`))), nil
+			}
+			once.Do(func() { close(failing) })
+			return nil, errors.New("the API server refused the log")
+		}
+		var deleted atomic.Bool
+		s.holdStopDeletes(func() { deleted.Store(true) })
+		s.client.PrependReactor("get", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+			if !deleted.Load() {
+				return false, nil, nil
+			}
+			// The first reading after the stop's delete finds the pod gone, a second after the
+			// ask by the clock, which is after the drain.
+			s.clock.Set(logAt(1700))
+			return true, nil, apierrors.NewNotFound(corev1.Resource("pods"), "probe")
+		})
+		s.clock.Set(logAt(700))
+		if _, err := s.pod.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-failing: // the stream ended before the ask, and the reopen it owes fails
+		case <-time.After(2 * time.Second):
+			t.Fatal("the log was not opened again")
+		}
+		go allEvents(s.pod.Events())
+		f, err := s.pod.Stop(context.Background())
+		if err != nil || f.StoppedWhenAsked {
+			t.Errorf("Stop = %+v, %v; want StoppedWhenAsked false and no error", f, err)
+		}
+	})
+	t.Run("no opening succeeds, and the wait runs out", func(t *testing.T) {
+		s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 100*time.Millisecond)
+		s.pod.open = func(context.Context, *time.Time) (io.ReadCloser, error) {
+			return nil, errors.New("the API server refused the log")
+		}
+		s.holdStopDeletes(nil)
+		go allEvents(s.pod.Events())
+		if _, err := s.pod.Start(context.Background()); condition(err).Code != verdict.ProbeNotStarted {
+			t.Fatalf("Start = %v, want probe-not-started", err)
+		}
+		f, err := s.pod.Stop(context.Background())
+		if err != nil || f.StoppedWhenAsked {
+			t.Errorf("Stop after the failed Start = %+v, %v; want StoppedWhenAsked false and no error", f, err)
+		}
+	})
+}
+
+// An event goes into Events while it has room, also after the run's context ended: the gap that
+// the follower emits when the stop cuts the log is not lost to a random choice. With no room,
+// the send gives up once the context has ended.
+func TestSendAfterTheContextEnded(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := &probeRun{events: make(chan Event, 1)}
+	for i := range 100 { // one send alone would pass half the time with a plain select
+		if !r.send(ctx, Event{}) {
+			t.Fatalf("send %d gave up with room in the channel", i)
+		}
+		<-r.events
+	}
+	r.events <- Event{}
+	if r.send(ctx, Event{}) {
+		t.Error("send went into a full channel")
 	}
 }

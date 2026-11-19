@@ -111,12 +111,12 @@ func cleanSettings(s []Setting) []Setting {
 
 // cleanClasses cleans the names of the classes. Classes whose names clean to one name are one
 // class, with their counts added, so that the counts still sum to the failed checks.
-func cleanClasses(m map[string]int) map[string]int {
-	if m == nil {
+func cleanClasses(counts map[string]int) map[string]int {
+	if counts == nil {
 		return nil
 	}
-	out := make(map[string]int, len(m))
-	for name, n := range m {
+	out := make(map[string]int, len(counts))
+	for name, n := range counts {
 		out[clean(name)] += n
 	}
 	return out
@@ -330,7 +330,9 @@ func settingValue(s []Setting, key string) string {
 	return ""
 }
 
-// probeLines are the lines under the probe's target, each indented 12 spaces.
+// probeLines are the lines under the probe's target, each indented 12 spaces. The line that says
+// the probe did not stop when asked comes only when StoppedWhenAsked is false; when it is nil,
+// the tool did not judge the stop, and the probe's notes say why.
 func probeLines(p Probe) []string {
 	const indent = "            "
 	rate := settingValue(p.Settings, "probe.http.rate")
@@ -358,7 +360,7 @@ func probeLines(p Probe) []string {
 	for _, n := range p.Notes {
 		lines = append(lines, indent+clean(n))
 	}
-	if !p.StoppedWhenAsked {
+	if p.StoppedWhenAsked != nil && !*p.StoppedWhenAsked {
 		lines = append(lines, indent+"the probe did not stop when asked; checks still in flight were not reported")
 	}
 	return lines
@@ -406,14 +408,8 @@ func installLines(r Run) []string {
 	}
 	lines = append(lines, line)
 
-	slowest, behind := "-", "-"
-	if in.Checks != 0 {
-		behind = millis(in.LagMs)
-		if in.Checks != in.Failed {
-			slowest = millis(in.SlowestMs)
-		}
-	}
-	lines = append(lines, indent+"slowest "+slowest+", behind "+behind)
+	lines = append(lines, indent+"slowest "+slowestCell(in.Checks, in.Failed, in.SlowestMs)+
+		", behind "+behindCell(in.Checks, in.LagMs))
 
 	for _, s := range in.SettleRestartedBy {
 		lines = append(lines, wrap(indent, "the settle time started again: "+s)...)
@@ -423,20 +419,20 @@ func installLines(r Run) []string {
 
 // classCounts writes the classes of failures with their counts: the most
 // frequent first, and equal counts by name.
-func classCounts(m map[string]int) string {
-	names := make([]string, 0, len(m))
-	for name := range m {
+func classCounts(counts map[string]int) string {
+	names := make([]string, 0, len(counts))
+	for name := range counts {
 		names = append(names, name)
 	}
 	slices.SortFunc(names, func(a, b string) int {
-		if c := cmp.Compare(m[b], m[a]); c != 0 {
+		if c := cmp.Compare(counts[b], counts[a]); c != 0 {
 			return c
 		}
 		return strings.Compare(a, b)
 	})
 	parts := make([]string, len(names))
 	for i, name := range names {
-		parts[i] = name + " " + thousands(m[name])
+		parts[i] = name + " " + thousands(counts[name])
 	}
 	return strings.Join(parts, ", ")
 }
@@ -470,6 +466,23 @@ func thousands(n int) string {
 }
 
 func millis(ms float64) string { return strconv.FormatFloat(math.Round(ms), 'f', 0, 64) + " ms" }
+
+// slowestCell writes a window's slowest pass as the console prints it, and "-" when every check
+// failed, so that no pass is claimed where none was.
+func slowestCell(checks, failed int, slowestMs float64) string {
+	if checks == failed {
+		return "-"
+	}
+	return millis(slowestMs)
+}
+
+// behindCell writes a window's furthest lag as the console prints it, and "-" when it had no check.
+func behindCell(checks int, lagMs float64) string {
+	if checks == 0 {
+		return "-"
+	}
+	return millis(lagMs)
+}
 
 func resultWord(s string) string {
 	switch s {
@@ -505,14 +518,8 @@ func windowsTable(r Run) []string {
 		if w.Name == "steady" {
 			after = "-"
 		}
-		slowest := "-"
-		if w.Checks != w.Failed {
-			slowest = millis(w.SlowestMs)
-		}
-		behind := "-"
-		if w.Checks != 0 {
-			behind = millis(w.LagMs)
-		}
+		slowest := slowestCell(w.Checks, w.Failed, w.SlowestMs)
+		behind := behindCell(w.Checks, w.LagMs)
 		rows = append(rows, []string{w.Name, length, thousands(w.Checks), thousands(w.Failed), after, slowest, behind, resultWord(w.Result)})
 	}
 	widths := make([]int, len(header))

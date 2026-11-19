@@ -483,3 +483,160 @@ func TestFollowGoesOnWhenRawFails(t *testing.T) {
 		t.Errorf("events = %+v, want both observations", events)
 	}
 }
+
+// stopLog is the log of a probe that was asked to stop. Its first opening gives stream, and
+// every later one fails, as the opening of a deleted pod's log does; openings counts them all.
+// running answers true for its first runningFor calls and false after; a negative runningFor
+// answers true always.
+type stopLog struct {
+	stream     io.Reader
+	runningFor int
+	openings   int
+	readings   int
+}
+
+func (l *stopLog) open(context.Context, *time.Time) (io.ReadCloser, error) {
+	l.openings++
+	if l.openings > 1 {
+		return nil, errors.New("log removed")
+	}
+	return io.NopCloser(l.stream), nil
+}
+
+func (l *stopLog) running(context.Context) bool {
+	l.readings++
+	return l.runningFor < 0 || l.readings <= l.runningFor
+}
+
+// endsWith gives r, and calls onEnd once, when r gives the error that ends it.
+type endsWith struct {
+	r     io.Reader
+	onEnd func()
+	ended bool
+}
+
+func (e *endsWith) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err != nil && !e.ended {
+		e.ended = true
+		e.onEnd()
+	}
+	return n, err
+}
+
+// drainLines is the log of a probe that was asked to stop: three observations and its last
+// line, written in the drain.
+var drainLines = logLine(logAt(100), `{"ok":true}`) + logLine(logAt(200), `{"ok":true}`) +
+	logLine(logAt(300), `{"ok":false,"class":"refused"}`) + logLine(logAt(400), `{"ok":true,"n":3}`)
+
+// Section 6, and section 14, point 26: after the stop was asked, a stream that ends while the
+// pod still reads the container as running is not opened again, where the kubelet has removed
+// the deleted pod's log. The follower waits until the pod reads the container as ended, and the
+// stream's end is then the end of the log. run gives the moment the stream ended, not the
+// moment the pod's status caught up.
+func TestFollowAfterStopTakesTheEndWhenTheContainerEnds(t *testing.T) {
+	quickPolling(t)
+	clock := &fakeClock{t: logAt(1000)}
+	l := &stopLog{runningFor: 3}
+	l.stream = &endsWith{r: strings.NewReader(drainLines), onEnd: func() { clock.Set(logAt(5000)) }}
+	running := func(ctx context.Context) bool {
+		clock.Set(clock.Now().Add(time.Second)) // the pod's status catches up while the clock runs
+		return l.running(ctx)
+	}
+	var events []Event
+	var raw bytes.Buffer
+	f := newFollower(l.open, running, &raw, clock.Now, func(e Event) { events = append(events, e) })
+	f.stopAsked()
+	ended := f.run(context.Background())
+	for _, e := range events {
+		if e.Fault != nil && e.Fault.Text == gapText {
+			t.Errorf("the gap was emitted: %+v", *e.Fault)
+		}
+	}
+	checkGap(t, events, 4, nil, 0)
+	for i, e := range events {
+		if e.Obs != nil && !e.Obs.Written.Equal(logAt(100*(i+1))) {
+			t.Errorf("event %d was written at %v, want %v: each line once, in order", i, e.Obs.Written, logAt(100*(i+1)))
+		}
+	}
+	if raw.String() != drainLines {
+		t.Errorf("raw = %q, want the stream as it came", raw.String())
+	}
+	if l.openings != 1 {
+		t.Errorf("the log was opened %d times, want once", l.openings)
+	}
+	if !ended.Equal(logAt(5000)) {
+		t.Errorf("run gave %v, want %v, the moment the stream ended", ended, logAt(5000))
+	}
+}
+
+// Review Focus 1: after the stop was asked, a container that the pod reads as running until the
+// context ends leaves a log that was not read to its end: the gap, and no second opening.
+func TestFollowAfterStopTheContainerDoesNotEnd(t *testing.T) {
+	quickPolling(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	l := &stopLog{runningFor: -1}
+	l.stream = &endsWith{r: strings.NewReader(drainLines), onEnd: func() { time.AfterFunc(300*time.Millisecond, cancel) }}
+	var events []Event
+	f := newFollower(l.open, l.running, io.Discard, func() time.Time { return logAt(60_000) },
+		func(e Event) { events = append(events, e) })
+	f.stopAsked()
+	f.run(ctx)
+	checkGap(t, events, 4, []time.Time{logAt(400), logAt(60_000)}, 0)
+	if l.openings != 1 {
+		t.Errorf("the log was opened %d times, want once", l.openings)
+	}
+}
+
+// Section 6: a log that the tool cannot read to its end is not verified. After the stop was
+// asked, a stream that breaks is not opened again either.
+func TestFollowAfterStopABrokenStream(t *testing.T) {
+	quickPolling(t)
+	l := &stopLog{stream: breaks(drainLines), runningFor: 3}
+	var events []Event
+	f := newFollower(l.open, l.running, io.Discard, func() time.Time { return logAt(60_000) },
+		func(e Event) { events = append(events, e) })
+	f.stopAsked()
+	f.run(context.Background())
+	checkGap(t, events, 4, []time.Time{logAt(400), logAt(60_000)}, 0)
+	if l.openings != 1 {
+		t.Errorf("the log was opened %d times, want once", l.openings)
+	}
+}
+
+// When the context ends while a stream is open after the stop was asked (the stop's bound ran
+// out, or a signal ended it), the log was not read to its end: the gap. Before the stop was
+// asked (a Start that ended with its context), nothing changes: no gap.
+func TestFollowAfterStopTheStopCutsTheLog(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		stopAsked bool
+		faults    []time.Time
+	}{
+		{"after the stop was asked", true, []time.Time{logAt(400), logAt(60_000)}},
+		{"a start that ended", false, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			quickPolling(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			l := &stopLog{stream: io.MultiReader(strings.NewReader(drainLines), blocked{ctx}), runningFor: -1}
+			var events []Event
+			f := newFollower(l.open, l.running, io.Discard, func() time.Time { return logAt(60_000) },
+				func(e Event) {
+					if events = append(events, e); len(events) == 4 {
+						cancel() // the last line was read, and the stream stays open
+					}
+				})
+			if c.stopAsked {
+				f.stopAsked()
+			}
+			f.run(ctx)
+			checkGap(t, events, 4, c.faults, 0)
+			if l.openings != 1 {
+				t.Errorf("the log was opened %d times, want once", l.openings)
+			}
+		})
+	}
+}

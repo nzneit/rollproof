@@ -25,7 +25,7 @@ type installTrack struct {
 	began, ready time.Time
 	breaks       []installBreak         // in the order they began; only the last can be open
 	unsupported  map[Workload]time.Time // each watched workload that does not roll, with when it was first seen so
-	over         *Settling              // the answer, once the settling has ended
+	final        *Settling              // the answer, once the settling has ended
 }
 
 // installBreak is a stretch in which the install's conditions did not hold. until is zero while
@@ -43,7 +43,7 @@ func byKindAndName(a, b Workload) int {
 // installWatched returns the workloads the install watches, those among them that update by
 // rolling, and the rest, each sorted by kind and then name. It watches the workloads that exist
 // and whose labels matched at their last Set.
-func (t *Tracker) installWatched() (watched, part, notRolling []Workload) {
+func (t *Tracker) installWatched() (watched, rolling, notRolling []Workload) {
 	set := map[Workload]bool{}
 	for w, rec := range t.workloads {
 		if rec.gone.IsZero() && rec.matched {
@@ -53,12 +53,12 @@ func (t *Tracker) installWatched() (watched, part, notRolling []Workload) {
 	watched = sortedWorkloads(set)
 	for _, w := range watched {
 		if Rolling(t.workloads[w].obj) {
-			part = append(part, w)
+			rolling = append(rolling, w)
 		} else {
 			notRolling = append(notRolling, w)
 		}
 	}
-	return watched, part, notRolling
+	return watched, rolling, notRolling
 }
 
 // noteInstall notes, at the moment at, whether the install's conditions hold, after a change. It
@@ -67,40 +67,40 @@ func (t *Tracker) installWatched() (watched, part, notRolling []Workload) {
 // opens a break when the conditions stopped holding, or closes the open one when they hold again.
 func (t *Tracker) noteInstall(at time.Time) {
 	in := t.install
-	if in == nil || in.over != nil {
+	if in == nil || in.final != nil {
 		return
 	}
-	watched, part, notRolling := t.installWatched()
+	watched, rolling, notRolling := t.installWatched()
 	for _, w := range notRolling {
 		if _, seen := in.unsupported[w]; !seen {
 			in.unsupported[w] = at
 		}
 	}
-	held := len(watched) > 0 && t.installReady(part)
+	held := len(watched) > 0 && t.installReady(rolling)
 	open := len(in.breaks) > 0 && in.breaks[len(in.breaks)-1].until.IsZero()
 	switch {
 	case held && open:
 		in.breaks[len(in.breaks)-1].until = at
 	case !held && !open:
-		in.breaks = append(in.breaks, installBreak{from: at, sentence: t.installSentence(at, watched, part)})
+		in.breaks = append(in.breaks, installBreak{from: at, sentence: t.installSentence(at, watched, rolling)})
 	}
 }
 
 // installSentence says what did not hold at the moment at, when a break began: the first of no
 // workload watched, a workload that is not complete, and a pod that was deleted and is not gone.
 // The seconds are counted from the moment the install was ready.
-func (t *Tracker) installSentence(at time.Time, watched, part []Workload) string {
+func (t *Tracker) installSentence(at time.Time, watched, rolling []Workload) string {
 	s := at.Sub(t.install.ready).Seconds()
 	if len(watched) == 0 {
 		return fmt.Sprintf("no workload was watched %.1f s after the install was ready", s)
 	}
-	for _, w := range part {
+	for _, w := range rolling {
 		if done, msg := Complete(t.workloads[w].obj); !done {
 			return fmt.Sprintf("%s was not complete %.1f s after the install was ready: %s", w, s, msg)
 		}
 	}
 	for _, p := range t.sortedPods() {
-		if w, ok := t.podWorkload(p); ok && slices.Contains(part, w) && !p.deleting.IsZero() && p.gone.IsZero() {
+		if w, ok := t.podWorkload(p); ok && slices.Contains(rolling, w) && !p.deleting.IsZero() && p.gone.IsZero() {
 			return fmt.Sprintf("pod %s of %s was deleted and not gone %.1f s after the install was ready", p.name, w, s)
 		}
 	}
@@ -116,8 +116,8 @@ func (t *Tracker) InstallSettling(first, now time.Time) (Settling, bool) {
 	if in == nil {
 		panic("watch: InstallSettling before InstallState reported the install ready")
 	}
-	if in.over != nil {
-		return *in.over, true
+	if in.final != nil {
+		return in.final.owned(), true
 	}
 	s := Settling{First: first}
 	settled, failed, cause, counted := in.outcome(first, now, t.o.Settle, t.o.Timeout)
@@ -183,8 +183,17 @@ func (t *Tracker) InstallSettling(first, now time.Time) (Settling, bool) {
 			s.InWindow = append(s.InWindow, c)
 		}
 	}
-	in.over = &s
-	return s, true
+	in.final = &s
+	return in.final.owned(), true
+}
+
+// owned returns s with every list copied, so that the stored Settling owns its slices and a
+// caller that changes one of them changes nothing in the Tracker.
+func (s Settling) owned() Settling {
+	s.Restarts = slices.Clone(s.Restarts)
+	s.Before = slices.Clone(s.Before)
+	s.InWindow = slices.Clone(s.InWindow)
+	return s
 }
 
 // unsupportedIn returns the workloads the tool cannot judge whose first sight satisfies keep,
