@@ -157,7 +157,8 @@ func cleanRun(r Run) Run {
 	}
 	c.Releases = nil
 	for _, x := range r.Releases {
-		x.Role, x.Chart, x.Version, x.Source = clean(x.Role), clean(x.Chart), clean(x.Version), clean(x.Source)
+		x.Role, x.Program = clean(x.Role), clean(x.Program)
+		x.Chart, x.Version, x.Source = clean(x.Chart), clean(x.Version), clean(x.Source)
 		x.ValuesFiles, x.InlineKeys = cleanAll(x.ValuesFiles), cleanAll(x.InlineKeys)
 		c.Releases = append(c.Releases, x)
 	}
@@ -246,6 +247,11 @@ func setUp(r Run) []string {
 		word := ""
 		if i == 0 {
 			word = "releases"
+		}
+		if rel.Program != "" {
+			// A command of the commands driver: its first word, and nothing else.
+			add(word, pad(rel.Role, roleWidth)+rel.Program)
+			continue
 		}
 		values := "chart defaults"
 		if len(rel.ValuesFiles) > 0 || len(rel.InlineKeys) > 0 {
@@ -615,7 +621,9 @@ func transitionsTable(r Run) []string {
 	return lines
 }
 
-// exercisedLists are what a pass exercised and did not.
+// exercisedLists are what a pass exercised and did not. A restart-only pass says first under "not
+// exercised" that no deploy and no rollback were tested, and a pass with a deploy and no rollback
+// what that leaves out.
 func exercisedLists(r Run) []string {
 	lines := []string{"exercised"}
 	for _, tr := range r.Transitions {
@@ -637,6 +645,9 @@ func exercisedLists(r Run) []string {
 		lines = append(lines, "  "+pad(tr.Name, 12)+text)
 	}
 	lines = append(lines, "not exercised")
+	if hasWindowThatRan(r, "restart") && !hasWindowThatRan(r, "deploy") {
+		lines = append(lines, "  a deploy to another release and a rollback, because only a restart was tested")
+	}
 	if hasWindowThatRan(r, "deploy") && !hasWindowThatRan(r, "rollback") {
 		lines = append(lines, "  the candidate's shutdown and the installed release's start-up, because the run has no rollback")
 	}

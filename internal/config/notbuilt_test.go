@@ -20,13 +20,13 @@ func TestNotBuilt(t *testing.T) {
 		{"registries", "deploy:\n", "registries:\n  - host: registry.example\ndeploy:\n", []string{"registries"}},
 		{"setup", "deploy:\n", "setup:\n  - [kubectl, apply, -f, test/prerequisites.yaml]\ndeploy:\n", nil},
 		{"the commands driver", helmBlock, commandsBlock("    install: [kubectl, apply, -k, overlays/previous]\n" +
-			"    deploy: [kubectl, apply, -k, overlays/candidate]\n    rollback: [kubectl, apply, -k, overlays/previous]\n"), []string{"deploy.commands"}},
+			"    deploy: [kubectl, apply, -k, overlays/candidate]\n    rollback: [kubectl, apply, -k, overlays/previous]\n"), nil},
 		{"a custom probe", httpProbe, customProbe(""), []string{"probe.custom"}},
 		{"an image from an archive", "deploy:\n", "images:\n  orders:\n    archive: orders.tar\ndeploy:\n", nil},
 		{"an image from an archive with as", "deploy:\n", "images:\n  orders:\n    archive: orders.tar\n    as: registry.example/team/orders\ndeploy:\n", []string{"images.orders.as"}},
 		{"an image with as", "deploy:\n", "images:\n  orders:\n    local: orders:candidate\n    as: registry.example/team/orders\ndeploy:\n", []string{"images.orders.as"}},
 		{"a local image", "deploy:\n", "images:\n  orders:\n    local: orders:candidate\ndeploy:\n", nil},
-		{"no previous release", previousBlock, "", []string{"deploy.helm.previous"}},
+		{"no previous release", previousBlock, "", nil},
 		{"several at once", "deploy:\n", "registries:\n  - host: registry.example\nsetup:\n  - [kubectl, apply, -f, test/prerequisites.yaml]\n" +
 			"images:\n  orders:\n    local: orders:candidate\n    as: registry.example/team/orders\ndeploy:\n", []string{"images.orders.as", "registries"}},
 	} {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"rollproof/internal/config"
 	"rollproof/internal/deploy"
@@ -61,8 +62,9 @@ type resultFile struct {
 		Notes              []string `json:"notes"`
 	} `json:"probes"`
 	Transitions []struct {
-		Name    string `json:"name"`
-		Command string `json:"command"`
+		Name    string  `json:"name"`
+		Command *string `json:"command"` // nil for null
+		Restart *string `json:"restart"` // nil for null
 	} `json:"transitions"`
 }
 
@@ -476,7 +478,8 @@ func TestSignalDuringDeploy(t *testing.T) {
 		t.Errorf("window results (-want +got):\n%s", diff)
 	}
 	// The command ended before the interrupted check, so the record keeps its ending.
-	if len(r.Transitions) != 1 || r.Transitions[0].Name != "deploy" || r.Transitions[0].Command != "stopped-by-signal" {
+	if len(r.Transitions) != 1 || r.Transitions[0].Name != "deploy" || r.Transitions[0].Command == nil ||
+		*r.Transitions[0].Command != "stopped-by-signal" {
 		t.Errorf("transitions %+v, want deploy with command stopped-by-signal", r.Transitions)
 	}
 	if n := w.calls.count("delete"); n != 0 {
@@ -2226,5 +2229,205 @@ func TestAnInstallWindowJudgedLate(t *testing.T) {
 	}
 	if n := w.calls.count("deploy"); n != 0 {
 		t.Errorf("deploy was called %d times, want 0", n)
+	}
+}
+
+// restartWorld is a world whose deployer gives a restart alone, as a Helm driver with no previous
+// release does, and whose restart replaces both pods of deployment/orders.
+func restartWorld(t *testing.T) *world {
+	w := newWorld(t)
+	w.deployer.transitions = []verdict.WindowName{verdict.Restart}
+	w.watcher.restart = watch.Restart{Accepted: true}
+	w.watcher.transitions[verdict.Restart] = w.watcher.transitions[verdict.Deploy]
+	return w
+}
+
+// after gives the calls that follow the first call named name.
+func after(calls []string, name string) []string {
+	i := slices.Index(calls, name)
+	if i < 0 {
+		return nil
+	}
+	return calls[i+1:]
+}
+
+// A restart's window runs the watcher's restart in place of a command and then waits for the
+// transition as for any other; its record says that the API server took the change, and a pass
+// says that only a restart was tested.
+func TestRestartTransition(t *testing.T) {
+	w := restartWorld(t)
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	got := after(w.calls.list(), "install-settled")
+	if len(got) < 3 || !slices.Equal(got[:3], []string{"restart", "transition-restart", "probe-stop"}) {
+		t.Errorf("the calls after install-settled are %q, want restart, transition-restart, probe-stop first", got)
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"pass", "pass"}, r.results()); diff != "" {
+		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+	if len(r.Windows) != 2 || r.Windows[0].Name != "steady" || r.Windows[1].Name != "restart" {
+		t.Errorf("windows %+v, want steady and restart", r.Windows)
+	}
+	if len(r.Transitions) != 1 || r.Transitions[0].Command != nil || r.Transitions[0].Restart == nil ||
+		*r.Transitions[0].Restart != "accepted" {
+		t.Errorf("transitions %+v, want one with command null and restart accepted", r.Transitions)
+	}
+	const line = "\n  a deploy to another release and a rollback, because only a restart was tested\n"
+	if !strings.Contains(w.stdout.String(), line) {
+		t.Errorf("stdout has no %q:\n%s", line, w.stdout.String())
+	}
+}
+
+// A restart that the API server refused makes its window not verified as restart-failed, with the
+// workload and the server's text, and never as a transition that replaced no pod.
+func TestRestartStopsAtARefusal(t *testing.T) {
+	w := restartWorld(t)
+	w.watcher.restart = watch.Restart{Accepted: false, Workload: "statefulset/db",
+		Text: `admission webhook "deny" denied the request`}
+	w.watcher.transitions[verdict.Restart] = watch.Transition{}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"restart-failed"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	const want = `the API server refused the restart of statefulset/db: admission webhook "deny" denied the request`
+	if window, text := r.windowOf("restart-failed"); window != "restart" || text != want {
+		t.Errorf("restart-failed in window %q with text %q, want restart with %q", window, text, want)
+	}
+	if len(r.Transitions) != 1 || r.Transitions[0].Restart == nil || *r.Transitions[0].Restart != "refused" {
+		t.Errorf("transitions %+v, want one with restart refused", r.Transitions)
+	}
+}
+
+// In a restart-only run the install installs the candidate, and the install's texts name it
+// (section 4, "A run with no previous release"); a run with a previous release keeps the texts as
+// they are.
+func TestRestartOnlyInstallNamesTheCandidate(t *testing.T) {
+	restartOnly := []verdict.WindowName{verdict.Restart}
+	both := []verdict.WindowName{verdict.Deploy, verdict.Rollback}
+	settleWith := func(text string) func(w *world) {
+		return func(w *world) {
+			w.watcher.settle = func(first time.Time) watch.Settling {
+				return watch.Settling{First: first, Ended: first.Add(5 * time.Second),
+					InWindow: []verdict.Condition{{Code: verdict.InstallFailed, At: first.Add(5 * time.Second), Text: text}}}
+			}
+		}
+	}
+	const (
+		within  = "the install was not ready within limits.timeout\ndeployment/orders: 0 of 2 ready"
+		passed  = "the install was not ready when limits.timeout passed\npod orders-1 was deleted"
+		stopped = "the install stopped being ready after limits.timeout, while it still settled\npod orders-1 was deleted"
+	)
+	for _, row := range []struct {
+		name        string
+		transitions []verdict.WindowName
+		fault       func(w *world)
+		window      string
+		text        string
+		detail      []string
+	}{
+		{"the install exits non-zero, restart only", restartOnly, func(w *world) {
+			w.deployer.results["install"] = deploy.Result{Ending: deploy.ExitedNonZero, ExitCode: 1}
+		}, "", "the install of the candidate exited with code 1", nil},
+		{"the install exits non-zero, with a previous release", both, func(w *world) {
+			w.deployer.results["install"] = deploy.Result{Ending: deploy.ExitedNonZero, ExitCode: 1}
+		}, "", "the install command exited with code 1", nil},
+		{"not ready within the limit, restart only", restartOnly, func(w *world) {
+			w.watcher.installErr = verdict.Condition{Code: verdict.InstallFailed, Text: within}
+		}, "", "the install of the candidate was not ready within limits.timeout", []string{"deployment/orders: 0 of 2 ready"}},
+		{"not ready within the limit, with a previous release", both, func(w *world) {
+			w.watcher.installErr = verdict.Condition{Code: verdict.InstallFailed, Text: within}
+		}, "", "the install was not ready within limits.timeout", []string{"deployment/orders: 0 of 2 ready"}},
+		{"not ready when the limit passed, restart only", restartOnly, settleWith(passed),
+			"install", "the install of the candidate was not ready when limits.timeout passed", []string{"pod orders-1 was deleted"}},
+		{"not ready when the limit passed, with a previous release", both, settleWith(passed),
+			"install", "the install was not ready when limits.timeout passed", []string{"pod orders-1 was deleted"}},
+		{"stopped being ready, restart only", restartOnly, settleWith(stopped),
+			"install", "the install of the candidate stopped being ready after limits.timeout, while it still settled", []string{"pod orders-1 was deleted"}},
+		{"stopped being ready, with a previous release", both, settleWith(stopped),
+			"install", "the install stopped being ready after limits.timeout, while it still settled", []string{"pod orders-1 was deleted"}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.deployer.transitions = row.transitions
+			row.fault(w)
+			if code := w.run(context.Background()); code != 2 {
+				t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+			}
+			r := w.result()
+			if diff := cmp.Diff([]string{"install-failed"}, r.codes()); diff != "" {
+				t.Errorf("reasons (-want +got):\n%s", diff)
+			}
+			if window, text := r.windowOf("install-failed"); window != row.window || text != row.text {
+				t.Errorf("install-failed in window %q with text %q, want %q with %q", window, text, row.window, row.text)
+			}
+			if diff := cmp.Diff(row.detail, r.detailOf("install-failed"), cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("detail (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A panic in the restart is the tool's failure, caught as a command's is and placed in the
+// restart's window.
+func TestRestartPanics(t *testing.T) {
+	w := restartWorld(t)
+	w.watcher.restartPanics = true
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if !slices.Contains(r.codes(), "internal-error") {
+		t.Fatalf("reasons %q, want internal-error", r.codes())
+	}
+	if window, text := r.windowOf("internal-error"); window != "restart" || !strings.Contains(text, "the restart broke") {
+		t.Errorf("internal-error in window %q with text %q, want restart with the panic's text", window, text)
+	}
+}
+
+// A transition whose name the run cannot start is the tool's failure, and is never run as a
+// deploy.
+func TestUnknownTransition(t *testing.T) {
+	w := newWorld(t)
+	w.deployer.transitions = []verdict.WindowName{"upgrade"}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"internal-error"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	if _, text := r.windowOf("internal-error"); text != "the tool cannot start a upgrade transition" {
+		t.Errorf("internal-error with text %q", text)
+	}
+	for _, name := range []string{"deploy", "rollback", "restart"} {
+		if n := w.calls.count(name); n != 0 {
+			t.Errorf("%s called %d times, want 0", name, n)
+		}
+	}
+}
+
+// A run with a deploy and no rollback runs the deploy alone, and its pass says what that leaves
+// out.
+func TestDeployWithoutRollback(t *testing.T) {
+	w := newWorld(t)
+	w.deployer.transitions = []verdict.WindowName{verdict.Deploy}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if n := w.calls.count("rollback"); n != 0 {
+		t.Errorf("rollback called %d times, want 0", n)
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"pass", "pass"}, r.results()); diff != "" {
+		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+	const line = "the candidate's shutdown and the installed release's start-up, because the run has no rollback"
+	if !strings.Contains(w.stdout.String(), line) {
+		t.Errorf("stdout has no %q:\n%s", line, w.stdout.String())
 	}
 }

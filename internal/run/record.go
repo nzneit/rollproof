@@ -41,11 +41,13 @@ type facts struct {
 }
 
 // transitionFacts is one transition as the units reported it: what the
-// watcher saw, how the command ended, and the pods that were stopping or
-// starting at the window's first failure.
+// watcher saw, how the command ended or, for a restart, how the watcher's
+// restart went, and the pods that were stopping or starting at the window's
+// first failure. restart is nil for a deploy and a rollback.
 type transitionFacts struct {
 	tr                 watch.Transition
 	cmd                deploy.Result
+	restart            *watch.Restart
 	stopping, starting []watch.PodNote
 }
 
@@ -76,15 +78,19 @@ func record(f facts) report.Run {
 	}
 	r.Transitions = transitionRecords(f.transitions)
 	for _, x := range f.releases {
-		r.Releases = append(r.Releases, report.Release{Role: x.Role, Chart: x.Chart, Version: x.Version,
-			Source: x.Source, ValuesFiles: x.ValueFiles, InlineKeys: x.InlineKeys})
+		r.Releases = append(r.Releases, report.Release{Role: x.Role, Program: x.Program, Chart: x.Chart,
+			Version: x.Version, Source: x.Source, ValuesFiles: x.ValueFiles, InlineKeys: x.InlineKeys})
 	}
 	r.RemovedVariables = f.removed
 	if f.cfg == nil {
 		return r
 	}
-	if f.cfg.Deploy.Helm != nil {
+	switch {
+	case f.cfg.Deploy.Helm != nil:
 		r.Driver, r.Name = "helm", f.cfg.Deploy.Helm.Release
+	case f.cfg.Deploy.Commands != nil:
+		// The commands driver has no release name: the console's name is the namespace (section 10).
+		r.Driver, r.Name = "commands", f.cfg.Deploy.Namespace
 	}
 	var probeSettings []report.Setting
 	for _, s := range f.cfg.Settings() {
@@ -218,11 +224,18 @@ func floatPtr(v float64, has bool) *float64 {
 	return new(v)
 }
 
+// transitionRecords returns the transitions' records. A restart has no command: its record says
+// whether the API server took the change instead (restartAnswer). A deploy and a rollback give
+// their command's ending and no restart.
 func transitionRecords(trs []transitionFacts) []report.Transition {
 	var out []report.Transition
 	for _, t := range trs {
-		x := report.Transition{Name: string(t.tr.Name), Stalled: t.tr.Stalled,
-			Command: string(t.cmd.Ending), SettleRestartedBy: t.tr.SettleRestarts}
+		x := report.Transition{Name: string(t.tr.Name), Stalled: t.tr.Stalled, SettleRestartedBy: t.tr.SettleRestarts}
+		if t.tr.Name == verdict.Restart {
+			x.Restart = restartAnswer(t.restart)
+		} else {
+			x.Command = new(string(t.cmd.Ending))
+		}
 		for _, c := range t.tr.Workloads {
 			w := report.Workload{Workload: c.Workload.String(), PodsAtStart: c.AtStart, PodsReplaced: c.Replaced,
 				PodsCreated: c.Created, Added: c.Added, Removed: c.Removed, Probed: c.Probed}
@@ -235,6 +248,21 @@ func transitionRecords(trs []transitionFacts) []report.Transition {
 		out = append(out, x)
 	}
 	return out
+}
+
+// restartAnswer is a restart's answer in result.json: "accepted" when the API server took every
+// change, "refused" when it refused one, which the Restart names, and nil when there is no Restart
+// yet or the run's context cut it short, so that the server refused nothing.
+func restartAnswer(rs *watch.Restart) *string {
+	switch {
+	case rs == nil:
+		return nil
+	case rs.Accepted:
+		return new("accepted")
+	case rs.Workload != "":
+		return new("refused")
+	}
+	return nil
 }
 
 // probeRecord returns the probe's entry. When the tool asked the probe to stop and Stop returned

@@ -26,7 +26,7 @@ func failRun() Run {
 			FailedByClass: map[string]int{"refused": 198, "timeout": 45}, FirstFailure: at(15_310), SlowestMs: new(198.0), LagMs: new(12.0)},
 		{Name: "rollback", Result: "not-run"},
 	}
-	r.Transitions = []Transition{{Name: "deploy", Command: "ok", Workloads: []Workload{ordersReplaced(800)}}}
+	r.Transitions = []Transition{{Name: "deploy", Command: new("ok"), Workloads: []Workload{ordersReplaced(800)}}}
 	r.Reasons = []Reason{{
 		Code: "probe-failures", Verdict: "fail", Window: "deploy",
 		Text: "243 checks failed (refused 198, timeout 45), first at 10:00:07.31",
@@ -102,7 +102,7 @@ func stallRun() Run {
 		{Name: "deploy", Start: at(10_000), End: at(310_000), Result: "fail", Checks: 60000, SlowestMs: new(35.0), LagMs: new(4.0)},
 		{Name: "rollback", Result: "not-run"},
 	}
-	r.Transitions = []Transition{{Name: "deploy", Stalled: true, Command: "ok",
+	r.Transitions = []Transition{{Name: "deploy", Stalled: true, Command: new("ok"),
 		Workloads: []Workload{{Workload: "deployment/orders", PodsAtStart: 3, PodsCreated: 1, Probed: "yes"}}}}
 	r.Images[0].RunBy = nil
 	r.Reasons = []Reason{
@@ -141,6 +141,31 @@ func changedRun() Run {
 	return r
 }
 
+// restartRun is a pass of a run with no previous release: the candidate is installed and then
+// restarted under the probe.
+func restartRun() Run {
+	r := passRun()
+	r.Releases = r.Releases[1:]
+	r.Windows = []Window{
+		r.Windows[0],
+		{Name: "restart", Start: at(10_000), End: at(43_400), Result: "pass", Checks: 6680, SlowestMs: new(212.0), LagMs: new(38.0)},
+	}
+	r.Transitions = []Transition{{Name: "restart", Restart: new("accepted"), Workloads: []Workload{ordersReplaced(5300)}}}
+	r.Images[0].RunBy = []RunBy{{Workload: "deployment/orders", Transition: "restart"}}
+	return r
+}
+
+// commandsRun is a pass of the commands driver with an install and a deploy command and no
+// rollback.
+func commandsRun() Run {
+	r := passRun()
+	r.Driver, r.Name = "commands", "orders"
+	r.Releases = []Release{{Role: "install", Program: "kubectl"}, {Role: "deploy", Program: "kubectl"}}
+	r.Windows = r.Windows[:2]
+	r.Transitions = r.Transitions[:1]
+	return r
+}
+
 func TestConsoleExamples(t *testing.T) {
 	// The three examples of section 10 are copied from the design and are never rewritten.
 	for _, c := range []struct {
@@ -163,6 +188,8 @@ func TestConsoleExamples(t *testing.T) {
 		{"testdata/console-in-install-window.golden.txt", inInstallRun()},
 		{"testdata/console-install-decided.golden.txt", installDecidedRun()},
 		{"testdata/console-custom-no-ms-or-lag.golden.txt", customNoMsOrLagRun()},
+		{"testdata/console-restart.golden.txt", restartRun()},
+		{"testdata/console-commands.golden.txt", commandsRun()},
 	} {
 		t.Run(c.path, func(t *testing.T) { golden(t, c.path, []byte(Console(c.run))) })
 	}
@@ -429,7 +456,7 @@ func TestConsoleDropsNoRow(t *testing.T) {
 	r := passRun()
 	r.Verdict = "fail"
 	r.Windows = append(r.Windows, Window{Name: "restart", Start: at(80_000), End: at(90_000), Result: "pass", Checks: 10, SlowestMs: new(1.0), LagMs: new(1.0)})
-	r.Transitions = append(r.Transitions, Transition{Name: "restart", Command: "ok", Workloads: []Workload{
+	r.Transitions = append(r.Transitions, Transition{Name: "restart", Restart: new("accepted"), Workloads: []Workload{
 		{Workload: "deployment/a", PodsAtStart: 1, PodsReplaced: 1, Probed: "yes"},
 		{Workload: "statefulset/b", PodsAtStart: 1, PodsReplaced: 1, Probed: "no"},
 		{Workload: "daemonset/c", PodsAtStart: 1, Probed: "not known"},
@@ -492,6 +519,24 @@ func TestConsoleDeployWithoutRollback(t *testing.T) {
 		f.Verdict = n
 		if strings.Contains(Console(f), line) {
 			t.Errorf("a %s run holds %q", n, line)
+		}
+	}
+}
+
+// Only a pass says that only a restart was tested, and a pass with a deploy does not say it.
+func TestConsoleRestartOnlyLineOnlyOnAPass(t *testing.T) {
+	const line = "a deploy to another release and a rollback, because only a restart was tested"
+	if got := Console(passRun()); strings.Contains(got, line) {
+		t.Errorf("a pass with a deploy holds %q:\n%s", line, got)
+	}
+	if got := Console(restartRun()); !strings.Contains(got, "not exercised\n  "+line+"\n  "+notExercised[0]+"\n") {
+		t.Errorf("a restart-only pass does not hold %q first under not exercised:\n%s", line, got)
+	}
+	for _, v := range []string{"fail", "not-verified"} {
+		r := restartRun()
+		r.Verdict = v
+		if got := Console(r); strings.Contains(got, line) {
+			t.Errorf("a %s run holds %q:\n%s", v, line, got)
 		}
 	}
 }

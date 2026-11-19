@@ -110,8 +110,8 @@ func passRun() Run {
 			Checks: 3000, Failed: 6, FailedByClass: map[string]int{"refused": 5, "timeout": 1},
 			LastFailure: at(-14_900), SlowestMs: new(44.0), LagMs: new(9.0)},
 		Transitions: []Transition{
-			{Name: "deploy", Command: "ok", Workloads: []Workload{ordersReplaced(5300)}},
-			{Name: "rollback", Command: "ok", Workloads: []Workload{ordersReplaced(5200)}},
+			{Name: "deploy", Command: new("ok"), Workloads: []Workload{ordersReplaced(5300)}},
+			{Name: "rollback", Command: new("ok"), Workloads: []Workload{ordersReplaced(5200)}},
 		},
 		Probes: []Probe{{
 			Kind:   "http",
@@ -327,8 +327,9 @@ func TestProbeStoppedWhenAskedNull(t *testing.T) {
 
 func TestNoNulls(t *testing.T) {
 	// stopped_when_asked is null when the tool did not ask the probe to stop, stopped waiting for
-	// it, or failed while it stopped it (section 10).
-	keysThatMayBeNull := []string{"cluster", "end", "first_failure", "first_observation", "install", "lag_ms", "last_failure", "quickest_stop_ms", "settled", "slowest_ms", "start", "stopped_when_asked"}
+	// it, or failed while it stopped it (section 10). A transition's command is null for a restart,
+	// and its restart for a deploy and a rollback (plan decision 5).
+	keysThatMayBeNull := []string{"cluster", "command", "end", "first_failure", "first_observation", "install", "lag_ms", "last_failure", "quickest_stop_ms", "restart", "settled", "slowest_ms", "start", "stopped_when_asked"}
 	for _, r := range []Run{
 		{},
 		{

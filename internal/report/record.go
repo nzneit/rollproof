@@ -80,12 +80,19 @@ type Install struct {
 	LagMs             *float64       `json:"lag_ms"`
 }
 
-// Transition is one transition that ran. Command is how its command ended:
-// ok, exit-nonzero, not-started, stopped-at-limit or stopped-by-signal.
+// Transition is one transition that ran.
 type Transition struct {
-	Name              string     `json:"name"`
-	Stalled           bool       `json:"stalled"`
-	Command           string     `json:"command"`
+	Name    string `json:"name"`
+	Stalled bool   `json:"stalled"`
+	// Command is how the transition's command ended: ok, exit-nonzero,
+	// not-started, stopped-at-limit or stopped-by-signal. Nil, null in
+	// result.json, for a restart, which has no command.
+	Command *string `json:"command"`
+	// Restart is whether the API server took the restart's change:
+	// "accepted" or "refused". Nil, null in result.json, for a deploy and
+	// a rollback, and for a restart that the run's context cut short, in
+	// which the server refused nothing.
+	Restart           *string    `json:"restart"`
 	SettleRestartedBy []string   `json:"settle_restarted_by"`
 	Workloads         []Workload `json:"workloads"`
 }
@@ -127,9 +134,15 @@ type Probe struct {
 
 // Release is one release of the Helm driver: the chart's name and the
 // version Helm resolved, where it came from, and the names of the values
-// files and the top-level keys of the inline maps. Never a value.
+// files and the top-level keys of the inline maps. Never a value. For the
+// commands driver it is one command: its role, install, deploy or rollback,
+// and its Program.
 type Release struct {
-	Role        string   `json:"role"`
+	Role string `json:"role"`
+	// Program is the first word of the commands driver's command for this
+	// role; empty for the Helm driver, whose chart fields are empty for the
+	// commands driver.
+	Program     string   `json:"program"`
 	Chart       string   `json:"chart"`
 	Version     string   `json:"version"`
 	Source      string   `json:"source"`
@@ -153,7 +166,7 @@ type Image struct {
 }
 
 // RunBy is one watched workload whose pods ran an image, and the transition
-// that created those pods: install, deploy or rollback.
+// that created those pods: install, deploy, rollback or restart.
 type RunBy struct {
 	Workload   string `json:"workload"`
 	Transition string `json:"transition"`

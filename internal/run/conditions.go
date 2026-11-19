@@ -6,6 +6,7 @@ package run
 
 import (
 	"fmt"
+	"strings"
 
 	"rollproof/internal/deploy"
 	"rollproof/internal/verdict"
@@ -51,12 +52,18 @@ func classify(r deploy.Result) (string, kind) {
 // stopped by a signal gives none (the run reports a signal as interrupted). A
 // command that follows the install, such as the reading of the revision, is
 // named in the text, so that its failure is not blamed on the install.
-func installCondition(r deploy.Result) (verdict.Condition, bool) {
+// restartOnly says that the deployer's transitions are a restart alone: the
+// install then installed the candidate, and the text names it (section 4, "A
+// run with no previous release").
+func installCondition(r deploy.Result, restartOnly bool) (verdict.Condition, bool) {
 	end, k := classify(r)
 	if k == noFailure {
 		return verdict.Condition{}, false
 	}
 	subject := "the install command"
+	if restartOnly {
+		subject = "the install of the candidate"
+	}
 	if r.Name != "" && r.Name != "install" {
 		subject = "the command " + r.Name + ", which follows the install,"
 	}
@@ -65,6 +72,22 @@ func installCondition(r deploy.Result) (verdict.Condition, bool) {
 		code = verdict.InternalError
 	}
 	return verdict.Condition{Code: code, Text: subject + " " + end}, true
+}
+
+// ofTheCandidate returns c with "of the candidate" after the leading "the install" of its text,
+// when restartOnly is true and c is an install-failed condition whose text begins "the install
+// was " or "the install stopped ": the texts that watch gives of an install that was not ready or
+// stopped being ready, which in a restart-only run is the candidate's (section 4). Every other
+// condition is returned as it is.
+func ofTheCandidate(c verdict.Condition, restartOnly bool) verdict.Condition {
+	const lead = "the install "
+	if !restartOnly || c.Code != verdict.InstallFailed {
+		return c
+	}
+	if strings.HasPrefix(c.Text, lead+"was ") || strings.HasPrefix(c.Text, lead+"stopped ") {
+		c.Text = lead + "of the candidate " + strings.TrimPrefix(c.Text, lead)
+	}
+	return c
 }
 
 // setupCondition returns the condition a setup Result gives, if any:

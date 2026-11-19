@@ -143,8 +143,12 @@ func (s *session) Store(ctx context.Context) (string, map[string]config.ImageRef
 	return stored.Probe.Ref(), stored.Images, nil
 }
 
-// Deployer makes the run's commands and the Helm driver, and keeps the runner
-// so that EndCommands can close it.
+// Deployer makes the run's command runner and the driver that the
+// configuration names: the commands driver for deploy.commands, bounded by
+// limits.timeout, and the Helm driver for deploy.helm, with or without a
+// previous release. Both run on the one runner that Setup and EndCommands use,
+// which it keeps so that EndCommands can close it. It also returns the names of
+// the variables taken out of the commands' environment.
 func (s *session) Deployer(cfg *config.Config) (deploy.Deployer, []string, error) {
 	runner := deploy.NewRunner(deploy.RunnerOptions{
 		Dir:        cfg.Dir,
@@ -155,6 +159,13 @@ func (s *session) Deployer(cfg *config.Config) (deploy.Deployer, []string, error
 		},
 	})
 	s.runner = runner
+	if cfg.Deploy.Commands != nil {
+		return deploy.NewCommands(deploy.CommandsOptions{
+			Commands: *cfg.Deploy.Commands,
+			Timeout:  cfg.Limits.Timeout,
+			Runner:   runner,
+		}), runner.Removed(), nil
+	}
 	helm := deploy.NewHelm(deploy.HelmOptions{
 		Helm:       *cfg.Deploy.Helm,
 		Namespace:  cfg.Deploy.Namespace,

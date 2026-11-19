@@ -45,6 +45,11 @@ type Watcher interface {
 	// arrived.
 	InstallSettled(ctx context.Context, first time.Time) watch.Settling
 	Transition(ctx context.Context, name verdict.WindowName, began time.Time, exited <-chan struct{}) watch.Transition
+	// Restart restarts every watched workload as decision 3 says and returns when the
+	// last change was taken or the first was refused. run calls it once for a
+	// restart's window, beside Transition, and hands its return to Transition as
+	// the end of the transition's command.
+	Restart(ctx context.Context) watch.Restart
 	// UseService names the Service whose endpoints Transition reads.
 	UseService(service *types.NamespacedName)
 	PodsAt(at time.Time) (stopping, starting []watch.PodNote)
@@ -319,8 +324,9 @@ func (s *runState) installStep(ctx context.Context) bool {
 	began := s.u.Clock.Now()
 	installCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	restartOnly := s.restartOnly()
 	c := s.command(installCtx, s.deployer.Install, func(res deploy.Result) {
-		if _, ok := installCondition(res); ok {
+		if _, ok := installCondition(res, restartOnly); ok {
 			// A failed install has nothing left to wait for.
 			cancel()
 		}
@@ -333,9 +339,9 @@ func (s *runState) installStep(ctx context.Context) bool {
 	if o.panicked != nil {
 		panic(o.panicked)
 	}
-	cond, gives := installCondition(o.result)
+	cond, gives := installCondition(o.result, restartOnly)
 	if !gives && err != nil {
-		cond, gives = verdict.AsCondition(err), true
+		cond, gives = ofTheCandidate(verdict.AsCondition(err), restartOnly), true
 	}
 	if !gives {
 		s.install = inst
@@ -343,6 +349,12 @@ func (s *runState) installStep(ctx context.Context) bool {
 	}
 	s.tl.Before = append(s.tl.Before, cond)
 	return false
+}
+
+// restartOnly reports whether the deployer's transitions are a restart alone: a run with no
+// previous release, whose install installs the candidate (section 4).
+func (s *runState) restartOnly() bool {
+	return slices.Equal(s.deployer.Transitions(), []verdict.WindowName{verdict.Restart})
 }
 
 // startProbe performs step 9: the probe and its first observation. The goroutine that reads the
@@ -392,8 +404,13 @@ func (s *runState) windows(ctx context.Context) bool {
 	if s.interrupted(ctx) {
 		return false
 	}
-	s.tl.Before = append(s.tl.Before, st.Before...)
-	s.tl.Windows[0].Conditions = append(s.tl.Windows[0].Conditions, st.InWindow...)
+	restartOnly := s.restartOnly()
+	for _, c := range st.Before {
+		s.tl.Before = append(s.tl.Before, ofTheCandidate(c, restartOnly))
+	}
+	for _, c := range st.InWindow {
+		s.tl.Windows[0].Conditions = append(s.tl.Windows[0].Conditions, ofTheCandidate(c, restartOnly))
+	}
 	s.tl.Windows[0].End = st.Ended
 	if st.Settled.IsZero() && len(st.Before) == 0 && len(st.InWindow) == 0 {
 		panic("the install neither settled nor failed")
@@ -422,16 +439,32 @@ func (s *runState) windows(ctx context.Context) bool {
 }
 
 // transitionsStep performs step 12: each transition of the deployer, in order,
-// until one of them does not pass.
+// until one of them does not pass. A deploy runs the deployer's Deploy, a
+// rollback its Rollback, and a restart the watcher's Restart, which stands in
+// for the command; a name that is none of the three is the tool's failure.
 func (s *runState) transitionsStep(ctx context.Context) bool {
 	for i, name := range s.names {
 		// Transition i's window follows the install window, the steady window and the
 		// transitions before it.
 		w := i + windowsBeforeTransitions
 		began := s.tl.Windows[w-1].End // no gap between windows (section 4)
-		if name != verdict.Deploy && name != verdict.Rollback {
-			// This build has no way to start any other transition: the config
-			// rejects the runs that would have one (carry-in T31-2).
+		var rs *watch.Restart          // the restart's outcome, for a restart's window
+		var fn func(ctx context.Context) deploy.Result
+		switch name {
+		case verdict.Deploy:
+			fn = s.deployer.Deploy
+		case verdict.Rollback:
+			fn = s.deployer.Rollback
+		case verdict.Restart:
+			// The restart runs as a command does, so that a panic in it is caught as a command's
+			// is; its end is the end of the transition's command (decision 4).
+			rs = &watch.Restart{}
+			fn = func(ctx context.Context) deploy.Result {
+				*rs = s.watcher.Restart(ctx)
+				return deploy.Result{Name: "restart", Ending: deploy.Succeeded, Began: rs.Began, Ended: rs.Ended}
+			}
+		default:
+			// A name this build cannot start never falls through to another transition.
 			s.tl.Before = append(s.tl.Before, verdict.Condition{Code: verdict.InternalError,
 				Text: "the tool cannot start a " + string(name) + " transition"})
 			return true
@@ -439,17 +472,18 @@ func (s *runState) transitionsStep(ctx context.Context) bool {
 		s.tl.Windows[w].Start = began
 		s.transitions = append(s.transitions, transitionFacts{tr: watch.Transition{Name: name}})
 		s.podsKept = append(s.podsKept, false)
-		fn := func(ctx context.Context) deploy.Result { return s.deployer.Deploy(ctx) }
-		if name == verdict.Rollback {
-			fn = func(ctx context.Context) deploy.Result { return s.deployer.Rollback(ctx) }
-		}
 		c := s.command(ctx, fn, nil)
 		tr := s.watcher.Transition(ctx, name, began, c.exited)
 		o := s.await(c)
-		// The command ended before the interrupted check below, so its record carries its ending
-		// even when a signal cut the transition (report.Transition's command set).
-		s.transitions[len(s.transitions)-1].cmd = o.result
-		s.transitions[len(s.transitions)-1].tr = tr
+		// The command ended before the interrupted check below, so its record carries its ending,
+		// or the restart's answer, even when a signal cut the transition (report.Transition).
+		last := &s.transitions[len(s.transitions)-1]
+		last.tr = tr
+		if rs != nil {
+			last.restart = rs
+		} else {
+			last.cmd = o.result
+		}
 		if s.interrupted(ctx) {
 			// The transition that a signal cut has none of its own conditions.
 			return false
@@ -457,7 +491,11 @@ func (s *runState) transitionsStep(ctx context.Context) bool {
 		if o.panicked != nil {
 			panic(o.panicked)
 		}
-		s.placeTransition(w, tr, o.result)
+		if rs != nil {
+			s.placeRestart(w, tr, *rs)
+		} else {
+			s.placeTransition(w, tr, o.result)
+		}
 		if !s.decide(false).GoOn {
 			return true
 		}
@@ -481,6 +519,20 @@ func (s *runState) placeTransition(i int, tr watch.Transition, res deploy.Result
 	}
 	if cmdGives {
 		w.Conditions = append(w.Conditions, cmd)
+	}
+}
+
+// placeRestart fills a restart's window: its finish and end, the watcher's
+// conditions, and restart-failed when the API server refused the change. The
+// change counts as the command's success only when it was accepted, so that a
+// refused restart is never judged as a transition that replaced no pod.
+func (s *runState) placeRestart(i int, tr watch.Transition, rs watch.Restart) {
+	w := &s.tl.Windows[i]
+	w.Finished, w.End = tr.Finished, tr.Ended
+	w.Conditions = append(w.Conditions, tr.Conditions(rs.Accepted)...)
+	if !rs.Accepted {
+		w.Conditions = append(w.Conditions, verdict.Condition{Code: verdict.RestartFailed,
+			Text: "the API server refused the restart of " + rs.Workload + ": " + rs.Text})
 	}
 }
 

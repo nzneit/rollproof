@@ -1,0 +1,33 @@
+rollproof: PASS   orders (commands) on Kubernetes v1.37.0 in kind
+
+releases    install  kubectl
+            deploy   kubectl
+images      orders   run by deployment/orders, in pods the deploy created
+probe       built-in HTTP: GET http://orders.orders.svc/api/orders/latest
+            200 a second (one check every 5 ms), timeout 2 s, status 200-299
+install     settled after 15.0 s under the probe; failures not judged
+            3,000 checks, 6 failed (refused 5, timeout 1), the last 14.9 s before the steady window
+            slowest 44 ms, behind 9 ms
+
+window   length   checks   failed   after finish   slowest   behind   result
+steady   10.0 s    2,000        0              -     41 ms     6 ms   pass
+deploy   33.4 s    6,680        0              0    212 ms    38 ms   pass
+
+transition  workload            probed   pods replaced   quickest stop
+deploy      deployment/orders   yes      2 of 2          5.3 s
+
+exercised
+  deploy      the candidate's start-up and the previous release's shutdown
+not exercised
+  the candidate's shutdown and the installed release's start-up, because the run has no rollback
+  the delay before a larger cluster stops routing to a stopping pod
+  connections held open, and requests in flight on a pod after new connections left it
+  the path through an ingress, a load balancer or a mesh
+  routing that depends on where the client is
+  capacity while pods are down, and autoscaling
+  storage that attaches to one node at a time
+  latency below the timeout
+  data migrations
+  a node drain
+
+results: /tmp/rollproof-results-7f3a

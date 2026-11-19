@@ -302,18 +302,66 @@ func TestRecordTransitions(t *testing.T) {
 	f.transitions[1].tr.Stalled = true
 	f.transitions[1].tr.Workloads[0].Added = true
 	want := []report.Transition{
-		{Name: "deploy", Command: "ok", SettleRestartedBy: []string{"pod orders-7f8e9d-z9y8x of deployment/orders was created 12.3 s after the transition began"},
+		{Name: "deploy", Command: new("ok"), SettleRestartedBy: []string{"pod orders-7f8e9d-z9y8x of deployment/orders was created 12.3 s after the transition began"},
 			Workloads: []report.Workload{
 				{Workload: "deployment/orders", PodsAtStart: 2, PodsReplaced: 2, PodsCreated: 2, Probed: "yes", QuickestStopMs: i64(5300)},
 				{Workload: "deployment/orders-worker", PodsAtStart: 1, Removed: true, Probed: "no"},
 			}},
-		{Name: "rollback", Stalled: true, Command: "exit-nonzero",
+		{Name: "rollback", Stalled: true, Command: new("exit-nonzero"),
 			Workloads: []report.Workload{
 				{Workload: "deployment/orders", PodsAtStart: 2, PodsReplaced: 2, PodsCreated: 2, Added: true, Probed: "yes", QuickestStopMs: i64(5200)},
 			}},
 	}
 	if diff := cmp.Diff(want, record(f).Transitions, cmpopts.EquateEmpty()); diff != "" {
 		t.Errorf("transitions (-want +got):\n%s", diff)
+	}
+}
+
+// A restart's record has no command and says whether the API server took its change: accepted,
+// refused when it named the workload it refused, and null when the run's context cut the restart
+// short and nothing was refused. A deploy's record has its command and no restart.
+func TestRecordOfARestart(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		in   transitionFacts
+		want report.Transition
+	}{
+		{"accepted", transitionFacts{tr: watch.Transition{Name: verdict.Restart}, restart: &watch.Restart{Accepted: true}},
+			report.Transition{Name: "restart", Command: nil, Restart: new("accepted")}},
+		{"refused", transitionFacts{tr: watch.Transition{Name: verdict.Restart},
+			restart: &watch.Restart{Accepted: false, Workload: "statefulset/db", Text: "denied"}},
+			report.Transition{Name: "restart", Command: nil, Restart: new("refused")}},
+		{"cut short by the run's context", transitionFacts{tr: watch.Transition{Name: verdict.Restart},
+			restart: &watch.Restart{Accepted: false, Text: "context canceled"}},
+			report.Transition{Name: "restart", Command: nil, Restart: nil}},
+		{"a deploy", transitionFacts{tr: watch.Transition{Name: verdict.Deploy}, cmd: deploy.Result{Ending: deploy.Succeeded}},
+			report.Transition{Name: "deploy", Command: new("ok"), Restart: nil}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			got := transitionRecords([]transitionFacts{row.in})
+			if diff := cmp.Diff([]report.Transition{row.want}, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("transition (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// The commands driver's record names the driver and the namespace, and gives each command's role
+// and first word, with no chart.
+func TestRecordOfTheCommandsDriver(t *testing.T) {
+	f := sampleFacts(t)
+	f.cfg.Deploy = config.Deploy{Namespace: "orders", Commands: &config.Commands{
+		Install: []string{"kubectl", "apply", "-k", "overlays/previous"},
+		Deploy:  []string{"kubectl", "apply", "-k", "overlays/candidate"},
+	}}
+	f.releases = []deploy.Release{{Role: "install", Program: "kubectl"}, {Role: "deploy", Program: "kubectl"}}
+	got := record(f)
+	if got.Driver != "commands" || got.Name != "orders" {
+		t.Errorf("driver %q, name %q; want commands and orders", got.Driver, got.Name)
+	}
+	want := []report.Release{{Role: "install", Program: "kubectl"}, {Role: "deploy", Program: "kubectl"}}
+	if diff := cmp.Diff(want, got.Releases, cmpopts.EquateEmpty()); diff != "" {
+		t.Errorf("releases (-want +got):\n%s", diff)
 	}
 }
 

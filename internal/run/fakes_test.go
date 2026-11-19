@@ -231,7 +231,9 @@ type fakeDeployer struct {
 	// orCtx names the commands that wait on their block or their context, whichever comes first,
 	// as a real command ends when the tool stops it; the others wait on their block alone.
 	orCtx map[string]bool
-	busyN atomic.Int32 // command goroutines inside a command now
+	// transitions is what Transitions gives; nil gives a deploy and then a rollback.
+	transitions []verdict.WindowName
+	busyN       atomic.Int32 // command goroutines inside a command now
 
 	mu   sync.Mutex
 	ctxs map[string]context.Context // the context each command was given
@@ -298,9 +300,13 @@ func (d *fakeDeployer) Deploy(ctx context.Context) deploy.Result { return d.comm
 // Rollback records "rollback" and gives its result.
 func (d *fakeDeployer) Rollback(ctx context.Context) deploy.Result { return d.command(ctx, "rollback") }
 
-// Transitions gives the two windows of the fake driver.
+// Transitions gives the scripted transitions, or a deploy and then a rollback when none were
+// scripted.
 func (d *fakeDeployer) Transitions() []verdict.WindowName {
-	return []verdict.WindowName{verdict.Deploy, verdict.Rollback}
+	if d.transitions == nil {
+		return []verdict.WindowName{verdict.Deploy, verdict.Rollback}
+	}
+	return d.transitions
 }
 
 // Releases gives the scripted releases.
@@ -326,6 +332,25 @@ type fakeWatcher struct {
 	// late is how far the clock runs past the settling's end before InstallSettled returns, as
 	// when the tool looks at the cluster a moment after the install settled.
 	late time.Duration
+	// restart is what Restart gives, with its times at the clock's; restartPanics makes Restart
+	// panic instead.
+	restart       watch.Restart
+	restartPanics bool
+}
+
+// Restart records "restart", runs its hook, and panics with "the restart broke" when
+// restartPanics is set; otherwise it gives the scripted restart with Began and Ended at the
+// clock's time.
+func (f *fakeWatcher) Restart(ctx context.Context) watch.Restart {
+	f.w.calls.add("restart")
+	f.w.hook("restart")
+	if f.restartPanics {
+		panic("the restart broke")
+	}
+	r := f.restart
+	now := f.w.clock.Now()
+	r.Began, r.Ended = now, now
+	return r
 }
 
 // InstallSettled records "install-settled" and runs its hook. When ctx has ended it gives a

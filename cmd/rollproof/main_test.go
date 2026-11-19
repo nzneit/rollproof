@@ -330,6 +330,44 @@ func TestEndCommands(t *testing.T) {
 	})
 }
 
+// TestDeployerChoosesTheDriver pins that Deployer gives the driver that the configuration names:
+// the commands driver for deploy.commands, and the Helm driver for deploy.helm, also with no
+// previous release.
+func TestDeployerChoosesTheDriver(t *testing.T) {
+	restart := []verdict.WindowName{verdict.Restart}
+	for _, row := range []struct {
+		name   string
+		deploy config.Deploy
+		want   string
+	}{
+		{"commands", config.Deploy{Namespace: "orders",
+			Commands: &config.Commands{Install: []string{"kubectl", "apply", "-k", "x"}}}, "*deploy.CommandsDriver"},
+		{"helm with no previous", config.Deploy{Namespace: "orders",
+			Helm: &config.Helm{Release: "orders", Candidate: &config.Release{Chart: "./chart", IsPath: true}}}, "*deploy.HelmDriver"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := &config.Config{Dir: dir, Deploy: row.deploy, Limits: config.Limits{Timeout: time.Minute}}
+			s := &session{
+				c:        &cluster.Cluster{Kubeconfig: filepath.Join(dir, "kubeconfig")},
+				cfg:      cfg,
+				evidence: func(string) (io.WriteCloser, error) { return &recordingEvidence{}, nil },
+			}
+			d, _, err := s.Deployer(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.EndCommands()
+			if got := fmt.Sprintf("%T", d); got != row.want {
+				t.Errorf("Deployer gave %s, want %s", got, row.want)
+			}
+			if diff := cmp.Diff(restart, d.Transitions()); diff != "" {
+				t.Errorf("transitions (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestSessionSetup pins the evidence names the setup commands run under and that
 // the first command that fails ends the set-up.
 func TestSessionSetup(t *testing.T) {

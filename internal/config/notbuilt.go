@@ -10,12 +10,6 @@ func (c *Config) NotBuilt() []string {
 	if len(c.Registries) > 0 {
 		keys = append(keys, "registries")
 	}
-	if c.Deploy.Commands != nil {
-		keys = append(keys, "deploy.commands")
-	}
-	if h := c.Deploy.Helm; h != nil && h.Previous == nil {
-		keys = append(keys, "deploy.helm.previous")
-	}
 	if c.Probe.Custom != nil {
 		keys = append(keys, "probe.custom")
 	}
