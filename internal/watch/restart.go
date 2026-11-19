@@ -26,23 +26,31 @@ type Restart struct {
 // Restart restarts every workload that exists and matches the selector when it is called, as
 // README decision 3 says: one at a time, stopping at the first refusal. Accepted is true only when
 // the API server took every change, and so also when there was nothing to change. When ctx ends
-// first, Accepted is false and Text is ctx's error: the caller tells that from a refusal.
+// first, before or during a change, Accepted is false and Text is ctx's error: the caller tells
+// that from a refusal.
 func (w *Watcher) Restart(ctx context.Context) Restart {
 	w.mu.Lock()
 	watched, _, _ := w.tr.installWatched()
 	r := Restart{Began: w.o.Now(), Accepted: true}
 	w.mu.Unlock()
-	r.Ended = r.Began
 
 	patch := restartPatchBody(r.Began)
-	for _, workload := range watched {
-		if err := ctx.Err(); err != nil {
-			r.Accepted, r.Text = false, err.Error()
-			break
-		}
-		if err := w.restart(ctx, workload, patch); err != nil {
-			r.Accepted, r.Workload, r.Text = false, workload.String(), err.Error()
-			break
+	if err := ctx.Err(); err != nil {
+		r.Accepted, r.Text = false, err.Error()
+	} else {
+		for _, workload := range watched {
+			if err := ctx.Err(); err != nil {
+				r.Accepted, r.Text = false, err.Error()
+				break
+			}
+			if err := w.restart(ctx, workload, patch); err != nil {
+				if cerr := ctx.Err(); cerr != nil {
+					r.Accepted, r.Text = false, cerr.Error()
+				} else {
+					r.Accepted, r.Workload, r.Text = false, workload.String(), err.Error()
+				}
+				break
+			}
 		}
 	}
 

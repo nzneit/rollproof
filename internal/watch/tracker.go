@@ -1,8 +1,8 @@
 // Package watch tells what happens to the watched workloads of one namespace: when an install is
 // ready, when a transition has finished or stalled, and which pods were replaced. It hides the
-// rollout rules of each kind, pod ownership and the settle time. It changes nothing in the
-// cluster. A workload that matches the selector at any moment of a transition is watched in it
-// for the rest of that transition.
+// rollout rules of each kind, pod ownership and the settle time. The only change it makes in the
+// cluster is the restart of the watched workloads. A workload that matches the selector at any
+// moment of a transition is watched in it for the rest of that transition.
 package watch
 
 import (

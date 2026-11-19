@@ -149,6 +149,40 @@ func TestRestartWhenCtxHasEnded(t *testing.T) {
 	}
 }
 
+func TestRestartWhenCtxHasEndedWithNothingToRestart(t *testing.T) {
+	w, client, _ := startWatcher(t, nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	got := w.Restart(ctx)
+	if got.Accepted || got.Workload != "" || got.Text != context.Canceled.Error() {
+		t.Errorf("Restart with an ended ctx and nothing to restart gave %+v; want not accepted, no workload, ctx's error", got)
+	}
+	if p := patches(t, client); len(p) != 0 {
+		t.Errorf("patches %v after ctx ended", p)
+	}
+}
+
+// A cancellation during a patch is ctx's ending, not a refusal of that workload.
+func TestRestartWhenCtxEndsDuringAPatch(t *testing.T) {
+	w, client, _ := startWatcherWith(t, func(o *Options) { o.Selector = "app!=batch" }, nil, restartObjects()...)
+	ctx, cancel := context.WithCancel(t.Context())
+	client.PrependReactor("patch", "deployments", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.(k8stesting.PatchAction).GetName() != "api" {
+			return false, nil, nil
+		}
+		cancel()
+		return true, nil, context.Canceled
+	})
+	got := w.Restart(ctx)
+	if got.Accepted || got.Workload != "" || got.Text != context.Canceled.Error() {
+		t.Errorf("Restart with ctx ended during a patch gave %+v; want not accepted, no workload, ctx's error", got)
+	}
+	want := []string{"daemonsets/logs", "deployments/api"}
+	if d := cmp.Diff(want, patches(t, client)); d != "" {
+		t.Errorf("patches (-want +got):\n%s", d)
+	}
+}
+
 func TestRestartWithNothingToRestart(t *testing.T) {
 	w, client, _ := startWatcher(t, nil)
 	if d := cmp.Diff(Restart{Began: t0, Ended: t0, Accepted: true}, w.Restart(t.Context())); d != "" {
