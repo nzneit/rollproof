@@ -14,12 +14,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// WriteEvents lists the events of Namespace and of ProbeNamespace once and writes them,
-// oldest first, one line each, tab-separated: the time in RFC 3339 with
-// milliseconds in UTC, the namespace, the type, the reason, the object as
-// kind/name in lower case, the count, and the message with line breaks as
-// spaces. It writes what it could list; the error names each namespace whose
-// list failed, or the failed write. It names no file; the caller bounds ctx.
+// WriteEvents lists the events of Namespace and of ProbeNamespace once and
+// writes them, oldest first, one line each, tab-separated: the time in RFC
+// 3339 with milliseconds in UTC, the namespace, the type, the reason, the
+// object as kind/name in lower case, the count, and the message with line
+// breaks as spaces. It writes what it could list; the error names each
+// namespace whose list failed, or the failed write. The caller bounds ctx.
 func (w *Watcher) WriteEvents(ctx context.Context, out io.Writer) error {
 	namespaces := []string{w.o.Namespace}
 	if ns := w.o.ProbeNamespace; ns != "" && ns != w.o.Namespace {

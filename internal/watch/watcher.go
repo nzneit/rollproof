@@ -33,12 +33,12 @@ type Options struct {
 	Workers             int
 	Service             *types.NamespacedName
 	Now                 func() time.Time
-	// Evidence opens an evidence file by its full name. The Watcher writes
-	// through it the pod lists and the log of each container of every watched
-	// pod from first sight until the pod is gone, with a restarted container's
-	// previous run; a log not read to its end ends with a "rollproof:" line
-	// saying why. Errors are ignored, an unopenable file skipped; nil writes
-	// nothing. It may be called from several goroutines at once.
+	// Evidence opens an evidence file by its full name; nil writes nothing. The
+	// Watcher writes through it the pod lists and each watched pod's container
+	// logs until the pod is gone, with a restarted container's previous run; a
+	// log not read to its end ends with a "rollproof:" line saying why, unless
+	// Stop ended it. The errors of Evidence and its writers are ignored. It may
+	// be called from several goroutines at once.
 	Evidence func(name string) (io.WriteCloser, error)
 	// ProbeNamespace is the probe's namespace, whose events WriteEvents writes
 	// beside those of Namespace; the tool passes rollproof-probe. Empty writes
@@ -160,9 +160,10 @@ func Start(ctx context.Context, client kubernetes.Interface, o Options) (*Watche
 	return w, nil
 }
 
-// Stop stops following, ends every pod log's follower and returns when each has closed its file,
-// every other goroutine that Start began has ended and the channel of Finishes is closed; a
-// Finish not received by then is dropped. It is safe to call twice.
+// Stop stops following, ends every pod log's follower and returns when each
+// has closed its file, every other goroutine of the Watcher has ended and the
+// channel of Finishes is closed; a Finish not received by then is dropped. It
+// is safe to call twice.
 func (w *Watcher) Stop() {
 	w.stopOnce.Do(func() {
 		close(w.stop)
@@ -337,20 +338,21 @@ func (t *Tracker) windowEnded(now time.Time) bool {
 	return !t.windowOpen()
 }
 
-// PodEvent is one moment in a pod's life as the watch saw it. Kind is created (the
-// watch's first sight of the pod), ready (first ready), deleted (the first
-// sight of its deletion) or gone. Workload is the pod's workload, as
-// deployment/orders, empty when the watch knows none.
+// PodEvent is one moment in a pod's life as the watch saw it. Kind is created
+// (the watch's first sight of the pod), ready (first ready), deleted (the
+// first sight of its deletion; for a pod seen alive, then gone with no
+// deletion seen, the moment it was gone) or gone. Workload is the pod's
+// workload, as deployment/orders, empty when the watch knows none.
 type PodEvent struct {
 	At            time.Time
 	Pod, Workload string
 	Kind          string
 }
 
-// PodEvents gives every PodEvent of every pod of the namespace so far, in order of time,
-// then of pod name, then of kind in the order created, ready, deleted, gone.
-// A pod known only from its disappearance has a gone alone. The slice is a
-// copy; safe to call at any time, also after Stop.
+// PodEvents gives every PodEvent of every pod of the namespace so far, in
+// order of time, then of pod name, then of kind in the order created, ready,
+// deleted, gone. A pod known only from its disappearance has a gone alone.
+// The slice is a copy; safe to call at any time, also after Stop.
 func (w *Watcher) PodEvents() []PodEvent {
 	w.mu.Lock()
 	defer w.mu.Unlock()

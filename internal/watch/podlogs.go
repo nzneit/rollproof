@@ -16,11 +16,22 @@ import (
 )
 
 // followPods starts the log followers that the Set of obj makes due: for a pod, those of that
-// pod; for a ReplicaSet, those of each pod of it that the Tracker holds, since a pod that came
-// before its ReplicaSet had no workload at its own Set. Call it under mu, after the Tracker was
-// told obj. It starts nothing when Options.Evidence is nil.
+// pod; for a ReplicaSet or a workload, those of each pod of it that the Tracker holds, since the
+// informers run side by side and a pod can be Set before its ReplicaSet or its workload, or before
+// its workload matched. Call it under mu, after the Tracker was told obj. It starts nothing when
+// Options.Evidence is nil.
 func (w *Watcher) followPods(obj runtime.Object) {
 	if w.o.Evidence == nil {
+		return
+	}
+	if wl, _, ok := workloadOf(obj); ok {
+		if rec := w.tr.workloads[wl]; rec != nil && rec.matched {
+			for uid, p := range w.tr.pods {
+				if pw, ok := w.tr.podWorkload(p); ok && pw == wl {
+					w.followPod(uid)
+				}
+			}
+		}
 		return
 	}
 	switch o := obj.(type) {
@@ -70,8 +81,8 @@ type logFollower struct {
 // restarted, and follows the current run until the pod is gone or ctx ends. A stream that ends
 // while the pod lives is opened again, from the start of a new run or from the second of the last
 // line read; an opening that fails is tried again every pollEvery. When the pod is gone and the
-// current run was not read to its end, a final "rollproof:" line says why. When ctx ends, the
-// file ends where the stream did.
+// current run was not read to its end (the last opening failed, or its stream failed before its
+// end), a final "rollproof:" line says why. When ctx ends, the file ends where the stream did.
 func (f *logFollower) follow(ctx context.Context) {
 	defer f.close()
 	st, gone := f.status()
@@ -92,7 +103,7 @@ func (f *logFollower) follow(ctx context.Context) {
 	var last time.Time // the timestamp of the last whole line read of the current run
 	for {
 		restarts := st.RestartCount
-		stamp, err := f.read(ctx, opts)
+		stamp, opened, err := f.read(ctx, opts)
 		if ctx.Err() != nil || f.skipped {
 			return
 		}
@@ -110,7 +121,7 @@ func (f *logFollower) follow(ctx context.Context) {
 				}
 				return
 			}
-			if err != nil {
+			if !opened {
 				break // the same opening, again
 			}
 			if st.RestartCount > restarts {
@@ -119,8 +130,8 @@ func (f *logFollower) follow(ctx context.Context) {
 				break
 			}
 			if st.State.Running != nil {
-				// With no line read of this run, the run is opened from its start and nothing
-				// repeats.
+				// With no whole line read of this run, the run is opened from its start: only a
+				// cut line repeats, on a line of its own.
 				if !last.IsZero() {
 					from := last.Truncate(time.Second)
 					f.note("rollproof: the log was opened again from " + from.UTC().Format(time.RFC3339) +
@@ -134,21 +145,25 @@ func (f *logFollower) follow(ctx context.Context) {
 	}
 }
 
-// read opens the current run with opts and copies it into the file until the stream ends. It
-// returns the timestamp of the last whole line it read, zero when none, and the opening's error.
-func (f *logFollower) read(ctx context.Context, opts *corev1.PodLogOptions) (time.Time, error) {
+// read opens the current run with opts and copies it into the file until the stream ends, after
+// a line break when the file's last line is unfinished, so that a cut line stays apart. It
+// returns the timestamp of the last whole line it read, zero when none, whether the opening
+// succeeded, and the opening's error or the stream's: a stream that fails before its end did not
+// give the run to its end.
+func (f *logFollower) read(ctx context.Context, opts *corev1.PodLogOptions) (time.Time, bool, error) {
 	stream, err := f.w.client.CoreV1().Pods(f.w.o.Namespace).GetLogs(f.pod, opts).Stream(ctx)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, false, err
 	}
 	defer stream.Close()
 	file := f.open()
 	if file == nil {
-		return time.Time{}, nil
+		return time.Time{}, true, nil
 	}
+	file.endLine()
 	file.last = time.Time{}
-	_, _ = io.Copy(file, stream) // a read that fails ends the stream as its end does
-	return file.last, nil
+	_, err = io.Copy(file, stream) // the writer's errors are ignored; this is the stream's
+	return file.last, true, err
 }
 
 // previous reads the previous run of the container once into its own file. When the opening
@@ -279,11 +294,16 @@ func (l *logFile) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// note writes text as a line of its own, after a line break when the last line is unfinished.
-func (l *logFile) note(text string) {
+// endLine writes a line break when the last line written is unfinished.
+func (l *logFile) endLine() {
 	if len(l.line) > 0 {
 		_, _ = l.Write([]byte("\n"))
 	}
+}
+
+// note writes text as a line of its own, after a line break when the last line is unfinished.
+func (l *logFile) note(text string) {
+	l.endLine()
 	_, _ = l.Write([]byte(text + "\n"))
 }
 
