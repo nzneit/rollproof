@@ -138,6 +138,9 @@ func reasonRecord(reason verdict.Reason, trs []transitionFacts) report.Reason {
 			out.Detail = append(out.Detail, podLines(t)...)
 		case verdict.TransitionStalled:
 			out.Detail = append(out.Detail, t.tr.Incomplete...)
+			if t.tr.LastEvent != "" {
+				out.Detail = append(out.Detail, "the last event: "+t.tr.LastEvent)
+			}
 		}
 	}
 	return out

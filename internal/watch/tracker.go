@@ -45,7 +45,7 @@ type TrackerOptions struct {
 // zero for a stall. Ended is when its window ended. Missed is when the watch of the cluster first
 // missed changes in the window, zero when it missed none. The string lists are sentences for the
 // report: what started the settle time again, what is not complete, which pods could not be
-// scheduled.
+// scheduled. LastEvent is the last event of the namespace about what a stall names.
 type Transition struct {
 	Name                                      verdict.WindowName
 	Began, Finished, Ended, Missed            time.Time
@@ -54,6 +54,12 @@ type Transition struct {
 	Unsupported                               []Workload
 	Workloads                                 []Count
 	Replaced                                  bool
+	// LastEvent is the last event of the namespace about what a stall names, when the window
+	// stalled: a watched workload that is not complete, a ReplicaSet of such a Deployment, or a
+	// pod of one that is not ready or is stopping, written KIND/NAME: REASON: MESSAGE with kind
+	// in lower case and line breaks as spaces. Empty when it did not stall, no such event
+	// exists, or the events could not be listed in the settle time.
+	LastEvent string
 }
 
 // Count is one workload in one transition: its pods at the start, how many of those are gone, how
@@ -371,6 +377,55 @@ func (t *Tracker) State(now time.Time) (Transition, bool) {
 		t.details(&s, now)
 	}
 	return s.copied(), !s.Ended.IsZero()
+}
+
+// stallObjects returns the objects that the last transition's stall names, each as kind/name with
+// the kind in lower case: the workloads that take part and are not complete, or are deleted with
+// pods left; the ReplicaSets that are the controllers of such a Deployment; and the pods of those
+// workloads that are not gone and are not ready or are stopping. It is empty when the last
+// transition did not stall.
+func (t *Tracker) stallObjects() map[string]bool {
+	tr := t.current()
+	if tr == nil || !tr.t.Stalled {
+		return nil
+	}
+	named := map[string]bool{}
+	var stalled []Workload
+	for _, w := range t.takingPart() {
+		rec := t.workloads[w]
+		if !rec.gone.IsZero() {
+			if t.podsLeft(w) {
+				named[w.String()] = true
+				stalled = append(stalled, w)
+			}
+			continue
+		}
+		if done, _ := Complete(rec.obj); !done {
+			named[w.String()] = true
+			stalled = append(stalled, w)
+		}
+	}
+	for rs, d := range t.owners {
+		for _, w := range stalled {
+			if w.Kind == "deployment" && w.Name == d {
+				named["replicaset/"+rs] = true
+				break
+			}
+		}
+	}
+	for _, p := range t.pods {
+		if !p.gone.IsZero() {
+			continue
+		}
+		w, ok := t.podWorkload(p)
+		if !ok || !named[w.String()] {
+			continue
+		}
+		if !podReady(p.obj) || !p.deleting.IsZero() {
+			named["pod/"+p.name] = true
+		}
+	}
+	return named
 }
 
 // endIfDue ends the open transition's window when its time has come by at: Settle after it

@@ -240,6 +240,10 @@ func (w *Watcher) InstallSettled(ctx context.Context, first time.Time) Settling 
 // with Ended set to that moment. Finished is then zero, whatever the transition did before, so
 // that its window is never judged as one that finished.
 //
+// When the window stalled and ctx has not ended, it also lists the namespace's events once,
+// bounded by the settle time, and sets LastEvent to the last about what the stall names; a list
+// that fails, finds none, or does not return in the settle time leaves it empty.
+//
 // It writes the pod list pods/NAME-before.json when it has begun the transition and
 // pods/NAME-after.json when the window has ended or ctx ended: each a PodList, in JSON, of every
 // pod of the namespace that the watch holds and that is not gone, by name. Each is written beside
@@ -280,11 +284,19 @@ func (w *Watcher) Transition(ctx context.Context, name verdict.WindowName, began
 	if !ended || ctx.Err() != nil {
 		return withProbed(s, first)
 	}
-	// The last reading is bounded by the settle time; one that has not returned by then counts as
-	// not made.
+	// The last reading and, for a stall, the namespace's last event are bounded by the settle
+	// time; one that has not returned by then counts as not made.
 	lastCtx, endLast := context.WithTimeout(ctx, w.o.Settle)
 	defer endLast()
-	return withProbed(s, first, w.reading(lastCtx))
+	lastRead := make(chan map[Workload]bool, 1)
+	go func() { lastRead <- w.reading(lastCtx) }()
+	if s.Stalled {
+		w.mu.Lock()
+		named := w.tr.stallObjects()
+		w.mu.Unlock()
+		s.LastEvent = w.lastEvent(lastCtx, named)
+	}
+	return withProbed(s, first, <-lastRead)
 }
 
 // follow waits until the open transition's window has ended, and tells the Tracker when the

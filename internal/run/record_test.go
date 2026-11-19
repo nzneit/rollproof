@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -230,6 +231,20 @@ func TestRecordStallDetail(t *testing.T) {
 	if d := got.Reasons[1].Detail; len(d) != 0 {
 		t.Errorf("detail of pod-unschedulable is %q, want none", d)
 	}
+
+	const last = "pod/orders-7f8e9d-k3m2p: FailedScheduling: 0/4 nodes are available..."
+	f.transitions[0].tr.LastEvent = last
+	got = record(f)
+	if diff := cmp.Diff(append(slices.Clone(incomplete), "the last event: "+last), got.Reasons[0].Detail); diff != "" {
+		t.Errorf("detail of transition-stalled with a last event (-want +got):\n%s", diff)
+	}
+	if got.Reasons[0].Text != "did not finish within limits.timeout" {
+		t.Errorf("the stall's text %q changed", got.Reasons[0].Text)
+	}
+	if d := got.Reasons[1].Detail; len(d) != 0 {
+		t.Errorf("detail of pod-unschedulable is %q, want none", d)
+	}
+	f.transitions[0].tr.LastEvent = ""
 
 	f.decision = verdict.Decision{Verdict: verdict.NotVerified, Reasons: []verdict.Reason{{
 		Code: verdict.NothingWatched, Verdict: verdict.NotVerified, Decided: true,

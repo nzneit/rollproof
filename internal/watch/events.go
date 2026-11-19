@@ -52,6 +52,35 @@ func (w *Watcher) WriteEvents(ctx context.Context, out io.Writer) error {
 	return errors.Join(errs...)
 }
 
+// lastEvent lists the events of Namespace once and returns the latest about one of the objects in
+// named, each as kind/name in lower case, written KIND/NAME: REASON: MESSAGE with kind in lower
+// case and line breaks as spaces. It returns "" when no event names one of them, when the list
+// fails, or when ctx ends first. The caller bounds ctx.
+func (w *Watcher) lastEvent(ctx context.Context, named map[string]bool) string {
+	if len(named) == 0 {
+		return ""
+	}
+	list, err := w.client.CoreV1().Events(w.o.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return ""
+	}
+	slices.SortStableFunc(list.Items, func(a, b corev1.Event) int {
+		return cmp.Or(eventTime(&a).Compare(eventTime(&b)), cmp.Compare(a.Name, b.Name))
+	})
+	var last *corev1.Event
+	for i := range list.Items {
+		e := &list.Items[i]
+		if named[strings.ToLower(e.InvolvedObject.Kind)+"/"+e.InvolvedObject.Name] {
+			last = e
+		}
+	}
+	if last == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s/%s: %s: %s", strings.ToLower(last.InvolvedObject.Kind),
+		last.InvolvedObject.Name, last.Reason, oneLine(last.Message))
+}
+
 // eventTime is the moment an event tells of: its LastTimestamp, else its EventTime, else its
 // FirstTimestamp, else its creation time. An event that the core API's recorder wrote carries the
 // first and the last; one that the events API wrote may carry EventTime alone.

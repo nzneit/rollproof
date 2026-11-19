@@ -10,6 +10,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
+
+	"rollproof/internal/verdict"
 )
 
 // event is a core/v1 Event about KIND/NAME in ns, counted once, with the given time fields
@@ -75,5 +77,49 @@ func TestWriteEventsWhenAListFails(t *testing.T) {
 	}
 	if got, want := b.String(), scaledLine+failedLine; got != want {
 		t.Errorf("events:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestTransitionStallNamesTheLastEvent(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		events []runtime.Object
+		want   string
+	}{
+		{"the pod's event is the last", []runtime.Object{
+			event("orders", "e1", "Deployment", "orders", "Normal", "ScalingReplicaSet", "Scaled up replica set orders-b from 0 to 1", at(1), time.Time{}, time.Time{}),
+			event("orders", "e2", "Pod", "orders-b-1", "Warning", "FailedScheduling", "0/4 nodes are available:\n4 Insufficient cpu.", at(2), time.Time{}, time.Time{}),
+			event("orders", "e3", "Pod", "unrelated-1", "Warning", "BackOff", "not named by the stall", at(3), time.Time{}, time.Time{}),
+			event("elsewhere", "e4", "Pod", "orders-b-1", "Warning", "BackOff", "another namespace", at(4), time.Time{}, time.Time{}),
+		}, "pod/orders-b-1: FailedScheduling: 0/4 nodes are available: 4 Insufficient cpu."},
+		{"the ReplicaSet's event is the last", []runtime.Object{
+			event("orders", "e2", "Pod", "orders-b-1", "Warning", "FailedScheduling", "0/4 nodes are available", at(2), time.Time{}, time.Time{}),
+			event("orders", "e5", "ReplicaSet", "orders-b", "Warning", "FailedCreate", `pods "orders-b-2" is forbidden: violates PodSecurity`, at(5), time.Time{}, time.Time{}),
+		}, `replicaset/orders-b: FailedCreate: pods "orders-b-2" is forbidden: violates PodSecurity`},
+		{"no event names it", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, client, clock := startWatcher(t, nil, append(base(), tc.events...)...)
+			ctx := t.Context()
+			exited := make(chan struct{})
+			res := make(chan Transition, 1)
+			go func() { res <- w.Transition(ctx, verdict.Deploy, clock.Now(), exited) }()
+			until(t, w, clock, func(s Transition) bool { return s.Name == verdict.Deploy })
+			update(t, client, deployment("orders", 2, 2, 2, 0, 2, 3)) // one new pod wanted, none updated
+			if _, err := client.AppsV1().ReplicaSets("orders").Create(ctx, replicaSet("orders-b", "orders"), metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.CoreV1().Pods("orders").Create(ctx, pod("orders-b-1", "b1", "ReplicaSet", "orders-b", false, false), metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			close(exited)
+			tr := drive(t, clock, res)
+			if !tr.Stalled || tr.LastEvent != tc.want {
+				t.Errorf("stalled %v, last event %q; want a stall and %q", tr.Stalled, tr.LastEvent, tc.want)
+			}
+			if got := tr.Conditions(true)[0].Text; got != "did not finish within limits.timeout" {
+				t.Errorf("the stall's text %q changed", got)
+			}
+		})
 	}
 }
