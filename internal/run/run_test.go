@@ -755,6 +755,78 @@ func TestToolFaultAfterTheLastWindow(t *testing.T) {
 	}
 }
 
+// drainFault is one bad line that the drain gives, written at t0+71s, after
+// the rollback's end at t0+70s; failedCheck says it is a failed check's line.
+func drainFault(failedCheck bool) probe.Event {
+	return probe.Event{Fault: &verdict.Condition{Code: verdict.ProbeLineInvalid,
+		At: t0.Add(71 * time.Second), Text: "the line holds ok twice"}, FailedCheck: failedCheck}
+}
+
+// Section 6 and section 14, point 29: a failed check's line that is a fault, written during the
+// drain, belongs to the last window, so that a failure does not vanish because of its printing.
+func TestAFailedChecksBadLineInTheDrainIsJudged(t *testing.T) {
+	w := newWorld(t)
+	w.probe.last = []probe.Event{drainFault(true)}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"pass", "pass", "not-verified"}, r.results()); diff != "" {
+		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+	if window, _ := r.windowOf("probe-line-invalid"); window != "rollback" {
+		t.Errorf("probe-line-invalid in window %q, want rollback", window)
+	}
+	if len(r.Warnings) != 0 {
+		t.Errorf("warnings %q, want none", r.Warnings)
+	}
+}
+
+func TestAnotherFaultInTheDrainIsAWarning(t *testing.T) {
+	w := newWorld(t)
+	w.probe.last = []probe.Event{drainFault(false)}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if r.Verdict != "pass" {
+		t.Errorf("verdict %q, want pass", r.Verdict)
+	}
+	want := []string{"after the last window: probe-line-invalid: the line holds ok twice"}
+	if diff := cmp.Diff(want, r.Warnings); diff != "" {
+		t.Errorf("warnings (-want +got):\n%s", diff)
+	}
+}
+
+func TestAFailedChecksBadLineGoesToTheLastWindowThatBegan(t *testing.T) {
+	w := newWorld(t)
+	w.probe.events = append(w.probe.events, failureAt(20*time.Second, 20*time.Second))
+	ev := drainFault(true)
+	ev.Fault.At = t0.Add(41 * time.Second) // after the deploy's end at t0+40s; the rollback never runs
+	w.probe.last = []probe.Event{ev}
+	if code := w.run(context.Background()); code != 1 {
+		t.Fatalf("exit %d, want 1\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if window, _ := r.windowOf("probe-line-invalid"); window != "deploy" {
+		t.Errorf("probe-line-invalid in window %q, want deploy; reasons %q, warnings %q", window, r.codes(), r.Warnings)
+	}
+}
+
+// Carry-in T29-1 stays: a failure of the tool after the last window moves there, failed check or not.
+func TestAToolFaultInTheDrainStillMoves(t *testing.T) {
+	w := newWorld(t)
+	ev := drainFault(false)
+	ev.Fault.Code = verdict.InternalError
+	w.probe.last = []probe.Event{ev}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+	}
+	if window, _ := w.result().windowOf("internal-error"); window != "rollback" {
+		t.Errorf("internal-error in window %q, want rollback", window)
+	}
+}
+
 func TestEvidenceThatCannotBeOpenedIsAWarning(t *testing.T) {
 	w := newWorld(t)
 	w.hooks["store"] = func() {

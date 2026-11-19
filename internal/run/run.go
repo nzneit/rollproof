@@ -202,6 +202,7 @@ type runState struct {
 
 	mu          sync.Mutex // guards the timeline, which the event reader extends
 	tl          verdict.Timeline
+	failedCheck []bool // beside tl.Timed, index for index: the condition is a failed check's line's fault
 	transitions []transitionFacts
 	podsKept    []bool
 	reader      *reader
@@ -764,13 +765,13 @@ func (s *runState) decide(final bool) verdict.Decision {
 		h()
 	}
 	s.ask()
-	t := s.timeline()
+	t, failedCheck := s.timeline()
 	t.Now = s.u.Clock.Now()
 	if s.cfg != nil {
 		t.Silence = s.cfg.Limits.Silence
 	}
 	if final {
-		s.moveToolFaults(&t)
+		s.moveToolFaults(&t, failedCheck)
 	}
 	d := verdict.Decide(t)
 	if final {
@@ -783,12 +784,13 @@ func (s *runState) decide(final bool) verdict.Decision {
 	return d
 }
 
-// moveToolFaults places a failure of the tool that came after the last window
-// ended in that window: one that arrives while the probe is being stopped
-// belongs to the last window (section 10 rule 3, carry-in T29-1). Only the
-// tool's own faults move; any other condition after the last window stays
-// where Decide puts it, and is reported as a warning.
-func (s *runState) moveToolFaults(t *verdict.Timeline) {
+// moveToolFaults places in the last window that began each condition of t.Timed at or
+// after that window's end that is a failure of the tool, or the fault of a
+// failed check's line (failedCheck[i] true for t.Timed[i]). Every other
+// condition after the last window stays where Decide puts it, and the report
+// shows it as a warning. With no begun window, or one still open, it does
+// nothing.
+func (s *runState) moveToolFaults(t *verdict.Timeline, failedCheck []bool) {
 	last := -1
 	for i, w := range t.Windows {
 		if !w.Start.IsZero() {
@@ -800,8 +802,8 @@ func (s *runState) moveToolFaults(t *verdict.Timeline) {
 	}
 	end := t.Windows[last].End
 	var kept []verdict.Condition
-	for _, c := range t.Timed {
-		if c.Code == verdict.InternalError && !c.At.Before(end) {
+	for i, c := range t.Timed {
+		if (c.Code == verdict.InternalError || failedCheck[i]) && !c.At.Before(end) {
 			t.Windows[last].Conditions = append(t.Windows[last].Conditions, c)
 			continue
 		}
@@ -1097,9 +1099,10 @@ func panicText(caught any) string {
 	return fmt.Sprint(caught)
 }
 
-// timeline is a copy of the run's timeline, taken under the lock that the
-// event reader holds.
-func (s *runState) timeline() verdict.Timeline {
+// timeline is a copy of the run's timeline, and of which of its timed
+// conditions are a failed check's line's fault (index for index with Timed),
+// taken under the lock that the event reader holds.
+func (s *runState) timeline() (verdict.Timeline, []bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := s.tl
@@ -1110,7 +1113,7 @@ func (s *runState) timeline() verdict.Timeline {
 	for i := range t.Windows {
 		t.Windows[i].Conditions = slices.Clone(s.tl.Windows[i].Conditions)
 	}
-	return t
+	return t, slices.Clone(s.failedCheck)
 }
 
 // warnings holds what went wrong once the verdict could still change, safe for
@@ -1393,6 +1396,7 @@ func (s *runState) addEvent(ev probe.Event) {
 	}
 	if ev.Fault != nil {
 		s.tl.Timed = append(s.tl.Timed, *ev.Fault)
+		s.failedCheck = append(s.failedCheck, ev.FailedCheck)
 	}
 }
 
