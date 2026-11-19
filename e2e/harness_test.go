@@ -521,9 +521,10 @@ func checkClusterGone(t *testing.T, f fixture) {
 	}
 }
 
-// checkClusterKept fails the test unless the engine lists the control-plane node and the registry
-// of the cluster the run made. It removes nothing: runFixture has registered removeKeptCluster when
-// the tool started.
+// checkClusterKept fails the test unless the engine lists the control-plane node, each worker
+// node of the fixture's number of workers (3 when it names none) and the registry of the cluster
+// the run made. It removes nothing: runFixture has registered removeKeptCluster when the tool
+// started.
 func checkClusterKept(t *testing.T, f fixture) {
 	t.Helper()
 	out, err := exec.Command(engine, "ps", "-a", "--format", "{{.Names}}").CombinedOutput()
@@ -531,7 +532,15 @@ func checkClusterKept(t *testing.T, f fixture) {
 		t.Fatalf("%s: %s ps -a: %v\n%s", f.name, engine, err, out)
 	}
 	names := strings.Fields(string(out))
-	for _, want := range []string{"rollproof-e2e-control-plane", "rollproof-e2e-registry"} {
+	workers := f.workers
+	if workers == 0 {
+		workers = 3
+	}
+	wants := []string{"rollproof-e2e-control-plane", "rollproof-e2e-registry", "rollproof-e2e-worker"}
+	for i := 2; i <= workers; i++ {
+		wants = append(wants, fmt.Sprintf("rollproof-e2e-worker%d", i))
+	}
+	for _, want := range wants {
 		found := false
 		for _, name := range names {
 			found = found || name == want

@@ -219,6 +219,21 @@ func TestBothReleasesEndWithoutDraining(t *testing.T) {
 	f := fixture{name: "both-releases-end-without-draining", previous: values, candidate: values}
 	underBothHelms(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
+		seen := 0
+		for _, tr := range readTransitions(t, outDir(t)) {
+			for _, w := range tr.Workloads {
+				if w.Workload != "deployment/orders" {
+					continue
+				}
+				seen++
+				if w.QuickestStopMs == nil || *w.QuickestStopMs < 5000 {
+					t.Errorf("%s: deployment/orders quickest stop %v ms; want 5000 or more", tr.Name, w.QuickestStopMs)
+				}
+			}
+		}
+		if seen != 2 {
+			t.Errorf("deployment/orders is in %d transitions, want 2", seen)
+		}
 	})
 }
 
@@ -242,10 +257,12 @@ func TestSecondRolloutAfterTheFirstFinished(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, m := range marks {
-			if m.Name == "deploy" && (len(m.Finishes) < 2 || !m.Finishes[len(m.Finishes)-1].After(restarted)) {
-				t.Errorf("deploy: finishes %v, restart at %v; want two or more, the last after the restart", m.Finishes, restarted)
-			}
+		m := findMark(marks, "deploy")
+		if m == nil {
+			t.Fatalf("evidence/windows.json has no deploy mark: %+v", marks)
+		}
+		if len(m.Finishes) < 2 || !m.Finishes[len(m.Finishes)-1].After(restarted) {
+			t.Errorf("deploy: finishes %v, restart at %v; want two or more, the last after the restart", m.Finishes, restarted)
 		}
 		if d := rec.window(t, "deploy"); d.End == nil || !d.End.After(restarted) {
 			t.Errorf("the deploy window ended at %v, before the restart at %v", d.End, restarted)
@@ -257,9 +274,10 @@ func TestSecondRolloutAfterTheFirstFinished(t *testing.T) {
 // The control comes first (decision 24): the same chart with the policy that denies and without
 // the rule that lets the probe in must not pass, or the row would pass whether or not kind's
 // network plugin enforces the policy. The control runs once, under Helm 3: it tests the cluster's
-// network plugin, not Helm.
+// network plugin, not Helm. A control that does not give its expected result stops the test
+// before the row runs.
 func TestChartDeniesTrafficByDefault(t *testing.T) {
-	t.Run("control", func(t *testing.T) {
+	controlled := t.Run("control", func(t *testing.T) {
 		denied := map[string]any{"denyIngress": true, "allowProbe": false}
 		r := runFixture(t, fixture{name: "chart-denies-traffic-control", previous: denied, candidate: denied, helm: "helm-3"})
 		if r.verdict == "pass" {
@@ -268,6 +286,9 @@ func TestChartDeniesTrafficByDefault(t *testing.T) {
 		expect(t, r, result{exit: 2, verdict: "not-verified", codes: []string{"steady-not-clean"}, decided: "steady-not-clean",
 			windows: map[string]string{"steady": "not-verified", "deploy": "not-run", "rollback": "not-run"}})
 	})
+	if !controlled {
+		t.Fatal("the control did not give steady-not-clean, so the row is not run; stop for the maintainer (decision 24)")
+	}
 	values := map[string]any{"denyIngress": true, "allowProbe": true}
 	f := fixture{name: "chart-denies-traffic-by-default", previous: values, candidate: values}
 	underBothHelms(t, f, func(t *testing.T, r result) {
@@ -316,11 +337,13 @@ func TestHooksLongerThanTheSettleTime(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, m := range marks {
-			// Helm runs the pre-upgrade hook, 20 s, before it changes anything.
-			if m.Name == "deploy" && (m.Start == nil || len(m.Finishes) == 0 || m.Finishes[0].Sub(*m.Start) < 20*time.Second) {
-				t.Errorf("deploy: start %v, finishes %v; want the first finish 20 s or more after the start", m.Start, m.Finishes)
-			}
+		m := findMark(marks, "deploy")
+		if m == nil {
+			t.Fatalf("evidence/windows.json has no deploy mark: %+v", marks)
+		}
+		// Helm runs the pre-upgrade hook, 20 s, before it changes anything.
+		if m.Start == nil || len(m.Finishes) == 0 || m.Finishes[0].Sub(*m.Start) < 20*time.Second {
+			t.Errorf("deploy: start %v, finishes %v; want the first finish 20 s or more after the start", m.Start, m.Finishes)
 		}
 	})
 }
