@@ -51,29 +51,49 @@ func TestStartRegistryCountsItsOwnLimit(t *testing.T) {
 	}
 }
 
-// The limit covers the registry container's start too: a start that used the whole limit is said
-// to have done so, and no deadline that no request met is named.
-func TestStartRegistryWhenTheContainersStartUsedTheLimit(t *testing.T) {
-	// The fake engine's run returns only after the limit has passed, as a slow pull of the image
-	// would; its inspect names an address for the nodes.
-	script := filepath.Join(t.TempDir(), "engine")
-	body := "#!/bin/sh\n" +
-		"if [ \"$1\" = run ]; then\n" +
-		"  sleep 0.5\n" +
-		"fi\n" +
-		"if [ \"$1\" = inspect ]; then\n" +
-		"  echo '[{\"NetworkSettings\":{\"Networks\":{\"kind\":{\"IPAddress\":\"10.0.0.2\"}}}}]'\n" +
-		"fi\n" +
-		"exit 0\n"
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	const limit = 200 * time.Millisecond
+// The wait for the registry's answer counts limit from the container's start: a slow start does
+// not eat into it, so the whole limit is still waited.
+func TestStartRegistryCountsItsWaitFromTheContainersStart(t *testing.T) {
+	// The fake engine's run returns only after 0.4 s; its inspect names an address for the nodes
+	// and says that the image is held, so that no pull happens.
+	script, _ := fakeEngine(t, "if [ \"$1\" = run ]; then\n"+
+		"  sleep 0.4\n"+
+		"fi\n"+
+		"if [ \"$1\" = inspect ]; then\n"+
+		"  echo '[{\"NetworkSettings\":{\"Networks\":{\"kind\":{\"IPAddress\":\"10.0.0.2\"}}}}]'\n"+
+		"fi\n")
+	const limit = 300 * time.Millisecond
+	start := time.Now()
 	push, node, err := startRegistry(context.Background(), Engine{Binary: script},
 		"rollproof-test-registry", "registry:3", limit)
-	want := "the registry's container started after its limit of 200ms ran out"
+	took := time.Since(start)
+	if err == nil {
+		t.Fatalf("startRegistry = %q, %q, nil; want an error", push, node)
+	}
+	if !strings.Contains(err.Error(), "the registry did not answer") {
+		t.Errorf("error %q, want it to say that the registry did not answer", err)
+	}
+	if took < 700*time.Millisecond {
+		t.Errorf("startRegistry took %v, want at least 700ms", took)
+	}
+}
+
+// The registry's image is pulled within limit too: a pull that uses the whole limit is cut short,
+// and no container starts.
+func TestStartRegistryCutsTheImagesPullAtItsLimit(t *testing.T) {
+	script, log := fakeEngine(t, "if [ \"$1\" = inspect ]; then\n  exit 1\nfi\n"+
+		"if [ \"$1\" = pull ]; then\n  exec sleep 5\nfi\n")
+	const limit = 300 * time.Millisecond
+	push, node, err := startRegistry(context.Background(), Engine{Binary: script},
+		"rollproof-test-registry", "registry:3", limit)
+	want := "registry:3 could not be pulled within 300ms"
 	if err == nil || err.Error() != want {
 		t.Errorf("startRegistry = %q, %q, %v; want the error %q", push, node, err, want)
+	}
+	for _, call := range engineCalls(t, log) {
+		if strings.HasPrefix(call, "run") {
+			t.Errorf("the engine ran the registry's container after the pull's limit: %q", call)
+		}
 	}
 }
 

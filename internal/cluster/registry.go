@@ -29,12 +29,12 @@ const (
 // startRegistry starts the container NAME-registry from image on the engine's network for kind,
 // published on a free port of the runner's loopback, and returns when GET /v2/ answers 200. push
 // is the registry as the runner reaches it, 127.0.0.1:PORT; node is the same registry as the
-// nodes reach it, ADDRESS:5000. limit, counted from its own call, covers the pull of the
-// registry image and the start of its container as well as the wait for an answer, but the pull
-// and the start are not cut short at it; past it, it returns an error that says that the
-// container started after the limit had run out, or that the registry did not answer.
+// nodes reach it, ADDRESS:5000. It first pulls image with pullIfMissing and limit, and it then
+// waits at most limit, counted from the container's start, for an answer.
 func startRegistry(ctx context.Context, e Engine, name, image string, limit time.Duration) (push, node string, err error) {
-	deadline := time.Now().Add(limit)
+	if err := e.pullIfMissing(ctx, image, limit); err != nil {
+		return "", "", err
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", "", err
@@ -46,12 +46,10 @@ func startRegistry(ctx context.Context, e Engine, name, image string, limit time
 	if _, err := e.run(ctx, "run", "-d", "--name", container, "--network", network, "-p", "127.0.0.1:"+port+":5000", image); err != nil {
 		return "", "", err
 	}
+	deadline := time.Now().Add(limit)
 	address, err := e.address(ctx, container, network)
 	if err != nil {
 		return "", "", err
-	}
-	if !time.Now().Before(deadline) {
-		return "", "", fmt.Errorf("the registry's container started after its limit of %s ran out", limit)
 	}
 	push = "127.0.0.1:" + port
 	if err := waitForRegistry(ctx, "http://"+push+"/v2/", deadline); err != nil {

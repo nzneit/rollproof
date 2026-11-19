@@ -64,6 +64,10 @@ var (
 	kindDelete = (*kindcluster.Provider).Delete
 )
 
+// pullImage is Create's pull of the node image, with the engine's check for an image that its
+// store holds. A test replaces it.
+var pullImage = Engine.pullIfMissing
+
 // joined is the error of several errors, like errors.Join, with "; " between their texts instead
 // of a newline, so that a reason made from it stays on one line.
 type joined []error
@@ -133,12 +137,12 @@ type Cluster struct {
 	nodes    []nodes.Node // in the order of Nodes
 }
 
-// Create removes whatever an earlier run of this name left, then creates the cluster and its
-// registry and returns when every node is ready, DNS runs and both namespaces exist. Each node
-// keeps an attempt to connect that had no answer for 5 s (section 9). On an error it removes the
-// run, unless s.Keep is set or ctx has ended; when that removal fails too, parts stay behind and
-// the text says so. An error is a Condition with ClusterFailed. A name without the prefix
-// rollproof- is an InternalError.
+// Create removes whatever an earlier run of this name left, then has the engine pull the node
+// image, creates the cluster and its registry and returns when every node is ready, DNS runs and
+// both namespaces exist. Each node keeps an attempt to connect that had no answer for 5 s
+// (section 9). On an error it removes the run, unless s.Keep is set or ctx has ended; when that
+// removal fails too, parts stay behind and the text says so. An error is a Condition with
+// ClusterFailed. A name without the prefix rollproof- is an InternalError.
 func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	if err := remove(ctx, e, s.Name, s.RunDir); err != nil {
 		var c verdict.Condition
@@ -187,6 +191,14 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 
 	if err := os.Mkdir(s.RunDir, 0o700); err != nil {
 		return fail("make the run's folder", err)
+	}
+
+	ref := s.NodeImage
+	if ref == "" {
+		ref = DefaultNodeImage()
+	}
+	if err := pullImage(e, ctx, ref, s.Timeout); err != nil {
+		return fail("pull the node image", err)
 	}
 
 	kindBegun = true

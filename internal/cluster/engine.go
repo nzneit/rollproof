@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	kindcluster "sigs.k8s.io/kind/pkg/cluster"
 	"sigs.k8s.io/kind/pkg/log"
@@ -43,6 +44,23 @@ func (e Engine) run(ctx context.Context, args ...string) (string, error) {
 		return out, fmt.Errorf("%s %s: %w: %s", e.Binary, strings.Join(args, " "), err, last)
 	}
 	return out, nil
+}
+
+// pullIfMissing has the engine pull image unless its store holds it, by the check kind's
+// providers make (`inspect --type=image`), so the two agree. limit bounds the pull from its own
+// call; when limit ended it while ctx had not ended, the error is "IMAGE could not be pulled
+// within LIMIT". Else, the engine's error.
+func (e Engine) pullIfMissing(ctx context.Context, image string, limit time.Duration) error {
+	if _, err := e.run(ctx, "inspect", "--type=image", image); err == nil {
+		return nil
+	}
+	pullCtx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	_, err := e.run(pullCtx, "pull", image)
+	if err != nil && pullCtx.Err() != nil && ctx.Err() == nil {
+		return fmt.Errorf("%s could not be pulled within %s", image, limit)
+	}
+	return err
 }
 
 // provider returns kind's provider for the engine, with a logger that discards, made with the
