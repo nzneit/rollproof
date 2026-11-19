@@ -3,6 +3,7 @@ package watch
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,11 @@ type Options struct {
 	Workers             int
 	Service             *types.NamespacedName
 	Now                 func() time.Time
+	// Evidence opens a file of the evidence folder by a name that may hold folders, such
+	// as pods/deploy-before.json. The Watcher writes the pod lists through it,
+	// and ignores its errors and its writers' errors: a caller that needs them
+	// wraps the writer, as run's evidence does. Nil writes nothing.
+	Evidence func(name string) (io.WriteCloser, error)
 }
 
 // Watcher follows the Deployments, StatefulSets, DaemonSets, ReplicaSets and Pods of one
@@ -42,10 +48,14 @@ type Watcher struct {
 	client  kubernetes.Interface
 	factory informers.SharedInformerFactory
 
-	// mu guards tr, last and service. Every call into tr is made under it, with o.Now read while
-	// it is held, so that tr is told its times in order. Nothing that waits is done under it.
+	// mu guards tr, last, service and queued. Every call into tr is made under it, with o.Now read
+	// while it is held, so that tr is told its times in order. Nothing that waits is done under it.
 	mu sync.Mutex
 	tr *Tracker
+	// queued is the last moment queued on finishes for the open transition; zero when none was.
+	queued time.Time
+	// finishes is the queue behind Finishes. Its goroutine runs from Start until Stop.
+	finishes *finishQueue
 	// service is the Service whose endpoints Transition reads: Options.Service unless UseService
 	// named another.
 	service *types.NamespacedName
@@ -87,13 +97,15 @@ func Start(ctx context.Context, client kubernetes.Interface, o Options) (*Watche
 		factory: informers.NewSharedInformerFactoryWithOptions(client, 0),
 		tr: NewTracker(TrackerOptions{Namespace: o.Namespace, Selector: selector,
 			Settle: o.Settle, Timeout: o.Timeout, Workers: o.Workers}),
-		service: o.Service,
-		last:    map[objectKey]runtime.Object{},
-		conns:   map[string]*connection{},
-		wake:    make(chan struct{}, 1),
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
+		service:  o.Service,
+		last:     map[objectKey]runtime.Object{},
+		conns:    map[string]*connection{},
+		wake:     make(chan struct{}, 1),
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
+		finishes: newFinishQueue(),
 	}
+	go w.finishes.run(w.stop)
 	var synced []cache.InformerSynced
 	for _, c := range w.connections() {
 		w.conns[c.kind] = c
@@ -132,12 +144,16 @@ func Start(ctx context.Context, client kubernetes.Interface, o Options) (*Watche
 	return w, nil
 }
 
-// Stop stops following. It is safe to call twice.
+// Stop stops following. It returns when no goroutine of the Watcher runs and the channel of
+// Finishes is closed; a Finish not received by then is dropped. It is safe to call twice.
 func (w *Watcher) Stop() {
 	w.stopOnce.Do(func() {
 		close(w.stop)
-		// Shutdown returns when every informer has ended, its handlers included.
+		// Shutdown returns when every informer has ended, its handlers included, so that no
+		// Finish is queued after it.
 		w.factory.Shutdown()
+		<-w.finishes.ended
+		close(w.finishes.out)
 		close(w.done)
 	})
 }
@@ -203,10 +219,21 @@ func (w *Watcher) InstallSettled(ctx context.Context, first time.Time) Settling 
 // closed when the transition's command has exited. When ctx ends first it returns what it has,
 // with Ended set to that moment. Finished is then zero, whatever the transition did before, so
 // that its window is never judged as one that finished.
+//
+// It writes the pod list pods/NAME-before.json when it has begun the transition and
+// pods/NAME-after.json when the window has ended or ctx ended: each a PodList, in JSON, of every
+// pod of the namespace that the watch holds and that is not gone, by name. Each is written beside
+// the watch, so that a slow write delays neither the command's exit nor the last reading, and
+// Transition returns when both are written.
 func (w *Watcher) Transition(ctx context.Context, name verdict.WindowName, began time.Time, exited <-chan struct{}) Transition {
 	w.mu.Lock()
 	w.tr.Begin(name, began)
+	w.queued = time.Time{}
+	before := w.tr.podList()
 	w.mu.Unlock()
+	var writes sync.WaitGroup
+	defer writes.Wait()
+	writes.Go(func() { w.writePods("pods/"+string(name)+"-before.json", before) })
 
 	// The readings of the Service's endpoints stay off the path that tells the Tracker anything,
 	// so that a slow one cannot delay the command's exit. The first runs beside follow until the
@@ -224,6 +251,10 @@ func (w *Watcher) Transition(ctx context.Context, name verdict.WindowName, began
 		firstRead <- r
 	}()
 	s, ended := w.follow(ctx, exited)
+	w.mu.Lock()
+	after := w.tr.podList()
+	w.mu.Unlock()
+	writes.Go(func() { w.writePods("pods/"+string(name)+"-after.json", after) })
 	endFirst()
 	first := <-firstRead
 	if !ended || ctx.Err() != nil {
@@ -260,6 +291,7 @@ func (w *Watcher) follow(ctx context.Context, exited <-chan struct{}) (Transitio
 			exited = nil // told once; a nil channel is never ready
 			w.mu.Lock()
 			w.tr.CommandExited(w.o.Now())
+			w.noteFinish()
 			w.mu.Unlock()
 		case <-tick.C:
 		case <-w.wake:
@@ -324,9 +356,11 @@ func (w *Watcher) set(kind string, old, obj runtime.Object) {
 		}
 		if was.GetUID() != is.GetUID() {
 			w.tr.Gone(old, now)
+			w.noteFinish()
 		}
 	}
 	w.tr.Set(obj, now)
+	w.noteFinish()
 	w.last[key] = obj
 	w.mu.Unlock()
 	w.signal()
@@ -360,6 +394,7 @@ func (w *Watcher) gone(kind string, obj any) {
 	if o != nil {
 		w.tr.Gone(o, now)
 	}
+	w.noteFinish()
 	w.mu.Unlock()
 	w.signal()
 }

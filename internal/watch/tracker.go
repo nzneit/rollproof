@@ -337,6 +337,16 @@ func (t *Tracker) windowOpen() bool {
 	return tr != nil && tr.t.Ended.IsZero()
 }
 
+// openFinish gives the open transition's name and Finished. At is zero when no window is open or
+// the open transition has not finished.
+func (t *Tracker) openFinish() Finish {
+	if !t.windowOpen() {
+		return Finish{}
+	}
+	tr := t.current()
+	return Finish{Name: tr.t.Name, At: tr.t.Finished}
+}
+
 // State returns the transition so far, and whether its window has ended: it finished and the
 // settle time then passed with no change, or it stalled. The Transition also has its counts for
 // every watched workload, whether it replaced pods, what is not complete at a stall, which pods

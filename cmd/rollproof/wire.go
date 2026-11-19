@@ -180,6 +180,7 @@ func (s *session) Watcher(ctx context.Context, cfg *config.Config) (run.Watcher,
 		Timeout:   cfg.Limits.Timeout,
 		Workers:   cfg.Cluster.Workers,
 		Now:       time.Now,
+		Evidence:  s.evidence,
 	})
 	if err != nil {
 		return nil, err
