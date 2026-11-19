@@ -46,14 +46,18 @@ maintainer approved the revision. A second plan brought the code to it on 2026-1
 more change to the cluster that its runs called for (section 13; section 14, point 24).
 The maintainer ruled the same day on what its reviews and runs left (section 14, points 25 to
 27). The second plan carried point 25, and a third plan brought the code to the others on
-2026-11-18 and 2026-11-19, with one more ruling of the second day (section 14, point 28).
+2026-11-18 and 2026-11-19, with two more rulings of the second day (section 14, points 24 and
+28).
 
 Before the plan for step 4 of the build order (section 13), a review on 2026-11-19 looked for the
 places where the text does not hold together for that step, and found 25. Three were choices, and
 the maintainer ruled on them the same day (section 14, point 29). This text carries those rulings
 and the corrections of twelve more. Ten were beliefs that nobody had tried. A run that day settled
 four: the three that the rulings rest on, and one of section 14, point 21 (section 16). The others
-are left to later steps.
+are left to later steps. A cold re-read of that text the same day, by an AI agent on an Opus
+model, found 25 places where it disagreed with itself, its sources or the built code; all 25 fixes
+were adopted, the exception for a too-early `t` written during the drain among them (section 6;
+section 14, point 29).
 
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
 Fable model wrote each of the first two reviews. AI agents on an Opus model gathered the evidence,
@@ -65,12 +69,13 @@ DeepSeek model reviewed it, and the session, on an Opus model again, checked the
 carried the maintainer's rulings into the text.
 The amendments of 2026-11-18 and the first of 2026-11-19 were written by an AI session on an Opus
 model, at the maintainer's rulings. An AI agent on a Fable model wrote the review of 2026-11-19,
-and an AI agent on an Opus model wrote its rulings and corrections into the text.
+and an AI agent on an Opus model wrote its rulings and corrections into the text, and then the
+fixes of the cold re-read.
 Where a statement rests on a measurement, a page or a source file that was read, section 16 names
 the source. Everything else is design, not fact. Nothing here had been run when the design was
 agreed. The revision of 2026-11-17 rests on one result of the first plan's runs, and the rulings
-of section 14, point 29, on a run of 2026-11-19. Sections 6 and 9 also rest on the proofs of the
-build order's second step. Section 16 names them all.
+of section 14, point 29, on a run of 2026-11-19. Sections 6, 9 and 14 also rest on the proofs of
+the build order's second step. Section 16 names them all.
 
 `rollproof` is a working name. It has not been checked for collisions.
 
@@ -519,7 +524,8 @@ One whose `t` is later than the moment its line was written is a fault of the li
 check cannot begin after its result. One whose `t` is earlier than the moment the tool asked for
 the probe's pod, by more than the bound of the clock check, is a fault of the line, as one later
 than its line is: no check can have begun before the probe existed. Like every such fault, it
-makes the window in which the line was written not verified.
+makes the window in which the line was written not verified; for a failed check written during
+the drain, the last window (above).
 
 A failed check that began in one window and whose line was written in a later one is counted
 where it began. The report says how many failures crossed the start of a transition in this way,
@@ -588,7 +594,7 @@ not judged.
   kubelet's rotations of the log with no line lost or read twice, and a stream opened again from
   the second of the last line read, skipping the lines whose timestamp is before that line's and,
   by count, those that carry its timestamp and were read, read every line once. No two lines
-  carried one timestamp in its runs, so that count was not exercised
+  carried one timestamp in its runs, so a count above one was not exercised
   (`docs/proofs/p11-log-rotation.md`). A line that a rotation moved out of reach before the
   stream was opened again is lost, and the tool sees the gap. After the tool has asked the probe
   to stop, a stream that ends while the pod still reads the container as running is not opened
@@ -974,11 +980,12 @@ process group, does not wait for them, and kills what is left of them before it 
 results, so that none of it outlives the run. However such a command then ends, its ending is the
 tool's doing and is not judged as a failed command.
 
-**When the tool fails.** The tool stops a command that is running in the same way, before it
-stops the probe (section 6), so that a command that ends on SIGTERM no longer changes the cluster
-while the probe's last lines are read. It does not wait for the command: what is left of it once
-the probe has stopped is killed before the tool writes its results. Its ending is not judged
-either (section 14, point 27).
+**When the tool fails.** The tool sends SIGTERM to a command that is running and to its process
+group before it stops the probe (section 6), so that a command that ends on SIGTERM no longer
+changes the cluster while the probe's last lines are read. It does not wait for the command: it
+kills what is left of it 10 seconds later, or as soon as the probe has stopped if that comes
+first, and always before it writes its results. Its ending is not judged either (section 14,
+point 27).
 
 **The restart.** The tool performs it itself, the same way for both drivers: it changes the pod
 template annotation that `kubectl rollout restart` changes, on every watched workload. A
@@ -2200,10 +2207,11 @@ A line leaves the list when a fixture shows the tool catching what it names.
   earlier than the moment the tool asked for the probe's pod, by more than the bound of the clock
   check and by less, assignment to windows, a failure that crosses the start of a transition,
   silence at a window's start and at its end, the start timeout, a probe that exits before its
-  first observation, what counts during the drain, and a fault of the probe there. And the
-  install window: observations that are counted and not judged, one whose time is before it, a
-  failure that began there and was written in the steady window, and silence and a fault of the
-  probe there.
+  first observation, what counts during the drain, a fault of the probe there, and a failed
+  check written there whose `t` is earlier than the probe's pod by more than the bound of the
+  clock check. And the install window: observations that are counted and not judged, one whose
+  time is before it, a failure that began there and was written in the steady window, and
+  silence and a fault of the probe there.
 - The built-in probe against a server in the same process: the rate held while the handler is
   slow, and the lag it reports; each failure class; a status outside the range; a redirect; a
   body cut short; the summary line; the headers and the `Host` as the server received them;
@@ -2448,26 +2456,27 @@ after a failure of the tool, and the engine's pulls (section 14, points 26 to 28
 Each plan's list of decisions and rulings stands with this text where this text is silent, and
 the next plan reads them: `docs/plans/2026-11-16-first-plan/README.md` and
 `docs/plans/2026-11-17-install-window/README.md`. The third plan, `docs/plans/2026-11-18-debts.md`,
-keeps no such list; its rulings are section 14, points 26 to 28.
+keeps no such list; its rulings are in section 14, point 24 (the node setting under Docker and
+Podman, and a `limits.settle` under about 7 s) and points 26 to 28.
 
 ## 14. Open points for the plan
 
 The plan settles each open point with a test or a reading before anything is built on what it
 decides. Points 6, 17 and 18 are settled and stay here for the record. The proofs of the build
 order's second step answered points 1 and 9 to 12, what point 5 says of the command lines in each
-Helm major, and point 8 for nerdctl only: there kind's own wait for a node failed in 5 of 9
-creations, and the tool tries the creation again. Their records are under `docs/proofs/`, whose
-index lists what they left unproved, point 8 with Docker among it. Points 7 and 16 are settled by
-the fixture runs, and points 13 and 14 before the first release. Point 15 is a caveat with nothing
-to settle, point 22 records two rules that stand for now, and point 23 records why the install
-settles under the probe and what that leaves open. Points 24 to 28 record findings and rulings of
-2026-11-18 and 2026-11-19, and point 29 the rulings of 2026-11-19 before the plan for step 4. The
-build order of section 13 says which step proves which point.
+Helm major, and point 8 for nerdctl only: there kind's own 30-second wait for a node's log line
+failed in 5 of 9 creations, and the tool tries the creation again. Their records are under
+`docs/proofs/`, whose index lists what they left unproved, point 8 with Docker among it. Points 7
+and 16 are settled by the fixture runs, and points 13 and 14 before the first release. Point 15
+is a caveat with nothing to settle, point 22 records two rules that stand for now, and point 23
+records why the install settles under the probe and what that leaves open. Points 24 to 28
+record findings and rulings of 2026-11-18 and 2026-11-19, and point 29 the rulings of 2026-11-19
+before the plan for step 4. The build order of section 13 says which step proves which point.
 
 1. **Registry order in the nodes.** That a node tries the run's registry first for a host and then
    falls back to the real registry is what the container runtime's documentation and source say
-   (section 16), but it has not been run for this design. First task of the plan. The same task
-   proves three more things:
+   (section 16); it had not been run for this design when this point was written, and was the
+   first plan's first task. The same task proves three more things:
    - that a reference by digest is served by the run's registry when its node entry may serve
      pulls and may not resolve tags, so that a tag is never answered by the run's registry;
    - that a reference with a tag and a digest is pulled by the digest, as the runtime's source
@@ -2479,8 +2488,9 @@ build order of section 13 says which step proves which point.
    It also settles two things that section 9 needs: the one list of places for a host that has
    `as`, a mirror and a `ca` together; and how the tool has a node pull an image during set-up,
    so that the node uses the registry settings it uses for the kubelet. The proof
-   `docs/proofs/p01-registry-order.md` ran it (section 9). `docs/proofs/p01b-mirror.md` ran the
-   one list of places, with a mirror under a path, in the form with a `server` line.
+   `docs/proofs/p01-registry-order.md` ran the order, both kinds of reference and the node's pull
+   (section 9). `docs/proofs/p01b-mirror.md` ran the one list of places, with a mirror under a
+   path, in the form with a `server` line.
 2. **Mirrors that need credentials.** Read in source and not run (section 9): an entry's
    credentials reach its mirror, and credentials listed under the mirror's own host are never
    used. The task confirms both with a run. It also finds the mechanism for a mirror whose
@@ -2521,8 +2531,9 @@ build order of section 13 says which step proves which point.
    library surface, and has no compatibility plan between node images and kind releases. The plan
    confirms that the linked release creates a cluster through the Docker and nerdctl providers,
    with the node settings section 9 needs. The proof `docs/proofs/p08-kind-library.md` ran it
-   through nerdctl only: there kind's own wait for a node failed in 5 of 9 creations, and the tool
-   tries the creation again. Every setting held where the creation returned. Docker was not run.
+   through nerdctl only: there kind's own 30-second wait for a node's log line failed in 5 of 9
+   creations, and the tool tries the creation again. Every setting held where the creation
+   returned. Docker was not run.
 9. **Which kind release to link**, and the node images kind lists for it. The tool promises those
    of them that its suite ran on (section 12). `docs/proofs/p09-kind-release.md` answered it: the
    tool links kind v0.33.0, whose default node image is `kindest/node:v1.37.0`, and the oldest of
@@ -2865,10 +2876,10 @@ build order of section 13 says which step proves which point.
       more than the bound of the clock check, is a fault of the line, for every probe (section 6).
       It does not reverse point 25: every check that the probe's start met began after the tool
       asked for the pod. A failed check with such a `t` that is written during the drain is the
-      one fault after the last window that is not a warning: it belongs to the last window, and
-      the first plan's decision 8 gives way for that case (section 6). What lost: **a sentence of
-      warning only**, which would have named the case and left such a failure out of every judged
-      window.
+      one fault of the probe after the last window that is not a warning: it belongs to the last
+      window, and section 6's rule for such faults, which the first plan's decision 8 set, gives
+      way for that case. What lost: **a sentence of warning only**, which would have named the
+      case and left such a failure out of every judged window.
 
 ## 15. Not in the first release
 
@@ -3129,5 +3140,7 @@ uses for the kubelet; that a pod's status names the digest it ran, for images of
 each; and how a mirror under a path behaves, with a settings file that names the real host as its
 `server` (the project's own `docs/proofs/p01-registry-order.md` and `docs/proofs/p01b-mirror.md`).
 The run of 2026-11-19 showed the fourth for busybox's shell: as the first process of a container,
-it ignores SIGTERM unless it sets a trap. Sections 6 and 9 also rest on the project's own
-`docs/proofs/p11-log-rotation.md` and `docs/proofs/p12-keys.md`.
+it ignores SIGTERM unless it sets a trap. Sections 6, 9 and 14 also rest on the project's own
+`docs/proofs/p05-helm-cli.md`, `docs/proofs/p08-kind-library.md`, `docs/proofs/p09-kind-release.md`,
+`docs/proofs/p10-rollout-rules.md`, `docs/proofs/p11-log-rotation.md` and
+`docs/proofs/p12-keys.md`.
