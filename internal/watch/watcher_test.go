@@ -51,6 +51,13 @@ func (c *fakeClock) Advance(d time.Duration) {
 // change the test makes falls between an informer's list and its watch.
 func startWatcher(t *testing.T, service *types.NamespacedName, objs ...runtime.Object) (*Watcher, *fake.Clientset, *fakeClock) {
 	t.Helper()
+	return startWatcherWith(t, nil, service, objs...)
+}
+
+// startWatcherWith is startWatcher with edit given the Options before Start, so that a test can
+// change one of them.
+func startWatcherWith(t *testing.T, edit func(*Options), service *types.NamespacedName, objs ...runtime.Object) (*Watcher, *fake.Clientset, *fakeClock) {
+	t.Helper()
 	client := fake.NewClientset(objs...)
 	var watches atomic.Int32
 	client.PrependWatchReactor("*", func(k8stesting.Action) (bool, k8swatch.Interface, error) {
@@ -58,8 +65,12 @@ func startWatcher(t *testing.T, service *types.NamespacedName, objs ...runtime.O
 		return false, nil, nil
 	})
 	clock := &fakeClock{now: t0}
-	w, err := Start(t.Context(), client, Options{Namespace: "orders", Settle: 15 * time.Second,
-		Timeout: 300 * time.Second, Workers: 3, Service: service, Now: clock.Now})
+	o := Options{Namespace: "orders", Settle: 15 * time.Second, Timeout: 300 * time.Second,
+		Workers: 3, Service: service, Now: clock.Now}
+	if edit != nil {
+		edit(&o)
+	}
+	w, err := Start(t.Context(), client, o)
 	if err != nil {
 		t.Fatal(err)
 	}
