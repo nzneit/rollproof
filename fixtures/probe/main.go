@@ -53,6 +53,9 @@ func run(env func(string) string, out io.Writer, term <-chan struct{}) error {
 		if err != nil {
 			return fmt.Errorf("bad FAIL_FIRST=%q: %v", v, err)
 		}
+		if d < 0 {
+			return fmt.Errorf("bad FAIL_FIRST=%q: a negative duration", v)
+		}
 		failFirst = d
 	}
 	target := env("TARGET")

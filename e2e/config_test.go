@@ -283,6 +283,54 @@ func interruptDuringTheDeploy(r running, marks []mark, now time.Time) (bool, err
 	return true, nil
 }
 
+// act calls f.act every interval, while the run goes on, with the latest whole reading of the
+// window marks at marksPath, until the action reports done or returns an error, or the run ends.
+// ended receives the run's end; act puts it back for the caller. It reports whether the action
+// reported done, and the action's error. For a fixture with no action it returns (false, nil) at
+// once. runFixture calls it with an interval of 100 ms.
+func act(f fixture, r running, marksPath string, ended chan error, interval time.Duration) (bool, error) {
+	if f.act == nil {
+		return false, nil
+	}
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for {
+		select {
+		case err := <-ended:
+			ended <- err
+			return false, nil
+		case <-tick.C:
+		}
+		marks, err := readMarks(marksPath)
+		if err != nil {
+			continue
+		}
+		// A tick and the run's end may both have been ready; the marks of a run that has ended
+		// are not acted on.
+		select {
+		case err := <-ended:
+			ended <- err
+			return false, nil
+		default:
+		}
+		if done, err := f.act(r, marks, time.Now()); done || err != nil {
+			return done, err
+		}
+	}
+}
+
+// manifestValues returns the values with which renderManifests renders one manifest: image set
+// to entry's archive in the run's registry, rollproof.test/ENTRY at digest, and then the fixture's
+// values for that release over it, so that a fixture's own image wins as a later value does in
+// renderConfig.
+func manifestValues(values map[string]any, entry, digest string) map[string]any {
+	out := map[string]any{"image": map[string]string{"repository": "rollproof.test/" + entry, "digest": digest}}
+	for k, v := range values {
+		out[k] = v
+	}
+	return out
+}
+
 // randomArchive writes a random image as an archive, as an engine's save writes one, and returns
 // its path.
 func randomArchive(t *testing.T, tag string) string {
@@ -478,6 +526,146 @@ func TestReadMarks(t *testing.T) {
 	if _, err := readMarks(filepath.Join(dir, "missing.json")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("readMarks of a missing file = %v, want fs.ErrNotExist", err)
 	}
+	empty := filepath.Join(dir, "empty.json")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readMarks(empty); err == nil {
+		t.Errorf("readMarks of an empty file gave no error")
+	}
+
+	// Two finishes may share one moment; both are kept.
+	same := filepath.Join(dir, "same.json")
+	if err := os.WriteFile(same, []byte(`[{"name":"deploy","start":`+at(t1)+`,"finishes":[`+at(t2)+`,`+at(t2)+`]}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	marks, err = readMarks(same)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(marks) != 1 || len(marks[0].Finishes) != 2 || !marks[0].Finishes[0].Equal(t2) || !marks[0].Finishes[1].Equal(t2) {
+		t.Errorf("marks %+v; want deploy with two finishes at %v", marks, t2)
+	}
+}
+
+func TestRenderConfigRejectsAnUnknownName(t *testing.T) {
+	in := inputs{chart: "/chart", archives: map[string]string{}}
+	for _, tc := range []struct {
+		name, want string
+		f          fixture
+	}{
+		{"custom image", "alpine", fixture{name: "row", custom: &customProbe{image: "alpine"}}},
+		{"command role", "upgrade", fixture{name: "row", commands: []string{"install", "upgrade"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text, err := renderConfig(tc.f, in)
+			if err == nil || !strings.Contains(err.Error(), "row") || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("renderConfig = %q, %v; want an error that names the fixture and %s", text, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestManifestValuesLetTheFixtureSetImage(t *testing.T) {
+	const digest = "sha256:0123"
+	got := manifestValues(map[string]any{"replicas": 3}, "previous", digest)
+	want := map[string]any{"replicas": 3, "image": map[string]string{"repository": "rollproof.test/previous", "digest": digest}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("without an image of the fixture's (-want +got):\n%s", diff)
+	}
+	own := map[string]any{"repository": "elsewhere/orders"}
+	got = manifestValues(map[string]any{"image": own}, "previous", digest)
+	if diff := cmp.Diff(map[string]any{"image": own}, got); diff != "" {
+		t.Errorf("with an image of the fixture's, which wins as a later value does in renderConfig (-want +got):\n%s", diff)
+	}
+}
+
+// TestActionLoop runs act against a fake run: a marks file, a running whose calls go nowhere, and
+// an ended channel that the test fills when the fake run ends.
+func TestActionLoop(t *testing.T) {
+	began := time.Date(2026, 11, 19, 10, 0, 20, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "windows.json")
+	if err := os.WriteFile(path, []byte(`[{"name":"deploy","start":"`+began.Format(time.RFC3339Nano)+`","finishes":[]}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const interval = time.Millisecond
+	ended := func(t *testing.T, c chan error) bool {
+		t.Helper()
+		select {
+		case err := <-c:
+			c <- err
+			return true
+		default:
+			return false
+		}
+	}
+
+	t.Run("the action reports done", func(t *testing.T) {
+		calls := 0
+		f := fixture{act: func(r running, marks []mark, now time.Time) (bool, error) {
+			calls++
+			if len(marks) != 1 || marks[0].Name != "deploy" {
+				t.Errorf("marks %+v, want the deploy's", marks)
+			}
+			return calls == 3, nil
+		}}
+		c := make(chan error, 1)
+		done, err := act(f, running{}, path, c, interval)
+		if !done || err != nil || calls != 3 {
+			t.Errorf("act = (%v, %v) after %d calls, want (true, nil) after 3", done, err, calls)
+		}
+		if ended(t, c) {
+			t.Errorf("act put an end of the run that never came")
+		}
+	})
+
+	t.Run("the action fails", func(t *testing.T) {
+		want := errors.New("kubectl failed")
+		f := fixture{act: func(r running, marks []mark, now time.Time) (bool, error) { return false, want }}
+		done, err := act(f, running{}, path, make(chan error, 1), interval)
+		if done || !errors.Is(err, want) {
+			t.Errorf("act = (%v, %v), want (false, %v)", done, err, want)
+		}
+	})
+
+	t.Run("the run ends first", func(t *testing.T) {
+		calls := 0
+		f := fixture{act: func(r running, marks []mark, now time.Time) (bool, error) { calls++; return true, nil }}
+		c := make(chan error, 1)
+		c <- errors.New("exit status 2")
+		done, err := act(f, running{}, path, c, interval)
+		if done || err != nil || calls != 0 {
+			t.Errorf("act = (%v, %v) after %d calls, want (false, nil) and no call", done, err, calls)
+		}
+		if !ended(t, c) {
+			t.Errorf("act did not put the run's end back")
+		}
+	})
+
+	// The run ends while the action waits: by the next call a tick and the end are both ready, and
+	// no action is called on the marks of a run that has ended.
+	t.Run("the run ends between two calls", func(t *testing.T) {
+		for range 50 {
+			calls := 0
+			c := make(chan error, 1)
+			f := fixture{act: func(r running, marks []mark, now time.Time) (bool, error) {
+				calls++
+				if calls == 1 {
+					c <- nil
+					time.Sleep(5 * interval)
+					return false, nil
+				}
+				return true, nil
+			}}
+			done, err := act(f, running{}, path, c, interval)
+			if done || err != nil || calls != 1 {
+				t.Fatalf("act = (%v, %v) after %d calls, want (false, nil) after 1", done, err, calls)
+			}
+			if !ended(t, c) {
+				t.Fatalf("act did not put the run's end back")
+			}
+		}
+	})
 }
 
 // deployMarks returns the marks of a run in its deploy window: the steady window, and the deploy

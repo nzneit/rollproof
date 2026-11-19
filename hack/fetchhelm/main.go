@@ -159,11 +159,11 @@ func fetchKubectl(base, arch, sum, dir string) error {
 		return fmt.Errorf("%s: download returned status %d", what, resp.StatusCode)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+		return fmt.Errorf("%s: %w", what, err)
 	}
 	tmp, err := os.CreateTemp(dir, "kubectl-download-*")
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %w", what, err)
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
@@ -184,7 +184,7 @@ func fetchKubectl(base, arch, sum, dir string) error {
 		return fmt.Errorf("%s: %w", what, err)
 	}
 	if err := os.WriteFile(record, []byte(sum+" "+sum+"\n"), 0o644); err != nil {
-		return err
+		return fmt.Errorf("%s: %w", what, err)
 	}
 	fmt.Printf("%s: fetched to %s\n", what, bin)
 	return nil

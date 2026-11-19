@@ -78,7 +78,10 @@ func TestMain(m *testing.M) {
 	}
 	checkHelmMajor("helm-3", "v3.")
 	checkHelmMajor("helm-4", "v4.")
-	goBuild("build", "-trimpath", "-ldflags", "-s -w -X main.version=dev", "-o", filepath.Join("bin", "rollproof"), "./cmd/rollproof")
+	if err := goBuild("build", "-trimpath", "-ldflags", "-s -w -X main.version=dev", "-o", filepath.Join("bin", "rollproof"), "./cmd/rollproof"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	for _, version := range []string{"previous", "candidate"} {
 		buildImage("rollproof-fixture:"+version, "./fixtures/service", "-s -w -X main.version="+version, "svc")
 	}
@@ -131,16 +134,16 @@ func checkHelmMajor(major, prefix string) {
 	}
 }
 
-// goBuild runs go with args in root, with CGO_ENABLED=0 in its environment.
-func goBuild(args ...string) {
+// goBuild runs go with args in root, with CGO_ENABLED=0 in its environment. An error names the
+// command and holds its output.
+func goBuild(args ...string) error {
 	cmd := exec.Command("go", args...)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "e2e: go %s: %v\n%s", strings.Join(args, " "), err, out)
-		os.Exit(1)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("e2e: go %s: %w\n%s", strings.Join(args, " "), err, out)
 	}
+	return nil
 }
 
 // engineDo runs the engine with args in root. A failure prints the command and its output and
@@ -168,7 +171,11 @@ func buildImage(tag, pkg, ldflags, bin string) {
 		fmt.Fprintf(os.Stderr, "e2e: a temporary folder for %s: %v\n", tag, err)
 		os.Exit(1)
 	}
-	goBuild("build", "-trimpath", "-ldflags", ldflags, "-o", filepath.Join(dir, bin), pkg)
+	if err := goBuild("build", "-trimpath", "-ldflags", ldflags, "-o", filepath.Join(dir, bin), pkg); err != nil {
+		os.RemoveAll(dir)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	dockerfile, err := os.ReadFile(filepath.Join(root, pkg, "Dockerfile"))
 	if err == nil {
 		err = os.WriteFile(filepath.Join(dir, "Dockerfile"), dockerfile, 0o644)
@@ -182,12 +189,16 @@ func buildImage(tag, pkg, ldflags, bin string) {
 	os.RemoveAll(dir)
 }
 
-// fetchBusybox puts busybox 1.37.0 for linux/amd64 at busyboxArchive when it is not there: it
-// pulls busyboxRef, tags it rollproof-fixture-busybox:1.37.0, and saves it to a temporary name
-// beside the archive, renamed into place once the save succeeded.
+// fetchBusybox puts busybox 1.37.0 for linux/amd64 at busyboxArchive unless a whole image
+// archive is there: it pulls busyboxRef, tags it rollproof-fixture-busybox:1.37.0, and saves it to
+// a temporary name beside the archive, renamed into place once the save succeeded.
 func fetchBusybox() {
-	if _, err := os.Stat(busyboxArchive); err == nil {
+	err := readableArchive(busyboxArchive)
+	if err == nil {
 		return
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "e2e: %s cannot be used (%v); making it again\n", busyboxArchive, err)
 	}
 	const tag = "rollproof-fixture-busybox:1.37.0"
 	engineDo(nil, "pull", "--platform", "linux/amd64", busyboxRef)
@@ -199,6 +210,23 @@ func fetchBusybox() {
 		fmt.Fprintf(os.Stderr, "e2e: busybox's archive: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// readableArchive returns nil when path is a regular file that holds one image whose digest
+// tarball.ImageFromPath can compute, which reads every layer; else the reason.
+func readableArchive(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return errors.New("not a regular file")
+	}
+	img, err := tarball.ImageFromPath(path, nil)
+	if err == nil {
+		_, err = img.Digest()
+	}
+	return err
 }
 
 // saveArchives saves rollproof-fixture:previous and :candidate as archives into a new temporary
@@ -330,9 +358,14 @@ func runFixture(t *testing.T, f fixture) result {
 	if startErr != nil {
 		t.Fatalf("%s (%s): %v", f.name, f.helm, startErr)
 	}
+	// Registered once the tool runs, so that a kept cluster goes also when the test fails before
+	// it reaches checkClusterKept.
+	if f.keepsCluster {
+		t.Cleanup(func() { removeKeptCluster(t) })
+	}
 	ended := make(chan error, 1)
 	go func() { ended <- cmd.Wait() }()
-	acted, actErr := act(f, cmd.Process, filepath.Join(out, "evidence", "windows.json"), env, ended)
+	acted, actErr := act(f, newRunning(cmd.Process, env), filepath.Join(out, "evidence", "windows.json"), ended, 100*time.Millisecond)
 	runErr := <-ended
 	t.Logf("%s (%s):\n%s%s", f.name, f.helm, stdout.String(), stderr.String())
 	if err := os.WriteFile(filepath.Join(out, "console.txt"), stdout.Bytes(), 0o644); err != nil {
@@ -406,42 +439,30 @@ func runFixture(t *testing.T, f fixture) result {
 	return r
 }
 
-// act calls f.act every 100 ms, while the run goes on, with the latest whole reading of the window
-// marks at marksPath, until the action reports done or returns an error, or the run ends. ended
-// receives the run's end; act puts it back for the caller. It reports whether the action reported
-// done, and the action's error. For a fixture with no action it returns (false, nil) at once.
-func act(f fixture, process *os.Process, marksPath string, env []string, ended chan error) (bool, error) {
-	if f.act == nil {
-		return false, nil
-	}
-	r := running{
+// kubectlLimit bounds each kubectl command that an action runs.
+const kubectlLimit = time.Minute
+
+// newRunning returns the run in progress of process as an action reaches it: its signal goes to
+// the tool's process, and its kubectl runs .tools/kubectl with env and the test cluster's
+// kubeconfig, killed after kubectlLimit, which is then its error.
+func newRunning(process *os.Process, env []string) running {
+	return running{
 		signal: process.Signal,
 		kubectl: func(args ...string) error {
-			cmd := exec.Command(filepath.Join(root, ".tools", "kubectl"), args...)
+			ctx, cancel := context.WithTimeout(context.Background(), kubectlLimit)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, filepath.Join(root, ".tools", "kubectl"), args...)
 			cmd.Dir = root
 			cmd.Env = append(slices.Clip(env), "KUBECONFIG="+filepath.Join(os.TempDir(), "rollproof-e2e", "kubeconfig"))
-			if out, err := cmd.CombinedOutput(); err != nil {
+			out, err := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				return fmt.Errorf("kubectl %s: did not end within %v\n%s", strings.Join(args, " "), kubectlLimit, out)
+			}
+			if err != nil {
 				return fmt.Errorf("kubectl %s: %w\n%s", strings.Join(args, " "), err, out)
 			}
 			return nil
 		},
-	}
-	tick := time.NewTicker(100 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		select {
-		case err := <-ended:
-			ended <- err
-			return false, nil
-		case <-tick.C:
-		}
-		marks, err := readMarks(marksPath)
-		if err != nil {
-			continue
-		}
-		if done, err := f.act(r, marks, time.Now()); done || err != nil {
-			return done, err
-		}
 	}
 }
 
@@ -457,12 +478,7 @@ func renderManifests(t *testing.T, f fixture, dir string, env []string) {
 		{"previous.yaml", "previous", f.previous},
 		{"candidate.yaml", candidateImage(f), f.candidate},
 	} {
-		values := map[string]any{}
-		for k, v := range m.values {
-			values[k] = v
-		}
-		values["image"] = map[string]string{"repository": "rollproof.test/" + m.entry, "digest": archiveDigests[m.entry]}
-		b, err := json.Marshal(values)
+		b, err := json.Marshal(manifestValues(m.values, m.entry, archiveDigests[m.entry]))
 		if err != nil {
 			t.Fatalf("%s: the values of %s: %v", f.name, m.file, err)
 		}
@@ -506,7 +522,8 @@ func checkClusterGone(t *testing.T, f fixture) {
 }
 
 // checkClusterKept fails the test unless the engine lists the control-plane node and the registry
-// of the cluster the run made, and then has removeKeptCluster remove them when the test ends.
+// of the cluster the run made. It removes nothing: runFixture has registered removeKeptCluster when
+// the tool started.
 func checkClusterKept(t *testing.T, f fixture) {
 	t.Helper()
 	out, err := exec.Command(engine, "ps", "-a", "--format", "{{.Names}}").CombinedOutput()
@@ -514,7 +531,6 @@ func checkClusterKept(t *testing.T, f fixture) {
 		t.Fatalf("%s: %s ps -a: %v\n%s", f.name, engine, err, out)
 	}
 	names := strings.Fields(string(out))
-	t.Cleanup(func() { removeKeptCluster(t) })
 	for _, want := range []string{"rollproof-e2e-control-plane", "rollproof-e2e-registry"} {
 		found := false
 		for _, name := range names {

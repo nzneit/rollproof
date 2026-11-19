@@ -223,17 +223,21 @@ func TestRejectsAnUnknownOnVersion(t *testing.T) {
 }
 
 func TestRejectsABadFailFirst(t *testing.T) {
-	o, _, done := start(map[string]string{"TARGET": "http://127.0.0.1:1", "FAIL_FIRST": "soon"})
-	select {
-	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "FAIL_FIRST") {
-			t.Errorf("run = %v, want an error that names FAIL_FIRST", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("run did not return at once")
-	}
-	if text := o.text(); text != "" {
-		t.Errorf("run wrote %q, want nothing", text)
+	for _, value := range []string{"soon", "-5s"} {
+		t.Run(value, func(t *testing.T) {
+			o, _, done := start(map[string]string{"TARGET": "http://127.0.0.1:1", "FAIL_FIRST": value})
+			select {
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), "FAIL_FIRST") {
+					t.Errorf("run = %v, want an error that names FAIL_FIRST", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("run did not return at once")
+			}
+			if text := o.text(); text != "" {
+				t.Errorf("run wrote %q, want nothing", text)
+			}
+		})
 	}
 }
 
