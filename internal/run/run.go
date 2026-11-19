@@ -2,7 +2,6 @@ package run
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -53,6 +52,16 @@ type Watcher interface {
 	// UseService names the Service whose endpoints Transition reads.
 	UseService(service *types.NamespacedName)
 	PodsAt(at time.Time) (stopping, starting []watch.PodNote)
+	// Finishes gives a value each time the open transition comes to be finished, again after its
+	// settle time started again, in order; the channel is closed when Stop returns. run follows it
+	// into windows.json from the moment the watcher exists.
+	Finishes() <-chan watch.Finish
+	// PodEvents gives every pod event of the namespace so far, in order of time, for the
+	// timeline.
+	PodEvents() []watch.PodEvent
+	// WriteEvents lists the events of the workload's namespace and of the probe's once and writes
+	// them, oldest first. The caller bounds ctx.
+	WriteEvents(ctx context.Context, w io.Writer) error
 	Stop()
 }
 
@@ -129,6 +138,10 @@ func Run(ctx context.Context, o Options, u Units) int {
 	}
 	s.w = w
 	s.ev = &evidence{files: w.Evidence, warn: s.warnings.add}
+	s.marks = newMarks(w.ReplaceEvidence, s.warnings.add)
+	// The follower of the finishes never outlives the run, whichever way it ended; after
+	// completeEvidence this does nothing.
+	defer s.marks.end()
 
 	caught := s.sequence(s.ctx)
 	if caught == nil {
@@ -160,11 +173,13 @@ func Run(ctx context.Context, o Options, u Units) int {
 	return s.finish()
 }
 
-// writer is what a run asks of the results folder: the final result.json, an evidence file, and
-// the folder's path. report.Writer is the real one, and a test replaces it.
+// writer is what a run asks of the results folder: the final result.json, an evidence file, an
+// evidence file replaced whole, and the folder's path. report.Writer is the real one, and a test
+// replaces it.
 type writer interface {
 	Final(report.Run) error
 	Evidence(name string) (io.WriteCloser, error)
+	ReplaceEvidence(name string, b []byte) error
 	Dir() string
 }
 
@@ -180,6 +195,7 @@ type runState struct {
 	cancel   context.CancelFunc
 	w        writer
 	ev       *evidence
+	marks    *marks // windows.json: set at each change of a window's start or end
 	warnings *warnings
 
 	cfg        *config.Config
@@ -301,6 +317,7 @@ func (s *runState) setUp(ctx context.Context) bool {
 		return s.beforeFail(ctx, err)
 	}
 	s.watcher = wt
+	s.marks.follow(wt.Finishes())
 	if s.interrupted(ctx) {
 		return false
 	}
@@ -408,6 +425,7 @@ func (s *runState) windows(ctx context.Context) bool {
 	for _, name := range s.names {
 		s.tl.Windows = append(s.tl.Windows, verdict.Window{Name: name})
 	}
+	s.marks.set(s.tl.Windows)
 	// Step 10: the windows are fixed. The goroutine that reads the probe's events has run since
 	// the probe started, and the events it took before are judged against these windows.
 
@@ -427,6 +445,7 @@ func (s *runState) windows(ctx context.Context) bool {
 		s.tl.Windows[0].Conditions = append(s.tl.Windows[0].Conditions, ofTheCandidate(c, restartOnly))
 	}
 	s.tl.Windows[0].End = st.Ended
+	s.marks.set(s.tl.Windows)
 	if st.Settled.IsZero() && len(st.Before) == 0 && len(st.InWindow) == 0 {
 		panic("the install neither settled nor failed")
 	}
@@ -438,6 +457,7 @@ func (s *runState) windows(ctx context.Context) bool {
 	// to its end, whatever happened in it, unless a signal comes first: a signal stops the run at
 	// once (section 10), and limits.steady has no upper bound.
 	s.tl.Windows[1].Start = st.Settled
+	s.marks.set(s.tl.Windows)
 	end := st.Settled.Add(s.cfg.Limits.Steady)
 	select {
 	case <-s.u.Clock.After(end.Sub(s.u.Clock.Now())):
@@ -447,6 +467,7 @@ func (s *runState) windows(ctx context.Context) bool {
 		return false
 	}
 	s.tl.Windows[1].End = end
+	s.marks.set(s.tl.Windows)
 	if !s.decide(false).GoOn {
 		return true
 	}
@@ -488,6 +509,7 @@ func (s *runState) transitionsStep(ctx context.Context) bool {
 			return true
 		}
 		s.tl.Windows[w].Start = began
+		s.marks.set(s.tl.Windows)
 		s.transitions = append(s.transitions, transitionFacts{tr: watch.Transition{Name: name}})
 		s.podsKept = append(s.podsKept, false)
 		c := s.command(ctx, fn, nil)
@@ -514,6 +536,7 @@ func (s *runState) transitionsStep(ctx context.Context) bool {
 		} else {
 			s.placeTransition(w, tr, o.result)
 		}
+		s.marks.set(s.tl.Windows)
 		if !s.decide(false).GoOn {
 			return true
 		}
@@ -737,8 +760,9 @@ func (s *runState) interrupted(ctx context.Context) bool {
 }
 
 // place puts a condition of the tool's own where section 10 rule 3 puts it: in
-// the window in progress, whose end is then the moment of judging; or in Before
-// when no window has begun; or in the last window that began.
+// the window in progress, whose end is then the moment of judging and goes into
+// the window marks; or in Before when no window has begun; or in the last
+// window that began.
 func (s *runState) place(c verdict.Condition) {
 	last := -1
 	for i, w := range s.tl.Windows {
@@ -752,6 +776,7 @@ func (s *runState) place(c verdict.Condition) {
 	}
 	if s.tl.Windows[last].End.IsZero() {
 		s.tl.Windows[last].End = s.u.Clock.Now()
+		s.marks.set(s.tl.Windows)
 	}
 	s.tl.Windows[last].Conditions = append(s.tl.Windows[last].Conditions, c)
 }
@@ -875,8 +900,9 @@ func (s *runState) toolFailed(caught any) {
 	s.decide(true)
 }
 
-// finish performs steps 14 to 16: the final result.json, the window marks, the
-// console text, the clean-up and the exit code. A panic here after the final
+// finish performs steps 14 to 16: the final result.json, the evidence completed
+// (and result.json written again when that added a warning), the console text,
+// the clean-up and the exit code. A panic here after the final
 // file was written is a warning: the verdict was decided already. A panic
 // before it is the refused write. The clean-up runs on every path, so that a
 // report that cannot be written does not leave a cluster behind.
@@ -921,8 +947,9 @@ func (s *runState) finish() (code int) {
 		return 2
 	}
 	written = true
-	if err := s.writeMarks(); err != nil {
-		s.warnings.add("the window marks were not written: " + err.Error())
+	before := len(s.warnings.all())
+	s.completeEvidence()
+	if len(s.warnings.all()) != before {
 		if err := s.w.Final(s.record()); err != nil {
 			fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
 		}
@@ -978,36 +1005,6 @@ func (s *runState) probeCounts() (lines, jsonText int) {
 		s.countsSeen = &[2]int{l, j}
 	}
 	return s.countsSeen[0], s.countsSeen[1]
-}
-
-// mark is one window's boundaries in windows.json.
-type mark struct {
-	Name     string     `json:"name"`
-	Start    *time.Time `json:"start"`
-	Finished *time.Time `json:"finished"`
-	End      *time.Time `json:"end"`
-}
-
-// writeMarks writes the windows' boundaries to the evidence folder.
-func (s *runState) writeMarks() error {
-	marks := make([]mark, 0, len(s.tl.Windows))
-	for _, w := range s.tl.Windows {
-		marks = append(marks, mark{Name: string(w.Name), Start: timePtr(w.Start),
-			Finished: timePtr(w.Finished), End: timePtr(w.End)})
-	}
-	b, err := json.MarshalIndent(marks, "", "  ")
-	if err != nil {
-		return err
-	}
-	f, err := s.w.Evidence("windows.json")
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
 }
 
 // cleanUpQuietly performs the clean-up and turns a panic of a unit into the

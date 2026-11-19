@@ -339,6 +339,38 @@ type fakeWatcher struct {
 	restart       watch.Restart
 	restartPanics bool
 	restartWaits  bool
+	// finishes is what Finishes gives, and finishAt the moments, after the transition began, of
+	// each Finish that Transition sends on it before it waits for the command.
+	finishes chan watch.Finish
+	finishAt map[verdict.WindowName][]time.Duration
+	// podEvents is what PodEvents gives. events is what WriteEvents writes, and eventsErr what it
+	// returns; eventsWait makes it wait until its context ends and return the context's error
+	// instead; eventsCalls is the call log when WriteEvents was called.
+	podEvents   []watch.PodEvent
+	events      string
+	eventsErr   error
+	eventsWait  bool
+	eventsCalls []string
+}
+
+// Finishes gives the scripted channel.
+func (f *fakeWatcher) Finishes() <-chan watch.Finish { return f.finishes }
+
+// PodEvents gives the scripted pod events.
+func (f *fakeWatcher) PodEvents() []watch.PodEvent { return f.podEvents }
+
+// WriteEvents keeps the call log, then, with eventsWait, waits until ctx ends and returns its
+// error; otherwise it writes the scripted events and returns eventsErr.
+func (f *fakeWatcher) WriteEvents(ctx context.Context, w io.Writer) error {
+	f.eventsCalls = f.w.calls.list()
+	if f.eventsWait {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if _, err := io.WriteString(w, f.events); err != nil {
+		return err
+	}
+	return f.eventsErr
 }
 
 // Restart records "restart", runs its hook, and panics with "the restart broke" when
@@ -400,12 +432,16 @@ func (f *fakeWatcher) InstallReady(ctx context.Context, began time.Time, exited 
 	return f.install, nil
 }
 
-// Transition waits until the transition's command has exited or ctx ends, then
-// records "transition-" and the window's name and runs its hook. It gives the
-// scripted transition with its times filled.
+// Transition sends a Finish on finishes for each moment of finishAt[name], then
+// waits until the transition's command has exited or ctx ends, then records
+// "transition-" and the window's name and runs its hook. It gives the scripted
+// transition with its times filled.
 func (f *fakeWatcher) Transition(ctx context.Context, name verdict.WindowName, began time.Time, exited <-chan struct{}) watch.Transition {
 	if f.before != nil {
 		f.before(name)
+	}
+	for _, d := range f.finishAt[name] {
+		f.finishes <- watch.Finish{Name: name, At: began.Add(d)}
 	}
 	f.wait(ctx, exited)
 	f.w.calls.add("transition-" + string(name))

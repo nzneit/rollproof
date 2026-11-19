@@ -878,12 +878,169 @@ func TestEvidenceThatCannotBeOpenedIsAWarning(t *testing.T) {
 		t.Fatalf("exit %d, want 0", code)
 	}
 	r := w.result()
-	if r.Verdict != "pass" || len(r.Warnings) != 2 {
-		t.Fatalf("verdict %q, warnings %q; want a pass with two warnings", r.Verdict, r.Warnings)
+	if r.Verdict != "pass" || len(r.Warnings) != 4 {
+		t.Fatalf("verdict %q, warnings %q; want a pass with four warnings", r.Verdict, r.Warnings)
 	}
-	if !strings.Contains(r.Warnings[0], "probe.log") || !strings.Contains(r.Warnings[1], "windows.json") {
-		t.Errorf("warnings %q do not name the two files", r.Warnings)
+	for i, name := range []string{"probe.log", "windows.json", "timeline.tsv", "events.txt"} {
+		if !strings.Contains(r.Warnings[i], name) {
+			t.Errorf("warning %d is %q; want one that names %s", i, r.Warnings[i], name)
+		}
 	}
+}
+
+// The window marks are in windows.json while the run goes: a transition's finishes as they came,
+// and a window's start before its end.
+func TestWindowMarksAsTheyHappen(t *testing.T) {
+	w := newWorld(t)
+	w.watcher.finishAt = map[verdict.WindowName][]time.Duration{verdict.Deploy: {15 * time.Second, 22 * time.Second}}
+	w.watcher.finishes = make(chan watch.Finish, 8)
+	var during []mark
+	w.hooks["rollback"] = func() { during = w.windowMarks() }
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if len(during) != 4 {
+		t.Fatalf("marks during the rollback %+v, want four", during)
+	}
+	deploy, rollback := during[2], during[3]
+	if !when(deploy.Start, t0.Add(10*time.Second)) || !when(deploy.End, t0.Add(40*time.Second)) {
+		t.Errorf("the deploy window is [%v, %v), want [%v, %v)", deploy.Start, deploy.End, t0.Add(10*time.Second), t0.Add(40*time.Second))
+	}
+	want := []time.Time{t0.Add(25 * time.Second), t0.Add(32 * time.Second)}
+	if diff := cmp.Diff(want, deploy.Finishes); diff != "" {
+		t.Errorf("the deploy's finishes (-want +got):\n%s", diff)
+	}
+	if !when(rollback.Start, t0.Add(40*time.Second)) || rollback.End != nil {
+		t.Errorf("the rollback window is [%v, %v), want [%v, null)", rollback.Start, rollback.End, t0.Add(40*time.Second))
+	}
+	if after := w.windowMarks(); len(after) != 4 || !when(after[3].End, t0.Add(70*time.Second)) {
+		t.Errorf("marks after the run %+v; want the rollback to end at %v", after, t0.Add(70*time.Second))
+	}
+}
+
+// A finish is in windows.json while the transition's command still runs: the follower writes it,
+// not the run's next mark.
+func TestAFinishIsWrittenWhileTheWindowIsOpen(t *testing.T) {
+	w := newWorld(t)
+	w.watcher.finishAt = map[verdict.WindowName][]time.Duration{verdict.Deploy: {15 * time.Second}}
+	w.watcher.finishes = make(chan watch.Finish, 8)
+	hold := make(chan struct{})
+	w.deployer.block = map[string]chan struct{}{"deploy": hold}
+	seen := make(chan bool, 1)
+	go func() {
+		defer close(hold)
+		limit := time.After(5 * time.Second)
+		for {
+			b, err := os.ReadFile(filepath.Join(w.out, "evidence", "windows.json"))
+			var ms []mark
+			if err == nil && json.Unmarshal(b, &ms) == nil && len(ms) > 2 && len(ms[2].Finishes) == 1 {
+				seen <- true
+				return
+			}
+			select {
+			case <-limit:
+				seen <- false
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}()
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if !<-seen {
+		t.Error("the deploy's finish was not in windows.json within 5 s while its command ran")
+	}
+}
+
+func TestTimelineAndEventsAreWritten(t *testing.T) {
+	w := newWorld(t)
+	w.watcher.podEvents = []watch.PodEvent{{At: t0.Add(12 * time.Second), Pod: "orders-7f8e9d-k3m2p", Workload: "deployment/orders", Kind: "created"}}
+	w.watcher.events = "Normal Scheduled pod/orders-7f8e9d-k3m2p\n"
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	b, err := os.ReadFile(filepath.Join(w.out, "evidence", "timeline.tsv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const header = "second\tchecks\tfailed\tpod events\n"
+	if !strings.HasPrefix(string(b), header) {
+		t.Fatalf("timeline.tsv begins %q, want the header %q", b, header)
+	}
+	rows := strings.Split(strings.TrimSuffix(strings.TrimPrefix(string(b), header), "\n"), "\n")
+	if len(rows) != 85 {
+		t.Errorf("%d rows, want 85: from t0-15s to the rollback's end at t0+70s", len(rows))
+	}
+	found := false
+	for _, row := range rows {
+		if strings.HasPrefix(row, "2026-11-13T10:00:12Z\t") {
+			found = true
+			if !strings.HasSuffix(row, "\tcreated orders-7f8e9d-k3m2p (deployment/orders)") {
+				t.Errorf("row %q does not end with the pod's creation", row)
+			}
+		}
+	}
+	if !found {
+		t.Error("no row for 2026-11-13T10:00:12Z")
+	}
+	if b, err := os.ReadFile(filepath.Join(w.out, "evidence", "events.txt")); err != nil || string(b) != w.watcher.events {
+		t.Errorf("events.txt is %q, %v; want %q", b, err, w.watcher.events)
+	}
+	calls := w.watcher.eventsCalls
+	if len(calls) == 0 || calls[len(calls)-1] != "end-commands" || slices.Contains(calls, "watch-stop") || slices.Contains(calls, "delete") {
+		t.Errorf("the events were listed after %v; want after end-commands, before watch-stop and delete", calls)
+	}
+}
+
+// Review Focus 4: evidence that cannot be completed after the verdict is a warning, and the
+// verdict and result.json stand.
+func TestEvidenceFailuresAreWarnings(t *testing.T) {
+	t.Run("the evidence folder is gone", func(t *testing.T) {
+		w := newWorld(t)
+		w.hooks["probe-stop"] = func() {
+			dir := filepath.Join(w.out, "evidence")
+			if err := os.RemoveAll(dir); err != nil {
+				t.Error(err)
+			}
+			if err := os.WriteFile(dir, []byte("x"), 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+		if code := w.run(context.Background()); code != 0 {
+			t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+		}
+		r := w.result()
+		if !r.Final || r.Verdict != "pass" || len(r.Warnings) != 3 {
+			t.Fatalf("final %v, verdict %q, warnings %q; want a final pass with three warnings", r.Final, r.Verdict, r.Warnings)
+		}
+		for i, name := range []string{"windows.json", "timeline.tsv", "events.txt"} {
+			if !strings.Contains(r.Warnings[i], name) {
+				t.Errorf("warning %d is %q; want one that names %s", i, r.Warnings[i], name)
+			}
+		}
+	})
+	t.Run("the API server stops answering", func(t *testing.T) {
+		limit := completionLimit
+		completionLimit = 50 * time.Millisecond
+		defer func() { completionLimit = limit }()
+		w := newWorld(t)
+		w.watcher.eventsWait = true
+		began := time.Now()
+		if code := w.run(context.Background()); code != 0 {
+			t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+		}
+		if took := time.Since(began); took > 5*time.Second {
+			t.Errorf("the run took %v, want under 5 s", took)
+		}
+		r := w.result()
+		if !r.Final || r.Verdict != "pass" {
+			t.Errorf("final %v, verdict %q; want a final pass", r.Final, r.Verdict)
+		}
+		if diff := cmp.Diff([]string{"the events were not written: context deadline exceeded"}, r.Warnings); diff != "" {
+			t.Errorf("warnings (-want +got):\n%s", diff)
+		}
+	})
 }
 
 func TestWindowMarks(t *testing.T) {
@@ -1426,6 +1583,8 @@ type panicWriter struct{}
 func (*panicWriter) Final(report.Run) error { panic("the results writer broke") }
 
 func (*panicWriter) Evidence(string) (io.WriteCloser, error) { return nopWriteCloser{io.Discard}, nil }
+
+func (*panicWriter) ReplaceEvidence(string, []byte) error { return nil }
 
 func (*panicWriter) Dir() string { return "out" }
 
