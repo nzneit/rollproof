@@ -2,6 +2,7 @@ package probe
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -71,6 +72,12 @@ type PodOptions struct {
 	// ServiceAccountToken says whether the probe's pod mounts the token of its namespace's default
 	// service account: true for a custom probe, false for the built-in probe.
 	ServiceAccountToken bool
+	// Evidence is where the probe writes its pod's evidence: probe-pod.json, the pod as the
+	// API last gave it, and probe-pod/<container>.log for each container other than probe.
+	// Written once, just before the probe's pod is deleted, after a start without a first
+	// observation or at the stop. A part that cannot be read holds the reason in its place;
+	// a file that cannot be opened is skipped. Nil writes nothing.
+	Evidence func(name string) (io.WriteCloser, error)
 }
 
 // Pod is a probe that runs as a pod on the control-plane node. It implements Probe. Start and
@@ -204,7 +211,8 @@ func (x exit) beforeStart() verdict.Condition {
 }
 
 // podStateText is the pod's state for the text of ProbeNotStarted. A pod that was never read is
-// in the phase Unknown.
+// in the phase Unknown. A waiting container named probe gives its reason, and its message when it
+// has one.
 func podStateText(pod *corev1.Pod) string {
 	if pod == nil {
 		return "the pod is " + string(corev1.PodUnknown)
@@ -218,6 +226,9 @@ func podStateText(pod *corev1.Pod) string {
 	for _, c := range pod.Status.ContainerStatuses {
 		if c.Name == "probe" && c.State.Waiting != nil {
 			s += "; container probe is waiting: " + c.State.Waiting.Reason
+			if c.State.Waiting.Message != "" {
+				s += ": " + c.State.Waiting.Message
+			}
 		}
 	}
 	return s
@@ -290,7 +301,10 @@ func (p *Pod) Counts() (lines, jsonText int) {
 //
 // A pod named probe that an earlier run left is deleted first. When the probe's pod was never
 // created, the error is the API's or ctx's, and the Facts kept say that the probe stopped when
-// asked, because nothing ran to stop.
+// asked, because nothing ran to stop. When the API server refuses the probe's pod as invalid,
+// forbidden or a bad request, the error is a Condition probe-not-started at once, whose text is
+// "the API server refused the probe's pod: " and the API server's text. When no observation came
+// in time, the text names a waiting container's reason and message.
 //
 // Start is called once, and before Stop: a Start after either gives an error and creates no
 // pod. Counts reads the log's lines while Start runs, and a Stop after a Start that panicked
@@ -391,6 +405,10 @@ func (p *Pod) replace(ctx context.Context, timeout <-chan time.Time) error {
 		}
 	}
 	_, err = p.pods().Create(ctx, podSpec(p.o), metav1.CreateOptions{})
+	if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsBadRequest(err) {
+		return verdict.Condition{Code: verdict.ProbeNotStarted,
+			Text: "the API server refused the probe's pod: " + err.Error()}
+	}
 	return err
 }
 
@@ -522,9 +540,9 @@ func (p *Pod) Stop(ctx context.Context) (Facts, error) {
 }
 
 // halt is the stop of a run whose follower and watcher were started: it ends the watcher,
-// deletes the pod with the drain as grace, reads the log until it ends or the drain and
-// stopMargin pass, closes Events, keeps the Facts and the error. Each call to the API waits at
-// most stopMargin.
+// writes the evidence, deletes the pod with the drain as grace, reads the log until it ends or
+// the drain and stopMargin pass, closes Events, keeps the Facts and the error. Each call to the
+// API waits at most stopMargin.
 //
 // It serves Stop, a Start that failed other than by its context, and a Stop after a Start that
 // panicked; ending the watcher again after Stop ended it is harmless. The probe stopped when
@@ -550,6 +568,8 @@ func (p *Pod) halt(ctx context.Context, r *probeRun) (Facts, error) {
 
 	r.stopWatcher()
 	<-r.watcherDone
+
+	p.writeEvidence(ctx)
 
 	r.follower.stopAsked()
 	asked := p.o.Now()
@@ -595,6 +615,64 @@ func (p *Pod) halt(ctx context.Context, r *probeRun) (Facts, error) {
 	}
 	p.end(f, err)
 	return f, err
+}
+
+// writeEvidence writes the probe pod's evidence once, after the watcher has ended and before the
+// pod is deleted: the pod as the API gives it to probe-pod.json, and the log of every container
+// other than probe to probe-pod/<container>.log. A part that cannot be read holds the reason in
+// its place; a file that Evidence cannot open is skipped, as the probe has no warning for it.
+// Each read waits at most stopMargin. Nil writes nothing. A log cut while it is copied keeps what
+// was read.
+func (p *Pod) writeEvidence(ctx context.Context) {
+	open := p.o.Evidence
+	if open == nil {
+		return
+	}
+	readCtx, cancelRead := context.WithTimeout(ctx, stopMargin)
+	pod, err := p.pods().Get(readCtx, "probe", metav1.GetOptions{})
+	cancelRead()
+	if err != nil {
+		if w, openErr := open("probe-pod.json"); openErr == nil {
+			io.WriteString(w, "rollproof: the pod could not be read: "+err.Error())
+			w.Close()
+		}
+		return
+	}
+	if b, err := json.MarshalIndent(pod, "", "  "); err == nil {
+		if w, openErr := open("probe-pod.json"); openErr == nil {
+			w.Write(b)
+			w.Close()
+		}
+	}
+	for _, containers := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
+		for _, c := range containers {
+			if c.Name != "probe" {
+				p.writeContainerLog(ctx, open, c.Name)
+			}
+		}
+	}
+}
+
+// writeContainerLog writes the log of container to probe-pod/<container>.log, read once and not
+// followed. A log that cannot be read leaves the reason in its place; a file that cannot be
+// opened is skipped. The read waits at most stopMargin.
+func (p *Pod) writeContainerLog(ctx context.Context, open func(string) (io.WriteCloser, error), container string) {
+	w, err := open("probe-pod/" + container + ".log")
+	if err != nil {
+		return
+	}
+	readCtx, cancelRead := context.WithTimeout(ctx, stopMargin)
+	rc, err := p.pods().GetLogs("probe", &corev1.PodLogOptions{Container: container}).Stream(readCtx)
+	if err != nil {
+		cancelRead()
+		io.WriteString(w, "rollproof: the log could not be read: "+err.Error())
+		w.Close()
+		return
+	}
+	io.Copy(w, rc)
+	rc.Close()
+	cancelRead()
+	w.Close()
 }
 
 // lastExitCheck reads the pod once, after the watcher has ended, and puts the fault of an exit
