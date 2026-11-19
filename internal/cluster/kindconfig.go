@@ -9,19 +9,23 @@ import (
 )
 
 // Spec is what Create needs. Empty image names mean the default; Namespace is
-// the workload's namespace. Timeout bounds, each on its own, the engine's pull,
-// the registry's wait and the nodes' readiness; kind's waits are not bounded by
-// it. kind keeps the nodes of a failed attempt whatever Keep says; the tool
-// deletes them unless Keep is set. Evidence holds a failed set-up's logs, and
-// kind's under kind/ and the registry's as registry.log; nil collects nothing.
+// the workload's namespace. Timeout bounds, each on its own: the engine's pull
+// of the node image and of the registry image when the store lacks them, the
+// wait for the registry to answer, counted from its container's start, and the
+// nodes' readiness. It is not one deadline over the whole creation, and kind's
+// own waits are not bounded by it. After a failure Keep leaves the nodes, the
+// run's folder, its kubeconfig and the registry container in place; the tool
+// deletes them otherwise. kind keeps the nodes of a failed attempt whatever
+// Keep says. Evidence holds a failed set-up's logs, kind's under kind/ and the
+// registry's as registry.log; nil collects nothing.
 type Spec struct {
 	Name, RunDir, NodeImage, RegistryImage string
 	Workers                                int
 	Namespace                              string
 	Timeout                                time.Duration
 	Keep                                   bool
-	// Evidence is where a failed set-up's logs go: kind's under kind/ and the registry's as
-	// registry.log. Nil collects nothing.
+	// Evidence is where a failed set-up's logs go: kind's under kind/ and the
+	// registry's as registry.log. Nil collects nothing.
 	Evidence func(name string) (io.WriteCloser, error)
 }
 

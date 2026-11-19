@@ -160,9 +160,9 @@ type session struct {
 var _ run.Cluster = (*session)(nil)
 
 // Store packages the tool's own binary as the probe's image and puts the
-// configuration's images in place. A cluster-failed failure of the store takes the
-// cluster's logs into the evidence before the error is returned; other failures
-// are returned as they are.
+// configuration's images in place. A cluster-failed failure of the store takes
+// the cluster's logs into the evidence before the error is returned; other
+// failures are returned as they are.
 func (s *session) Store(ctx context.Context) (string, map[string]config.ImageRef, error) {
 	exe, err := os.Executable()
 	if err != nil {

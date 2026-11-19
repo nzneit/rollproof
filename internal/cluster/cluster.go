@@ -143,12 +143,17 @@ type Cluster struct {
 	evidence func(name string) (io.WriteCloser, error)
 }
 
-// Create removes leftovers, makes the cluster and its registry. kind always
-// keeps the nodes of a failed attempt, so that its logs can be read; the tool
+// Create removes leftovers, then has the engine pull the node image if its
+// store lacks it, makes the cluster and its registry and returns when every
+// node is ready, DNS runs and both namespaces exist. Each node keeps an
+// attempt to connect that had no answer for 5 s (section 9). kind always keeps
+// the nodes of a failed attempt, so that its logs can be read; the tool
 // deletes them itself. A failure after kind's creation began takes kind's logs
-// and the registry's log into s.Evidence, unless ctx has ended. On an error it
-// removes the run, unless s.Keep is set or ctx has ended; a step's error is a
-// ClusterFailed Condition, and a name without rollproof- an InternalError.
+// and the registry's log when its container ran, into s.Evidence, unless ctx
+// has ended. On an error it removes the run, unless s.Keep is set or ctx has
+// ended; when that removal fails too, parts stay behind and the text says so.
+// A step's error is a ClusterFailed Condition, and a name without rollproof-
+// an InternalError.
 func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	if err := remove(ctx, e, s.Name, s.RunDir); err != nil {
 		var c verdict.Condition
