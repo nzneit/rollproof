@@ -174,13 +174,14 @@ func (s *session) Watcher(ctx context.Context, cfg *config.Config) (run.Watcher,
 	startCtx, cancel := context.WithTimeout(ctx, cfg.Limits.Timeout)
 	defer cancel()
 	w, err := watch.Start(startCtx, s.client, watch.Options{
-		Namespace: cfg.Deploy.Namespace,
-		Selector:  cfg.Deploy.Selector,
-		Settle:    cfg.Limits.Settle,
-		Timeout:   cfg.Limits.Timeout,
-		Workers:   cfg.Cluster.Workers,
-		Now:       time.Now,
-		Evidence:  s.evidence,
+		Namespace:      cfg.Deploy.Namespace,
+		Selector:       cfg.Deploy.Selector,
+		Settle:         cfg.Limits.Settle,
+		Timeout:        cfg.Limits.Timeout,
+		Workers:        cfg.Cluster.Workers,
+		Now:            time.Now,
+		Evidence:       s.evidence,
+		ProbeNamespace: cluster.ProbeNamespace,
 	})
 	if err != nil {
 		return nil, err

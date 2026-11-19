@@ -6,7 +6,9 @@
 package watch
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -710,4 +712,39 @@ func podReady(p *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// podEvents gives a PodEvent for each moment of each pod record: created at its first Set, ready
+// at its first ready Set, deleted at the first Set that showed a deletion timestamp, or at its
+// Gone when none did, and gone. A pod known only from its Gone has no Set, so it has a gone alone.
+// The order is that of PodEvents.
+func (t *Tracker) podEvents() []PodEvent {
+	var events []PodEvent
+	for _, p := range t.pods {
+		var workload string
+		if w, ok := t.podWorkload(p); ok {
+			workload = w.String()
+		}
+		add := func(at time.Time, kind string) {
+			if !at.IsZero() {
+				events = append(events, PodEvent{At: at, Pod: p.name, Workload: workload, Kind: kind})
+			}
+		}
+		if p.shown {
+			add(p.firstSeen, "created")
+			add(p.firstReady, "ready")
+			if p.deleting.IsZero() {
+				add(p.gone, "deleted")
+			} else {
+				add(p.deleting, "deleted")
+			}
+		}
+		add(p.gone, "gone")
+	}
+	order := []string{"created", "ready", "deleted", "gone"}
+	slices.SortFunc(events, func(a, b PodEvent) int {
+		return cmp.Or(a.At.Compare(b.At), cmp.Compare(a.Pod, b.Pod),
+			cmp.Compare(slices.Index(order, a.Kind), slices.Index(order, b.Kind)))
+	})
+	return events
 }
