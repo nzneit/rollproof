@@ -251,7 +251,8 @@ func (d *HelmDriver) Transitions() []verdict.WindowName {
 	return []verdict.WindowName{verdict.Deploy, verdict.Rollback}
 }
 
-// Releases are the previous and then the candidate release, as Fetch kept them.
+// Releases are the previous and then the candidate release, as Fetch kept them;
+// Program is empty.
 func (d *HelmDriver) Releases() []Release {
 	if !d.ready {
 		return nil
