@@ -811,6 +811,42 @@ func TestAFailedChecksBadLineGoesToTheLastWindowThatBegan(t *testing.T) {
 	if window, _ := r.windowOf("probe-line-invalid"); window != "deploy" {
 		t.Errorf("probe-line-invalid in window %q, want deploy; reasons %q, warnings %q", window, r.codes(), r.Warnings)
 	}
+	if len(r.Warnings) != 0 {
+		t.Errorf("warnings %q, want none", r.Warnings)
+	}
+}
+
+// The rule moves only what came at or after the last window's end: a failed check's bad line
+// written inside the deploy window, which the drain gives, stays in deploy, not in the rollback.
+func TestAFailedChecksBadLineBeforeTheLastWindowsEndStaysInItsWindow(t *testing.T) {
+	w := newWorld(t)
+	ev := drainFault(true)
+	ev.Fault.At = t0.Add(20 * time.Second) // inside the deploy window, t0+10s to t0+40s
+	w.probe.last = []probe.Event{ev}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if window, _ := r.windowOf("probe-line-invalid"); window != "deploy" {
+		t.Errorf("probe-line-invalid in window %q, want deploy", window)
+	}
+	if diff := cmp.Diff([]string{"pass", "not-verified", "not-judged"}, r.results()); diff != "" {
+		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+	if len(r.Warnings) != 0 {
+		t.Errorf("warnings %q, want none", r.Warnings)
+	}
+}
+
+func TestMoveToolFaultsRefusesFlagsNotBesideTimed(t *testing.T) {
+	tl := verdict.Timeline{Timed: []verdict.Condition{{Code: verdict.ProbeLineInvalid}, {Code: verdict.InternalError}}}
+	defer func() {
+		want := "moveToolFaults: 1 failed-check flags for 2 timed conditions; they must run index for index"
+		if p := recover(); p != want {
+			t.Errorf("panic %v, want %q", p, want)
+		}
+	}()
+	(&runState{}).moveToolFaults(&tl, []bool{true})
 }
 
 // Carry-in T29-1 stays: a failure of the tool after the last window moves there, failed check or not.
@@ -2337,11 +2373,24 @@ func TestWhileTheProbeStopsAfterAToolFailure(t *testing.T) {
 // Rule 8: a condition of the install window that the tool learns of only after the steady window
 // began is placed late. The steady window runs to its end, and the run stops there.
 func TestAnInstallWindowJudgedLate(t *testing.T) {
+	installWindowJudgedLate(t, false)
+}
+
+// The same, for a failed check's bad line: it stays in the install window, which holds its time,
+// and does not move to the steady window, the last that began.
+func TestAFailedChecksInstallWindowLineJudgedLateStaysInstall(t *testing.T) {
+	installWindowJudgedLate(t, true)
+}
+
+// installWindowJudgedLate runs TestAnInstallWindowJudgedLate's case, with the late line a failed
+// check's line when failedCheck is true.
+func installWindowJudgedLate(t *testing.T, failedCheck bool) {
+	t.Helper()
 	w := newWorld(t)
 	u := w.units()
 	u.Clock = &lateClock{fakeClock: w.clock, before: func() {
 		w.probe.send(probe.Event{Fault: &verdict.Condition{Code: verdict.ProbeLineInvalid,
-			Text: "the line is not one JSON object", At: t0.Add(-5 * time.Second)}})
+			Text: "the line is not one JSON object", At: t0.Add(-5 * time.Second)}, FailedCheck: failedCheck})
 	}}
 	code := Run(context.Background(), Options{ConfigPath: filepath.Join(w.cfg.Dir, "rollproof.yaml"), Out: w.out,
 		Stdout: &w.stdout, Stderr: &w.stderr, Version: "test", Getenv: func(string) string { return "" }}, u)

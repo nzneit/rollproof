@@ -200,7 +200,7 @@ type runState struct {
 	countsSeen *[2]int        // the probe's lines and JSON text lines from Counts, read once
 	names      []verdict.WindowName
 
-	mu          sync.Mutex // guards the timeline, which the event reader extends
+	mu          sync.Mutex // guards the timeline and failedCheck, which the event reader extends
 	tl          verdict.Timeline
 	failedCheck []bool // beside tl.Timed, index for index: the condition is a failed check's line's fault
 	transitions []transitionFacts
@@ -758,8 +758,9 @@ func (s *runState) place(c verdict.Condition) {
 
 // decide judges everything the run knows, after asking the event reader for
 // what waits, and keeps the pods of each window's first failure. final says
-// that this is the run's last call, which places the tool's own faults and
-// checks that no window was left open.
+// that this is the run's last call, which places in the last window the tool's
+// own faults and the faults of failed checks' lines that came after it ended,
+// and checks that no window was left open.
 func (s *runState) decide(final bool) verdict.Decision {
 	if h := decideHook; h != nil {
 		h()
@@ -784,13 +785,17 @@ func (s *runState) decide(final bool) verdict.Decision {
 	return d
 }
 
-// moveToolFaults places in the last window that began each condition of t.Timed at or
-// after that window's end that is a failure of the tool, or the fault of a
-// failed check's line (failedCheck[i] true for t.Timed[i]). Every other
-// condition after the last window stays where Decide puts it, and the report
-// shows it as a warning. With no begun window, or one still open, it does
-// nothing.
+// moveToolFaults places in the last window that began each condition of
+// t.Timed at or after that window's end that is a failure of the tool, or the
+// fault of a failed check's line (failedCheck[i] true for t.Timed[i]). Every
+// other condition after the last window stays where Decide puts it, and the
+// report shows it as a warning. With no begun window, or one still open, it
+// does nothing. It panics unless failedCheck is exactly as long as t.Timed.
 func (s *runState) moveToolFaults(t *verdict.Timeline, failedCheck []bool) {
+	if len(failedCheck) != len(t.Timed) {
+		panic(fmt.Sprintf("moveToolFaults: %d failed-check flags for %d timed conditions; they must run index for index",
+			len(failedCheck), len(t.Timed)))
+	}
 	last := -1
 	for i, w := range t.Windows {
 		if !w.Start.IsZero() {
