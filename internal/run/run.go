@@ -457,10 +457,13 @@ func (s *runState) transitionsStep(ctx context.Context) bool {
 			fn = s.deployer.Rollback
 		case verdict.Restart:
 			// The restart runs as a command does, so that a panic in it is caught as a command's
-			// is; its end is the end of the transition's command (decision 4).
+			// is; its end is the end of the transition's command (decision 4). Like a command, it is
+			// bounded by limits.timeout from its start (section 7, "When a command runs too long").
 			rs = &watch.Restart{}
 			fn = func(ctx context.Context) deploy.Result {
-				*rs = s.watcher.Restart(ctx)
+				bounded, cancel := context.WithTimeout(ctx, s.cfg.Limits.Timeout)
+				defer cancel()
+				*rs = s.watcher.Restart(bounded)
 				return deploy.Result{Name: "restart", Ending: deploy.Succeeded, Began: rs.Began, Ended: rs.Ended}
 			}
 		default:
@@ -522,15 +525,31 @@ func (s *runState) placeTransition(i int, tr watch.Transition, res deploy.Result
 	}
 }
 
-// placeRestart fills a restart's window: its finish and end, the watcher's
-// conditions, and restart-failed when the API server refused the change. The
-// change counts as the command's success only when it was accepted, so that a
-// refused restart is never judged as a transition that replaced no pod.
+// placeRestart fills a restart's window: its finish and end, and the watcher's
+// conditions. The change counts as the command's success only when it was
+// accepted, so that a restart that was not is never judged as a transition
+// that replaced no pod. A refusal, which names its workload, adds
+// restart-failed. A restart cut short with no workload named was stopped by
+// limits.timeout, since a signal's never reaches here: it is a stall, told
+// once with the watcher's own as placeTransition tells a command's, and never
+// a refusal.
 func (s *runState) placeRestart(i int, tr watch.Transition, rs watch.Restart) {
+	const atLimit = "the restart was still running at limits.timeout and the tool stopped it"
 	w := &s.tl.Windows[i]
 	w.Finished, w.End = tr.Finished, tr.Ended
-	w.Conditions = append(w.Conditions, tr.Conditions(rs.Accepted)...)
-	if !rs.Accepted {
+	stalled := !rs.Accepted && rs.Workload == ""
+	for _, c := range tr.Conditions(rs.Accepted) {
+		if stalled && c.Code == verdict.TransitionStalled {
+			// One stall, told once: the watcher's text and then the restart's.
+			c.Text += "; " + atLimit
+			stalled = false
+		}
+		w.Conditions = append(w.Conditions, c)
+	}
+	switch {
+	case stalled:
+		w.Conditions = append(w.Conditions, verdict.Condition{Code: verdict.TransitionStalled, Text: atLimit})
+	case !rs.Accepted && rs.Workload != "":
 		w.Conditions = append(w.Conditions, verdict.Condition{Code: verdict.RestartFailed,
 			Text: "the API server refused the restart of " + rs.Workload + ": " + rs.Text})
 	}

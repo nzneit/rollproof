@@ -2317,6 +2317,14 @@ func TestRestartOnlyInstallNamesTheCandidate(t *testing.T) {
 			}
 		}
 	}
+	settleBefore := func(text string) func(w *world) {
+		return func(w *world) {
+			w.watcher.settle = func(first time.Time) watch.Settling {
+				return watch.Settling{First: first, Ended: first.Add(5 * time.Second),
+					Before: []verdict.Condition{{Code: verdict.InstallFailed, Text: text}}}
+			}
+		}
+	}
 	const (
 		within  = "the install was not ready within limits.timeout\ndeployment/orders: 0 of 2 ready"
 		passed  = "the install was not ready when limits.timeout passed\npod orders-1 was deleted"
@@ -2350,6 +2358,10 @@ func TestRestartOnlyInstallNamesTheCandidate(t *testing.T) {
 			"install", "the install of the candidate stopped being ready after limits.timeout, while it still settled", []string{"pod orders-1 was deleted"}},
 		{"stopped being ready, with a previous release", both, settleWith(stopped),
 			"install", "the install stopped being ready after limits.timeout, while it still settled", []string{"pod orders-1 was deleted"}},
+		{"stopped being ready before the install window, restart only", restartOnly, settleBefore(stopped),
+			"", "the install of the candidate stopped being ready after limits.timeout, while it still settled", []string{"pod orders-1 was deleted"}},
+		{"stopped being ready before the install window, with a previous release", both, settleBefore(stopped),
+			"", "the install stopped being ready after limits.timeout, while it still settled", []string{"pod orders-1 was deleted"}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			w := newWorld(t)
@@ -2429,5 +2441,65 @@ func TestDeployWithoutRollback(t *testing.T) {
 	const line = "the candidate's shutdown and the installed release's start-up, because the run has no rollback"
 	if !strings.Contains(w.stdout.String(), line) {
 		t.Errorf("stdout has no %q:\n%s", line, w.stdout.String())
+	}
+}
+
+// A restart that limits.timeout cut, and no signal, is a stall told once with the watcher's own,
+// never a refusal: its record's restart is null.
+func TestRestartStoppedAtTheLimit(t *testing.T) {
+	w := restartWorld(t)
+	w.cfg.Limits.Timeout = 50 * time.Millisecond
+	w.watcher.restartWaits = true
+	w.watcher.transitions[verdict.Restart] = watch.Transition{Stalled: true}
+	done := make(chan int, 1)
+	go func() { done <- w.run(context.Background()) }()
+	var code int
+	select {
+	case code = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run still waits for a restart that limits.timeout should have stopped")
+	}
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 (a stall is a fail)\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"transition-stalled"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	if window, text := r.windowOf("transition-stalled"); window != "restart" ||
+		!strings.Contains(text, "the restart was still running at limits.timeout") {
+		t.Errorf("transition-stalled in window %q with text %q", window, text)
+	}
+	if len(r.Transitions) != 1 || r.Transitions[0].Restart != nil {
+		t.Errorf("transitions %+v, want one with restart null", r.Transitions)
+	}
+}
+
+// A restart that a signal cut short is interrupted and never reaches the restart's own judgement:
+// no refusal is told and its record's restart is null.
+func TestRestartInterrupted(t *testing.T) {
+	w := restartWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.watcher.restart = watch.Restart{Accepted: false, Text: "context canceled"}
+	w.hooks["restart"] = cancel
+	if code := w.run(ctx); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"interrupted"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	if len(r.Transitions) != 1 || r.Transitions[0].Restart != nil {
+		t.Errorf("transitions %+v, want one with restart null", r.Transitions)
+	}
+	raw, err := os.ReadFile(filepath.Join(w.out, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for where, text := range map[string]string{"stdout": w.stdout.String(), "result.json": string(raw)} {
+		if strings.Contains(text, "refused the restart of") {
+			t.Errorf("%s tells of a refusal:\n%s", where, text)
+		}
 	}
 }

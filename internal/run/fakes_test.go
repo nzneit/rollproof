@@ -333,14 +333,17 @@ type fakeWatcher struct {
 	// when the tool looks at the cluster a moment after the install settled.
 	late time.Duration
 	// restart is what Restart gives, with its times at the clock's; restartPanics makes Restart
-	// panic instead.
+	// panic instead; restartWaits makes it wait until its context ends and then give a restart cut
+	// short, in the form watch gives one.
 	restart       watch.Restart
 	restartPanics bool
+	restartWaits  bool
 }
 
 // Restart records "restart", runs its hook, and panics with "the restart broke" when
-// restartPanics is set; otherwise it gives the scripted restart with Began and Ended at the
-// clock's time.
+// restartPanics is set. With restartWaits it waits until ctx ends and gives Accepted false with
+// ctx's error as its Text and no Workload; otherwise it gives the scripted restart. Began and Ended
+// are at the clock's time.
 func (f *fakeWatcher) Restart(ctx context.Context) watch.Restart {
 	f.w.calls.add("restart")
 	f.w.hook("restart")
@@ -348,6 +351,10 @@ func (f *fakeWatcher) Restart(ctx context.Context) watch.Restart {
 		panic("the restart broke")
 	}
 	r := f.restart
+	if f.restartWaits {
+		<-ctx.Done()
+		r = watch.Restart{Accepted: false, Text: ctx.Err().Error()}
+	}
 	now := f.w.clock.Now()
 	r.Began, r.Ended = now, now
 	return r
