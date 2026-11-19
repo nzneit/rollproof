@@ -178,6 +178,8 @@ func TestCreateFailureTexts(t *testing.T) {
 		pull            error   // what the pull of the node image returns
 		pullAfterRunDir bool    // the pull of the node image checks that the run's folder exists when it is called
 		wantImage       string  // what the pull of the node image is given, when not empty
+		evidence        bool    // Spec.Evidence writes into a folder of its own
+		collectErr      error   // what kind's log collection returns
 		want            func(runDir string) string
 		joined          error // an error that the returned error holds beside the Condition, for the log
 	}{
@@ -199,6 +201,20 @@ func TestCreateFailureTexts(t *testing.T) {
 			want: func(runDir string) string {
 				return "create the kind cluster: exit status 125" + inotifyHint + ". The cluster is kept: kubeconfig " +
 					filepath.Join(runDir, "kubeconfig") + ", context kind-" + name
+			},
+		},
+		{
+			name:            "the logs cannot be collected, and the cluster is kept",
+			keep:            true,
+			writeKubeconfig: true,
+			creates:         []error{errors.New("exit status 125")},
+			deletes:         []error{nil}, // step 1's removal of leftovers
+			evidence:        true,
+			collectErr:      errors.New("no nodes"),
+			want: func(runDir string) string {
+				return "create the kind cluster: exit status 125" + inotifyHint + LogsNotCollected +
+					"no nodes. The cluster is kept: kubeconfig " + filepath.Join(runDir, "kubeconfig") +
+					", context kind-" + name
 			},
 		},
 		{
@@ -258,6 +274,9 @@ func TestCreateFailureTexts(t *testing.T) {
 			}
 			oldPull := pullImage
 			t.Cleanup(func() { pullImage = oldPull })
+			oldCollect := kindCollectLogs
+			t.Cleanup(func() { kindCollectLogs = oldCollect })
+			kindCollectLogs = func(*kindcluster.Provider, string, string) error { return tc.collectErr }
 			var pulledImage string
 			var pulledLimit time.Duration
 			pullImage = func(_ Engine, _ context.Context, image string, limit time.Duration) error {
@@ -273,6 +292,9 @@ func TestCreateFailureTexts(t *testing.T) {
 				tc.setup(t, runDir)
 			}
 			s := Spec{Name: name, RunDir: runDir, Workers: 1, Namespace: "app", Timeout: time.Minute, Keep: tc.keep}
+			if tc.evidence {
+				s.Evidence = evidenceDir(t.TempDir())
+			}
 
 			_, err := Create(context.Background(), s, Engine{Binary: "rollproof-test-no-such-engine"})
 			if err == nil {

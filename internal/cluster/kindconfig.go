@@ -8,12 +8,12 @@ import (
 	"sigs.k8s.io/kind/pkg/apis/config/v1alpha4"
 )
 
-// Spec is what Create needs. An empty NodeImage or RegistryImage means the default. Namespace is
-// the workload's namespace. Timeout bounds, each on its own: the engine's pull of the node image
-// and of the registry image when the store lacks them, the wait for the registry to answer,
-// counted from its container's start, and the nodes' readiness. It is not one deadline over the
-// whole creation, and kind's own waits are not bounded by it. Keep leaves in place what a failed
-// step left.
+// Spec is what Create needs. Empty image names mean the default; Namespace is
+// the workload's namespace. Timeout bounds, each on its own, the engine's pull,
+// the registry's wait and the nodes' readiness; kind's waits are not bounded by
+// it. kind keeps the nodes of a failed attempt whatever Keep says; the tool
+// deletes them unless Keep is set. Evidence holds a failed set-up's logs, and
+// kind's under kind/ and the registry's as registry.log; nil collects nothing.
 type Spec struct {
 	Name, RunDir, NodeImage, RegistryImage string
 	Workers                                int

@@ -102,14 +102,16 @@ func (w *wiring) create(ctx context.Context, cfg *config.Config, name string, ev
 func failedClientError(ctx context.Context, keep bool, kept string, collect, del func(context.Context) error, clientErr error) error {
 	c := verdict.Condition{Code: verdict.ClusterFailed,
 		Text: "the cluster's API server cannot be reached: " + clientErr.Error()}
-	if ctx.Err() != nil {
-		return c
-	}
-	if cerr := collect(ctx); cerr != nil {
-		c.Text += cluster.LogsNotCollected + cerr.Error()
+	if ctx.Err() == nil {
+		if cerr := collect(ctx); cerr != nil {
+			c.Text += cluster.LogsNotCollected + cerr.Error()
+		}
 	}
 	if keep {
 		c.Text += ". " + capitalised(kept)
+		return c
+	}
+	if ctx.Err() != nil {
 		return c
 	}
 	if err := del(ctx); err != nil {
@@ -158,8 +160,9 @@ type session struct {
 var _ run.Cluster = (*session)(nil)
 
 // Store packages the tool's own binary as the probe's image and puts the
-// configuration's images in place. A set-up that fails takes the cluster's logs
-// into the evidence before the error is returned (storeFailed).
+// configuration's images in place. A cluster-failed failure of the store takes the
+// cluster's logs into the evidence before the error is returned; other failures
+// are returned as they are.
 func (s *session) Store(ctx context.Context) (string, map[string]config.ImageRef, error) {
 	exe, err := os.Executable()
 	if err != nil {

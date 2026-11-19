@@ -354,8 +354,8 @@ func wantLogs(t *testing.T, dir, name string) {
 }
 
 // Keep: a step that fails after kind has made the cluster (a registry image that exists nowhere)
-// leaves nothing without Keep, and leaves the nodes and the run's folder with it. Both failures
-// take kind's logs and the registry's log into the evidence.
+// leaves nothing without Keep, and leaves the nodes and the run's folder with it. Neither failure
+// leaves a registry.log: the registry never started, so both take kind's logs only.
 func TestKeepAfterFailure(t *testing.T) {
 	ctx := context.Background()
 	e := testEngine(t)

@@ -231,6 +231,8 @@ func TestFailedClientError(t *testing.T) {
 		{"kept", true, false, nil, cleanUp, 1, 0, []string{"collect"},
 			reached + ". The cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x", ""},
 		{"the run's context has ended", false, true, nil, cleanUp, 0, 0, nil, reached, ""},
+		{"the run's context has ended, and the cluster is kept", true, true, nil, cleanUp, 0, 0, nil,
+			reached + ". The cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x", ""},
 		{"the delete succeeds", false, false, nil, nil, 1, 1, []string{"collect", "delete"}, reached, ""},
 		{"the delete fails", false, false, nil, cleanUp, 1, 1, []string{"collect", "delete"}, left,
 			"the clean-up after it failed: the engine is gone"},

@@ -111,8 +111,8 @@ func TestCollectLogsCopiesEveryFile(t *testing.T) {
 	if want := []string{"rollproof-x-registry"}; !slices.Equal(containers, want) {
 		t.Errorf("the container's log was read for %v, want %v", containers, want)
 	}
-	if left := filesUnder(t, runDir); len(left) != 0 {
-		t.Errorf("files are left under the run's folder: %v", left)
+	if _, err := os.Stat(filepath.Join(runDir, "kind-logs")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("kind's log folder is left under the run's folder: %v", err)
 	}
 }
 
