@@ -182,6 +182,63 @@ func TestBadFailAfter(t *testing.T) {
 	}
 }
 
+// A duration that does not parse, or is negative, is an error that names its variable, whichever
+// of the three switches it is.
+func TestBadDurations(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		value string
+	}{
+		{"JOB_SLEEP", "a while"},
+		{"JOB_SLEEP", "-1s"},
+		{"FAIL_AFTER", "soon"},
+		{"FAIL_AFTER", "-1s"},
+		{"FAIL_FOR", "soon"},
+		{"FAIL_FOR", "-1s"},
+	} {
+		t.Run(c.name+"="+c.value, func(t *testing.T) {
+			env := map[string]string{"ADDR": "127.0.0.1:0", c.name: c.value}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			err := serve(ctx, func(k string) string { return env[k] }, nil)
+			if err == nil || !strings.Contains(err.Error(), c.name) {
+				t.Errorf("serve with %s=%q = %v, want an error that holds %s", c.name, c.value, err, c.name)
+			}
+		})
+	}
+}
+
+// A set FAIL_AFTER with no FAIL_FOR is an error that names FAIL_FOR: no row asks for a window of
+// no length, so the service fails loud instead of never failing.
+func TestFailAfterNeedsFailFor(t *testing.T) {
+	env := map[string]string{"ADDR": "127.0.0.1:0", "FAIL_AFTER": "300ms"}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := serve(ctx, func(k string) string { return env[k] }, nil)
+	if err == nil || !strings.Contains(err.Error(), "FAIL_FOR") {
+		t.Errorf("serve with FAIL_AFTER and no FAIL_FOR = %v, want an error that holds FAIL_FOR", err)
+	}
+}
+
+// JOB_SLEEP set to 0s still ends at once without listening: its presence makes a Job, not a value
+// above 0.
+func TestJobSleepZeroEndsWithoutListening(t *testing.T) {
+	ready, _, done := launch(t, map[string]string{"ADDR": "127.0.0.1:0", "JOB_SLEEP": "0s"})
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve: %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return within 5 s with JOB_SLEEP=0s")
+	}
+	select {
+	case addr := <-ready:
+		t.Errorf("serve listened on %s, want no listen", addr)
+	default:
+	}
+}
+
 func TestStartDelay(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
