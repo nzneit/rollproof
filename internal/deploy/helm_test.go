@@ -52,6 +52,13 @@ func helmConfig() config.Helm {
 	}
 }
 
+// candidateOnly is helmConfig with no previous release: its candidate is the chart path /work/app/chart.
+func candidateOnly() config.Helm {
+	h := helmConfig()
+	h.Previous = nil
+	return h
+}
+
 // scripted is a fake that answers a whole run: it pulls the previous chart,
 // shows both charts, and gives revision 1 as the install's status.
 func scripted() *fakeRunner {
@@ -311,11 +318,74 @@ func TestHelmTransitionsAndReleases(t *testing.T) {
 	}
 }
 
-func TestHelmProgrammingErrors(t *testing.T) {
-	h := helmConfig()
-	h.Previous = nil
-	mustPanic(t, "previous", func() { newDriver(t, h, scripted()) })
+func TestHelmWithNoPreviousCommandLines(t *testing.T) {
+	f := scripted()
+	drv, runDir := newDriver(t, candidateOnly(), f)
+	if err := drv.Fetch(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if r := drv.Install(t.Context()); r.Name != "install" || r.Ending != Succeeded {
+		t.Fatalf("Install gave %+v, want install to succeed", r)
+	}
+	cl := []string{"--namespace", "orders", "--kubeconfig", kubeconfig, "--kube-context", kubeContext}
+	want := []Command{
+		{Name: "show-candidate", Args: []string{"helm", "show", "chart", "/work/app/chart"}, Timeout: timeout},
+		{Name: "install", Args: slices.Concat([]string{"helm", "upgrade", "--install", "orders", "/work/app/chart"}, cl,
+			[]string{"--timeout", "5m0s", "--values", "/work/app/test/values-kind.yaml",
+				"--values", filepath.Join(runDir, "values", "candidate-2.yaml")}), Timeout: timeout},
+		{Name: "status-install", Args: slices.Concat([]string{"helm", "status", "orders"}, cl, []string{"-o", "json"}),
+			Timeout: timeout, MaxStdout: 64 << 20},
+	}
+	if d := cmp.Diff(want, f.calls); d != "" {
+		t.Errorf("commands (-want +got):\n%s", d)
+	}
+}
 
+func TestHelmWithNoPreviousRemoteCandidate(t *testing.T) {
+	h := candidateOnly()
+	h.Candidate = &config.Release{Chart: "oci://registry.example/charts/orders", Version: "1.5.0"}
+	f := scripted()
+	f.effects["pull-candidate"] = writeArchive("orders", "1.5.0")
+	drv, runDir := newDriver(t, h, f)
+	if err := drv.Fetch(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if d := cmp.Diff([]string{"pull-candidate", "show-candidate"}, f.names()); d != "" {
+		t.Errorf("Fetch's commands (-want +got):\n%s", d)
+	}
+	drv.Install(t.Context())
+	archive := filepath.Join(runDir, "charts", "candidate", "orders-1.5.0.tgz")
+	if got := f.calls[2]; got.Name != "install" || got.Args[4] != archive {
+		t.Errorf("the install is %s %q, want install of %s", got.Name, got.Args, archive)
+	}
+}
+
+func TestHelmWithNoPreviousTransitionsAndReleases(t *testing.T) {
+	drv, _ := newDriver(t, candidateOnly(), scripted())
+	if d := cmp.Diff([]verdict.WindowName{verdict.Restart}, drv.Transitions()); d != "" {
+		t.Errorf("Transitions (-want +got):\n%s", d)
+	}
+	if err := drv.Fetch(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	want := []Release{{Role: "candidate", Chart: "orders", Version: "1.5.0", Source: "./chart",
+		ValueFiles: []string{"values-kind.yaml"}, InlineKeys: []string{"args", "enabled", "image", "port", "replicas"}}}
+	if d := cmp.Diff(want, drv.Releases()); d != "" {
+		t.Errorf("Releases (-want +got):\n%s", d)
+	}
+}
+
+func TestHelmWithNoPreviousRefusesATransition(t *testing.T) {
+	drv, _ := newDriver(t, candidateOnly(), scripted())
+	if err := drv.Fetch(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	drv.Install(t.Context())
+	mustPanic(t, "no previous release", func() { drv.Deploy(t.Context()) })
+	mustPanic(t, "no previous release", func() { drv.Rollback(t.Context()) })
+}
+
+func TestHelmProgrammingErrors(t *testing.T) {
 	drv, _ := newDriver(t, helmConfig(), scripted())
 	mustPanic(t, "Install", func() { drv.Install(context.Background()) })
 	if err := drv.Fetch(context.Background()); err != nil {
