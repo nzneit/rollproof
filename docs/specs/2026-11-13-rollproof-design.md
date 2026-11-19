@@ -56,7 +56,8 @@ and the corrections of twelve more. Ten were beliefs that nobody had tried. A ru
 four: the three that the rulings rest on, and one of section 14, point 21 (section 16). The others
 are left to later steps. A cold re-read of that text the same day, by an AI agent on an Opus
 model, found 25 places where it disagreed with itself, its sources or the built code; all 25 fixes
-were adopted, the exception for a too-early `t` written during the drain among them (section 6;
+were adopted, the exception for a too-early `t` written during the drain among them, which the
+maintainer then widened to every fault of a failed check's line written there (section 6;
 section 14, point 29).
 
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
@@ -493,10 +494,11 @@ A fault of a line is placed in the window that holds the moment the line was wri
 says how it is weighed against a failure in the same window. A fault of a line that was written
 before the probe's first observation has no window, and makes the run not verified (rule 9 of
 section 10). A fault of the probe after the last window has ended, such as a bad line written
-during the drain, has no window either. It changes no verdict and is a warning. A failed check
-written then whose `t` is earlier than the moment the tool asked for the probe's pod, by more than
-the bound of the clock check, is the one exception: its fault belongs to the last window
-(section 14, point 29).
+during the drain, has no window either. It changes no verdict and is a warning. A whole line
+written then whose top-level `ok` is `false`, and that is a fault in any other way, is the
+exception: its fault belongs to the last window, because a failure must not vanish because of the
+way it was printed. A `t` earlier than the moment the tool asked for the probe's pod, by more than
+the bound of the clock check, is one such fault (section 14, point 29).
 
 **Time.** The default time of a line is the timestamp the node's container runtime puts on it in
 the pod's log. The runtime takes it from its own clock when it has read the whole line from the
@@ -2208,8 +2210,9 @@ A line leaves the list when a fixture shows the tool catching what it names.
   check and by less, assignment to windows, a failure that crosses the start of a transition,
   silence at a window's start and at its end, the start timeout, a probe that exits before its
   first observation, what counts during the drain, a fault of the probe there, and a failed
-  check written there whose `t` is earlier than the probe's pod by more than the bound of the
-  clock check. And the install window: observations that are counted and not judged, one whose
+  check written there whose line is a fault: by a `t` earlier than the probe's pod by more than
+  the bound of the clock check, and in another way, such as a `t` later than its line. And the
+  install window: observations that are counted and not judged, one whose
   time is before it, a failure that began there and was written in the steady window, and
   silence and a fault of the probe there.
 - The built-in probe against a server in the same process: the rate held while the handler is
@@ -2875,11 +2878,15 @@ before the plan for step 4. The build order of section 13 says which step proves
       maintainer chose that a `t` earlier than the moment the tool asked for the probe's pod, by
       more than the bound of the clock check, is a fault of the line, for every probe (section 6).
       It does not reverse point 25: every check that the probe's start met began after the tool
-      asked for the pod. A failed check with such a `t` that is written during the drain is the
-      one fault of the probe after the last window that is not a warning: it belongs to the last
-      window, and section 6's rule for such faults, which the first plan's decision 8 set, gives
-      way for that case. What lost: **a sentence of warning only**, which would have named the
-      case and left such a failure out of every judged window.
+      asked for the pod. A failed check written during the drain whose line is a fault, by such
+      a `t` or in any other way, is not a warning, as the probe's other faults after the last
+      window are: it belongs to the last window, and section 6's rule for such faults, which the
+      first plan's decision 8 set, gives way for that case. The exception first named such a `t`
+      alone; the maintainer widened it the same day, after a re-read found that a failed check
+      written then with another fault of its line still counted nowhere. What lost: **a sentence
+      of warning only**, which would have named the case and left such a failure out of every
+      judged window; and **the exception for such a `t` alone**, which let a failure written
+      during the drain vanish because of the way it was printed.
 
 ## 15. Not in the first release
 
