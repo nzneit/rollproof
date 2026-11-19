@@ -73,8 +73,9 @@ func TestStartRegistryCountsItsWaitFromTheContainersStart(t *testing.T) {
 	if !strings.Contains(err.Error(), "the registry did not answer") {
 		t.Errorf("error %q, want it to say that the registry did not answer", err)
 	}
-	if took < 700*time.Millisecond {
-		t.Errorf("startRegistry took %v, want at least 700ms", took)
+	if took < 700*time.Millisecond || took >= 400*time.Millisecond+limit+registryPoll+time.Second {
+		t.Errorf("startRegistry took %v, want at least 700ms and less than %v",
+			took, 400*time.Millisecond+limit+registryPoll+time.Second)
 	}
 }
 

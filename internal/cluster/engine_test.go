@@ -18,7 +18,7 @@ func fakeEngine(t *testing.T, body string) (script, log string) {
 	dir := t.TempDir()
 	script, log = filepath.Join(dir, "engine"), filepath.Join(dir, "log")
 	text := "#!/bin/sh\n" +
-		"echo \"$*\" >> " + log + "\n" +
+		"echo \"$*\" >> \"" + log + "\"\n" +
 		body +
 		"exit 0\n"
 	if err := os.WriteFile(script, []byte(text), 0o700); err != nil {
@@ -66,6 +66,9 @@ func TestPullIfMissingPullsAMissingImage(t *testing.T) {
 	calls := engineCalls(t, log)
 	if want := "pull " + image; calls[len(calls)-1] != want {
 		t.Errorf("the engine's last call %q, want %q; calls %q", calls[len(calls)-1], want, calls)
+	}
+	if want := "inspect --type=image " + image; !hasCall(calls[:len(calls)-1], want) {
+		t.Errorf("the engine's calls %q, want the call %q before the pull", calls, want)
 	}
 }
 

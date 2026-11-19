@@ -176,6 +176,7 @@ func TestCreateFailureTexts(t *testing.T) {
 		creates         []error // what each attempt of kind's Create returns, in order
 		deletes         []error // what each call of kind's Delete returns, in order: step 1's first
 		pull            error   // what the pull of the node image returns
+		pullAfterRunDir bool    // the pull of the node image checks that the run's folder exists when it is called
 		wantImage       string  // what the pull of the node image is given, when not empty
 		want            func(runDir string) string
 		joined          error // an error that the returned error holds beside the Condition, for the log
@@ -209,10 +210,11 @@ func TestCreateFailureTexts(t *testing.T) {
 			},
 		},
 		{
-			name:      "the node image's pull fails",
-			pull:      pullFailed,
-			deletes:   []error{nil, nil},
-			wantImage: DefaultNodeImage(),
+			name:            "the node image's pull fails",
+			pull:            pullFailed,
+			pullAfterRunDir: true,
+			deletes:         []error{nil, nil},
+			wantImage:       DefaultNodeImage(),
 			want: func(string) string {
 				return "pull the node image: " + pullFailed.Error()
 			},
@@ -260,6 +262,11 @@ func TestCreateFailureTexts(t *testing.T) {
 			var pulledLimit time.Duration
 			pullImage = func(_ Engine, _ context.Context, image string, limit time.Duration) error {
 				pulledImage, pulledLimit = image, limit
+				if tc.pullAfterRunDir {
+					if _, err := os.Stat(runDir); err != nil {
+						t.Errorf("the pull of the node image was asked for before the run's folder was made: %v", err)
+					}
+				}
 				return tc.pull
 			}
 			if tc.setup != nil {
