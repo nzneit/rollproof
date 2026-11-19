@@ -23,9 +23,6 @@ func (c *Config) NotBuilt() []string {
 		keys = append(keys, "probe.custom")
 	}
 	for name, im := range c.Images {
-		if im.Archive != "" {
-			keys = append(keys, "images."+name+".archive")
-		}
 		if im.As != "" {
 			keys = append(keys, "images."+name+".as")
 		}

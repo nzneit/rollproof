@@ -102,7 +102,6 @@ func TestOwnImage(t *testing.T) {
 // the missing binary would otherwise give cluster-failed.
 func TestStoreRefusesWhatIsNotBuilt(t *testing.T) {
 	for _, img := range []config.Image{
-		{Archive: "/tmp/orders.tar"},
 		{Local: "orders:candidate", As: "registry.example/team/orders"},
 	} {
 		_, err := Store(context.Background(), &cluster.Cluster{}, "/does/not/exist",

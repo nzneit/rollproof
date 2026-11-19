@@ -8,9 +8,7 @@ package images
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,23 +83,6 @@ func tinyProgram(t *testing.T) (dir, bin string) {
 	return dir, bin
 }
 
-// tags returns the tags the run's registry lists for repository.
-func tags(t *testing.T, push, repository string) []string {
-	t.Helper()
-	resp, err := http.Get("http://" + push + "/v2/" + repository + "/tags/list")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var body struct{ Tags []string }
-	if resp.StatusCode == http.StatusOK {
-		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return body.Tags
-}
-
 func TestStoreOwnAndLocal(t *testing.T) {
 	ctx := context.Background()
 	c := testCluster(t)
@@ -174,6 +155,44 @@ func TestStoreOwnAndLocal(t *testing.T) {
 			t.Fatalf("the pod is %s after 2 minutes: %+v", p.Status.Phase, p.Status.ContainerStatuses)
 		}
 		time.Sleep(time.Second)
+	}
+}
+
+func TestStoreArchiveIntoEveryNode(t *testing.T) {
+	ctx := context.Background()
+	c := testCluster(t)
+	dir, bin := tinyProgram(t)
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM scratch\nCOPY app /app\nENTRYPOINT [\"/app\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(c.Engine.Binary, "build", "-t", "rollproof-test-img:archive", dir).CombinedOutput(); err != nil {
+		t.Fatalf("build the image: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		if out, err := exec.Command(c.Engine.Binary, "rmi", "rollproof-test-img:archive").CombinedOutput(); err != nil {
+			t.Errorf("remove the local image rollproof-test-img:archive: %v\n%s", err, out)
+		}
+	})
+	file := filepath.Join(t.TempDir(), "app.tar")
+	if out, err := exec.Command(c.Engine.Binary, "save", "-o", file, "rollproof-test-img:archive").CombinedOutput(); err != nil {
+		t.Fatalf("save the image: %v\n%s", err, out)
+	}
+
+	s, err := Store(ctx, c, bin, map[string]config.Image{"app": {Archive: file}}, 2*time.Minute)
+	if err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	app := s.Images["app"]
+	if app.Repository != "rollproof.test/app" || !strings.HasPrefix(app.Digest, "sha256:") {
+		t.Errorf("app stored as %+v", app)
+	}
+	for _, n := range c.Nodes() {
+		if out, err := c.Exec(ctx, n, "crictl", "inspecti", app.Ref()); err != nil {
+			t.Errorf("%s does not hold %s: %v\n%s", n, app.Ref(), err, out)
+		}
+	}
+	if got := tags(t, c.PushRegistry, "app"); len(got) != 0 {
+		t.Errorf("the run's registry has tags %v for app", got)
 	}
 }
 

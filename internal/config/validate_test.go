@@ -1,11 +1,20 @@
 package config
 
 import (
+	"archive/tar"
+	"bytes"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/random"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
 )
 
 const previousBlock = "    previous:\n      chart: oci://registry.example/charts/orders\n      version: \"1.4.2\"\n"
@@ -170,8 +179,9 @@ func TestChartPaths(t *testing.T) {
 }
 
 func TestPathsAreRelativeToTheFile(t *testing.T) {
-	dir, real := project(t, "chart")
+	dir, real := project(t, "chart", "images")
 	t.Chdir(t.TempDir())
+	writeArchive(t, filepath.Join(dir, "images", "orders.tar"), 1)
 	text := variant(t, base, candidateBlock, "    candidate:\n      chart: ./chart\n      values:\n        - test/values-kind.yaml\n        - { replicas: 2 }\n")
 	text = variant(t, text, "deploy:\n", "registries:\n  - host: registry.example\n    ca: certs/corp-ca.pem\n"+
 		"images:\n  orders:\n    archive: images/orders.tar\nsetup:\n  - [kubectl, apply, -f, test/prerequisites.yaml]\ndeploy:\n")
@@ -186,7 +196,6 @@ func TestPathsAreRelativeToTheFile(t *testing.T) {
 	if got, want := c.Registries[0].CA, filepath.Join(real, "certs", "corp-ca.pem"); got != want {
 		t.Errorf("ca %q, want %q", got, want)
 	}
-	// Task 22's later plan reads the archive; this build only makes its path absolute.
 	if got, want := c.Images["orders"].Archive, filepath.Join(real, "images", "orders.tar"); got != want {
 		t.Errorf("archive %q, want %q", got, want)
 	}
@@ -220,5 +229,118 @@ func TestPathsThroughALink(t *testing.T) {
 	}
 	if got, want := c.Deploy.Helm.Candidate.Chart, filepath.Join(real, "chart"); got != want {
 		t.Errorf("chart %q, want %q", got, want)
+	}
+}
+
+// writeArchive writes at path a tar such as docker save writes, holding n small images.
+func writeArchive(t *testing.T, path string, n int) {
+	t.Helper()
+	refs := map[name.Reference]v1.Image{}
+	for i := range n {
+		img, err := random.Image(64, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref, err := name.ParseReference(fmt.Sprintf("rollproof.test/img:%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		refs[ref] = img
+	}
+	if err := tarball.MultiRefWriteToFile(path, refs); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeTar writes at path a tar that holds the given files, in the order of their names.
+func writeTar(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+	var b bytes.Buffer
+	tw := tar.NewWriter(&b)
+	for _, n := range slices.Sorted(maps.Keys(files)) {
+		if err := tw.WriteHeader(&tar.Header{Name: n, Mode: 0o644, Size: int64(len(files[n]))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(files[n])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, b.String())
+}
+
+func writeFile(t *testing.T, path, text string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mkdir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// archiveConfig is base with one image entry whose archive is the file S3CRET-VALUE.tar.
+func archiveConfig(t *testing.T) string {
+	return variant(t, base, "deploy:\n", "images:\n  orders:\n    archive: S3CRET-VALUE.tar\ndeploy:\n")
+}
+
+// Review Focus 3.
+func TestArchiveThatIsNotAnImage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		make func(t *testing.T, path string)
+	}{
+		{"a folder", func(t *testing.T, p string) { mkdir(t, p) }},
+		{"an empty file", func(t *testing.T, p string) { writeFile(t, p, "") }},
+		{"not a tar", func(t *testing.T, p string) { writeFile(t, p, "not a tar S3CRET-VALUE\n") }},
+		{"an OCI layout with no manifest.json", func(t *testing.T, p string) {
+			writeTar(t, p, map[string]string{"oci-layout": `{"imageLayoutVersion":"1.0.0"}`, "index.json": `{"schemaVersion":2,"manifests":[]}`})
+		}},
+		{"a manifest.json that lists no image", func(t *testing.T, p string) {
+			writeTar(t, p, map[string]string{"manifest.json": "[]"})
+		}},
+		{"a manifest.json whose config is not in the tar", func(t *testing.T, p string) {
+			writeTar(t, p, map[string]string{"manifest.json": `[{"Config":"blobs/sha256/absent","RepoTags":[],"Layers":[]}]`})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.make(t, filepath.Join(dir, "S3CRET-VALUE.tar"))
+			_, err := loadWith(t, dir, archiveConfig(t), noEnv)
+			rejected(t, err, "images.orders.archive (line ")
+			rejected(t, err, "): is not an image archive the tool can read")
+		})
+	}
+}
+
+func TestArchiveWithTwoImages(t *testing.T) {
+	dir := t.TempDir()
+	writeArchive(t, filepath.Join(dir, "S3CRET-VALUE.tar"), 2)
+	_, err := loadWith(t, dir, archiveConfig(t), noEnv)
+	rejected(t, err, "images.orders.archive (line ")
+	rejected(t, err, "): holds more than one image")
+}
+
+func TestArchiveThatDoesNotExist(t *testing.T) {
+	_, err := loadWith(t, t.TempDir(), archiveConfig(t), noEnv)
+	rejected(t, err, "images.orders.archive (line ")
+	rejected(t, err, "): does not exist")
+}
+
+func TestArchiveWithOneImage(t *testing.T) {
+	dir, real := project(t)
+	writeArchive(t, filepath.Join(dir, "S3CRET-VALUE.tar"), 1)
+	c, err := loadWith(t, dir, archiveConfig(t), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := c.Images["orders"].Archive, filepath.Join(real, "S3CRET-VALUE.tar"); got != want {
+		t.Errorf("archive %q, want %q", got, want)
 	}
 }

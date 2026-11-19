@@ -10,6 +10,8 @@ import (
 )
 
 func TestNotBuilt(t *testing.T) {
+	dir := t.TempDir()
+	writeArchive(t, filepath.Join(dir, "orders.tar"), 1)
 	for _, tc := range []struct {
 		name, old, new string
 		want           []string
@@ -20,7 +22,8 @@ func TestNotBuilt(t *testing.T) {
 		{"the commands driver", helmBlock, commandsBlock("    install: [kubectl, apply, -k, overlays/previous]\n" +
 			"    deploy: [kubectl, apply, -k, overlays/candidate]\n    rollback: [kubectl, apply, -k, overlays/previous]\n"), []string{"deploy.commands"}},
 		{"a custom probe", httpProbe, customProbe(""), []string{"probe.custom"}},
-		{"an image from an archive", "deploy:\n", "images:\n  orders:\n    archive: orders.tar\ndeploy:\n", []string{"images.orders.archive"}},
+		{"an image from an archive", "deploy:\n", "images:\n  orders:\n    archive: orders.tar\ndeploy:\n", nil},
+		{"an image from an archive with as", "deploy:\n", "images:\n  orders:\n    archive: orders.tar\n    as: registry.example/team/orders\ndeploy:\n", []string{"images.orders.as"}},
 		{"an image with as", "deploy:\n", "images:\n  orders:\n    local: orders:candidate\n    as: registry.example/team/orders\ndeploy:\n", []string{"images.orders.as"}},
 		{"a local image", "deploy:\n", "images:\n  orders:\n    local: orders:candidate\ndeploy:\n", nil},
 		{"no previous release", previousBlock, "", []string{"deploy.helm.previous"}},
@@ -28,7 +31,7 @@ func TestNotBuilt(t *testing.T) {
 			"images:\n  orders:\n    local: orders:candidate\n    as: registry.example/team/orders\ndeploy:\n", []string{"images.orders.as", "registries", "setup"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c, err := loadText(t, variant(t, base, tc.old, tc.new))
+			c, err := loadWith(t, dir, variant(t, base, tc.old, tc.new), noEnv)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -29,14 +29,14 @@ type Stored struct {
 }
 
 // Store packages the tool's binary at the given path as the probe's image and has the
-// control-plane node pull it; stores each local image and has every node pull it. Nothing is
-// stored under a tag. timeout bounds each node's pull. An error is a Condition with
-// ClusterFailed. An entry with archive or as is an InternalError.
+// control-plane node pull it; stores each entry of images, from the engine or from its archive
+// file, by digest, and has every node pull it. Nothing is stored under a tag. timeout bounds each
+// node's pull. An error is a Condition with ClusterFailed. An entry with as is an InternalError.
 func Store(ctx context.Context, c *cluster.Cluster, binary string, images map[string]config.Image, timeout time.Duration) (Stored, error) {
 	names := slices.Sorted(maps.Keys(images))
 	for _, n := range names {
-		if im := images[n]; im.Archive != "" || im.As != "" {
-			return Stored{}, verdict.Condition{Code: verdict.InternalError, Text: "images." + n + ": archive and as are not built yet"}
+		if im := images[n]; im.As != "" {
+			return Stored{}, verdict.Condition{Code: verdict.InternalError, Text: "images." + n + ": as is not built yet"}
 		}
 	}
 
@@ -60,7 +60,13 @@ func Store(ctx context.Context, c *cluster.Cluster, binary string, images map[st
 	}
 
 	for _, n := range names {
-		ref, err := storeLocal(ctx, c, n, images[n].Local)
+		var ref config.ImageRef
+		var err error
+		if im := images[n]; im.Archive != "" {
+			ref, err = storeArchive(ctx, c, n, im.Archive, "the archive")
+		} else {
+			ref, err = storeLocal(ctx, c, n, images[n].Local)
+		}
 		if err != nil {
 			return Stored{}, err
 		}
