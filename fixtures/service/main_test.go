@@ -107,6 +107,17 @@ func TestWorkFailsWhenAsked(t *testing.T) {
 	}
 }
 
+// GET /version answers the built-in version and a line end, also when FAIL_WORK is set.
+func TestVersion(t *testing.T) {
+	version = "v-test"
+	ready, _, done := launch(t, map[string]string{"ADDR": "127.0.0.1:0", "SHUTDOWN": "drain-now", "FAIL_WORK": "true"})
+	addr := listening(t, ready, done)
+	code, body, err := get(addr, "/version")
+	if err != nil || code != 200 || body != "v-test\n" {
+		t.Errorf("/version: %d %q, %v; want 200 %q", code, body, err, "v-test\n")
+	}
+}
+
 func TestStartDelay(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

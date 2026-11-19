@@ -4,6 +4,7 @@
 //
 //	GET /work?ms=N  sleeps N ms, answers 200 "<pod> <version>"
 //	GET /readyz     answers 200 (the server only listens once it can serve)
+//	GET /version    answers 200 "<version>", whatever FAIL_WORK says
 //
 // START_DELAY       time after process start before it listens (warm-up)
 // SHUTDOWN          exit | drain-now | helper
@@ -91,6 +92,9 @@ func serve(ctx context.Context, env func(string) string, ready chan<- string) er
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
+	})
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, version)
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
