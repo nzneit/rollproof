@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,8 +61,10 @@ type PodOptions struct {
 	Image               string
 	Args                []string
 	Drain, StartTimeout time.Duration
-	Raw                 io.Writer
-	Now                 func() time.Time
+	// Raw receives every line of the probe's pod log, as read, with the runtime's timestamp. It
+	// must not be nil: NewPod panics when it is.
+	Raw io.Writer
+	Now func() time.Time
 
 	// Command is the probe container's command, as a pod's container means it: it replaces
 	// the image's entrypoint. Nil keeps the entrypoint, as the built-in probe does.
@@ -107,8 +110,13 @@ const (
 
 var _ Probe = (*Pod)(nil)
 
-// NewPod returns a probe that runs as a pod on the control-plane node. It implements Probe.
+// NewPod returns a probe that runs as a pod on the control-plane node. It implements Probe. A
+// PodOptions.Raw that is nil is refused at once, where the caller can act on it, rather than by a
+// panic in the follower on the probe's first line.
 func NewPod(o PodOptions) *Pod {
+	if o.Raw == nil {
+		panic("probe.NewPod: PodOptions.Raw must not be nil")
+	}
 	p := &Pod{o: o, events: make(chan Event, 1024)}
 	p.open = p.apiLog
 	return p
@@ -542,7 +550,8 @@ func (p *Pod) Stop(ctx context.Context) (Facts, error) {
 // halt is the stop of a run whose follower and watcher were started: it ends the watcher,
 // writes the evidence, deletes the pod with the drain as grace, reads the log until it ends or
 // the drain and stopMargin pass, closes Events, keeps the Facts and the error. Each call to the
-// API waits at most stopMargin.
+// API waits at most stopMargin; the evidence's reads share one stopMargin between them, so a pod
+// with many containers does not lengthen the stop.
 //
 // It serves Stop, a Start that failed other than by its context, and a Stop after a Start that
 // panicked; ending the watcher again after Stop ended it is harmless. The probe stopped when
@@ -621,16 +630,18 @@ func (p *Pod) halt(ctx context.Context, r *probeRun) (Facts, error) {
 // pod is deleted: the pod as the API gives it to probe-pod.json, and the log of every container
 // other than probe to probe-pod/<container>.log. A part that cannot be read holds the reason in
 // its place; a file that Evidence cannot open is skipped, as the probe has no warning for it.
-// Each read waits at most stopMargin. Nil writes nothing. A log cut while it is copied keeps what
-// was read.
+// Every read is made under one context of stopMargin, so the write does not grow with the number
+// of containers: a read that the bound cuts holds its reason, and the reads after it each hold
+// theirs. Nil writes nothing. A log cut while it is copied keeps what was read, and then says why
+// it ended.
 func (p *Pod) writeEvidence(ctx context.Context) {
 	open := p.o.Evidence
 	if open == nil {
 		return
 	}
 	readCtx, cancelRead := context.WithTimeout(ctx, stopMargin)
+	defer cancelRead()
 	pod, err := p.pods().Get(readCtx, "probe", metav1.GetOptions{})
-	cancelRead()
 	if err != nil {
 		if w, openErr := open("probe-pod.json"); openErr == nil {
 			io.WriteString(w, "rollproof: the pod could not be read: "+err.Error())
@@ -647,32 +658,52 @@ func (p *Pod) writeEvidence(ctx context.Context) {
 	for _, containers := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
 		for _, c := range containers {
 			if c.Name != "probe" {
-				p.writeContainerLog(ctx, open, c.Name)
+				p.writeContainerLog(readCtx, open, c.Name)
 			}
 		}
 	}
 }
 
 // writeContainerLog writes the log of container to probe-pod/<container>.log, read once and not
-// followed. A log that cannot be read leaves the reason in its place; a file that cannot be
-// opened is skipped. The read waits at most stopMargin.
+// followed, under ctx. A log that cannot be opened leaves the reason in its place; a copy that
+// fails keeps what was read, and then says on a line of its own why it ended, with the error's
+// line breaks as spaces. A file that cannot be opened is skipped.
 func (p *Pod) writeContainerLog(ctx context.Context, open func(string) (io.WriteCloser, error), container string) {
 	w, err := open("probe-pod/" + container + ".log")
 	if err != nil {
 		return
 	}
-	readCtx, cancelRead := context.WithTimeout(ctx, stopMargin)
-	rc, err := p.pods().GetLogs("probe", &corev1.PodLogOptions{Container: container}).Stream(readCtx)
+	rc, err := p.pods().GetLogs("probe", &corev1.PodLogOptions{Container: container}).Stream(ctx)
 	if err != nil {
-		cancelRead()
 		io.WriteString(w, "rollproof: the log could not be read: "+err.Error())
 		w.Close()
 		return
 	}
-	io.Copy(w, rc)
+	tail := &lastByteWriter{w: w, last: '\n'}
+	_, copyErr := io.Copy(tail, rc)
 	rc.Close()
-	cancelRead()
+	if copyErr != nil {
+		if tail.last != '\n' {
+			io.WriteString(w, "\n")
+		}
+		io.WriteString(w, "rollproof: the log could not be read: "+
+			strings.ReplaceAll(copyErr.Error(), "\n", " ")+"\n")
+	}
 	w.Close()
+}
+
+// lastByteWriter passes what it is given to w and remembers the last byte that went in.
+type lastByteWriter struct {
+	w    io.Writer
+	last byte
+}
+
+func (l *lastByteWriter) Write(b []byte) (int, error) {
+	n, err := l.w.Write(b)
+	if n > 0 {
+		l.last = b[n-1]
+	}
+	return n, err
 }
 
 // lastExitCheck reads the pod once, after the watcher has ended, and puts the fault of an exit

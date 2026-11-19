@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"net/http"
 	"os"
 	goruntime "runtime"
 	"slices"
@@ -25,7 +26,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	restclient "k8s.io/client-go/rest"
+	fakerest "k8s.io/client-go/rest/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
 
@@ -202,6 +206,20 @@ func newProbe(t *testing.T, l *fakeLog, status corev1.PodStatus, drain, startTim
 	s.pod.open = l.open
 	t.Cleanup(func() { s.pod.Stop(context.Background()) }) // a test that fails leaves no probe running
 	return s
+}
+
+// NewPod refuses a probe with no raw writer at once, rather than panicking in the follower on
+// the probe's first line.
+func TestNewPodNeedsRaw(t *testing.T) {
+	var got any
+	func() {
+		defer func() { got = recover() }()
+		NewPod(PodOptions{})
+	}()
+	text, ok := got.(string)
+	if !ok || !strings.Contains(text, "PodOptions.Raw") {
+		t.Errorf("NewPod with no Raw panicked with %v, want a message naming PodOptions.Raw", got)
+	}
 }
 
 // setStatus replaces the status of the probe's pod.
@@ -977,9 +995,7 @@ func TestStartRefusedPod(t *testing.T) {
 			if time.Since(began) > 2*time.Second {
 				t.Error("Start waited for StartTimeout")
 			}
-			if _, open := <-s.pod.Events(); open {
-				t.Error("Events is still open")
-			}
+			closedWithin(t, s.pod.Events(), 2*time.Second)
 			if facts, _ := s.pod.Stop(context.Background()); !facts.StoppedWhenAsked {
 				t.Error("a probe that never ran did not stop when asked")
 			}
@@ -1107,6 +1123,123 @@ func TestRefusedPodWritesNoEvidence(t *testing.T) {
 		t.Errorf("evidence %v, want none for a pod that never existed", ev.files)
 	}
 }
+
+// The pod's own read failing is the reason in probe-pod.json, and no container log is read.
+func TestPodEvidenceWhenThePodCannotBeRead(t *testing.T) {
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	withSidecars(s)
+	var ev evidenceFiles
+	s.pod.o.Evidence = ev.open
+	s.endsWhenDeleted(t, logLine(logAt(400), `{"ok":true}`))
+	s.clock.Set(logAt(700))
+	if _, err := s.pod.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s.client.PrependReactor("get", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.GetSubresource() == "log" {
+			return false, nil, nil
+		}
+		return true, nil, errors.New("the API server is not answering")
+	})
+	if _, err := s.pod.Stop(context.Background()); err != nil {
+		t.Errorf("Stop = %v; a pod that cannot be read is no error of the stop", err)
+	}
+	got, ok := ev.get("probe-pod.json")
+	if !ok || !strings.HasPrefix(got, "rollproof: the pod could not be read: ") ||
+		!strings.Contains(got, "the API server is not answering") {
+		t.Errorf("probe-pod.json = %q, %v; want the reason", got, ok)
+	}
+	for name := range ev.files {
+		if strings.HasPrefix(name, "probe-pod/") {
+			t.Errorf("%s was written although the pod could not be read", name)
+		}
+	}
+}
+
+// A container's log that fails after some text keeps what was read, and then says why it ended:
+// on a new line, with the error's line breaks as spaces.
+func TestContainerLogCutWhileCopied(t *testing.T) {
+	for _, c := range []struct {
+		name, text string
+		err        error
+		want       string
+	}{
+		{"no line break yet", "some text", errors.New("the stream broke"),
+			"some text\nrollproof: the log could not be read: the stream broke\n"},
+		{"after a line break", "some text\n", errors.New("the stream\nbroke"),
+			"some text\nrollproof: the log could not be read: the stream broke\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+			withSidecars(s)
+			var ev evidenceFiles
+			s.pod.o.Evidence = ev.open
+			s.pod.o.Client = cutLogClient{Interface: s.client, container: "istio-proxy", text: c.text, err: c.err}
+			s.endsWhenDeleted(t, logLine(logAt(400), `{"ok":true}`))
+			s.clock.Set(logAt(700))
+			if _, err := s.pod.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.pod.Stop(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := ev.get("probe-pod/istio-proxy.log"); got != c.want {
+				t.Errorf("probe-pod/istio-proxy.log = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// cutLogClient is a client whose log of one container gives text and then fails, as a log cut
+// while it is copied does. The fake clientset serves a whole log or none.
+type cutLogClient struct {
+	kubernetes.Interface
+	container, text string
+	err             error
+}
+
+func (c cutLogClient) CoreV1() typedcorev1.CoreV1Interface {
+	return cutLogCore{c.Interface.CoreV1(), c.container, c.text, c.err}
+}
+
+type cutLogCore struct {
+	typedcorev1.CoreV1Interface
+	container, text string
+	err             error
+}
+
+func (c cutLogCore) Pods(namespace string) typedcorev1.PodInterface {
+	return cutLogPods{c.CoreV1Interface.Pods(namespace), c.container, c.text, c.err}
+}
+
+type cutLogPods struct {
+	typedcorev1.PodInterface
+	container, text string
+	err             error
+}
+
+func (p cutLogPods) GetLogs(name string, opts *corev1.PodLogOptions) *restclient.Request {
+	if opts.Container != p.container {
+		return p.PodInterface.GetLogs(name, opts)
+	}
+	client := &fakerest.RESTClient{
+		Client: fakerest.CreateHTTPClient(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(io.MultiReader(strings.NewReader(p.text), cutReader{p.err})),
+			}, nil
+		}),
+		NegotiatedSerializer: scheme.Codecs.WithoutConversion(),
+		GroupVersion:         corev1.SchemeGroupVersion,
+		VersionedAPIPath:     "/api/v1/namespaces/" + cluster.ProbeNamespace + "/pods/" + name + "/log",
+	}
+	return client.Request()
+}
+
+// cutReader is a stream's end that fails.
+type cutReader struct{ err error }
+
+func (r cutReader) Read([]byte) (int, error) { return 0, r.err }
 
 // closedWithin reads events until it is closed, and fails the test when that takes longer than d.
 func closedWithin(t *testing.T, events <-chan Event, d time.Duration) {

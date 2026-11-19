@@ -271,20 +271,14 @@ func TestCustomPodOnACluster(t *testing.T) {
 	}}}
 	p2 := NewPod(o2)
 	t.Cleanup(func() { p2.Stop(context.Background()) })
-	done := make(chan error, 1)
-	go func() {
-		_, err := p2.Start(ctx)
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		got := condition(err)
-		if got.Code != verdict.ProbeNotStarted || !strings.HasPrefix(got.Text, "the API server refused the probe's pod: ") ||
-			!strings.Contains(got.Text, "may not have more than one field specified at a time") {
-			t.Errorf("Start = %v, want probe-not-started with the API server's text", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("Start did not return within 10 s")
+	// Start's own context bounds it, and the test waits for it before the cleanup's Stop.
+	startCtx, cancelStart := context.WithTimeout(ctx, 10*time.Second)
+	_, err = p2.Start(startCtx)
+	cancelStart()
+	got := condition(err)
+	if got.Code != verdict.ProbeNotStarted || !strings.HasPrefix(got.Text, "the API server refused the probe's pod: ") ||
+		!strings.Contains(got.Text, "may not have more than one field specified at a time") {
+		t.Errorf("Start = %v, want probe-not-started with the API server's text", err)
 	}
 
 	// 3. A Secret that does not exist keeps the container waiting; the text names its reason and
@@ -296,7 +290,7 @@ func TestCustomPodOnACluster(t *testing.T) {
 	p3 := NewPod(o3)
 	t.Cleanup(func() { p3.Stop(context.Background()) })
 	_, err = p3.Start(ctx)
-	got := condition(err)
+	got = condition(err)
 	if got.Code != verdict.ProbeNotStarted || !strings.Contains(got.Text, "CreateContainerConfigError") ||
 		!strings.Contains(got.Text, `secret "probe-token" not found`) {
 		t.Fatalf("Start = %v, want probe-not-started that names the missing Secret", err)
