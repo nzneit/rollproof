@@ -67,6 +67,23 @@ func installCondition(r deploy.Result) (verdict.Condition, bool) {
 	return verdict.Condition{Code: code, Text: subject + " " + end}, true
 }
 
+// setupCondition returns the condition a setup Result gives, if any:
+// setup-failed when the command exited non-zero, could not be started or was
+// stopped at limits.timeout; internal-error when it gave an answer the tool
+// could not read or ended in a way this build does not know. A success and a
+// stop by a signal give none: run reports the signal as interrupted.
+func setupCondition(r deploy.Result) (verdict.Condition, bool) {
+	end, k := classify(r)
+	if k == noFailure {
+		return verdict.Condition{}, false
+	}
+	code := verdict.SetupFailed
+	if k == unreadable || k == unknown {
+		code = verdict.InternalError
+	}
+	return verdict.Condition{Code: code, Text: "a setup command " + end}, true
+}
+
 // commandCondition returns the condition a transition's command gives, if any:
 // command-failed when it exited non-zero or could not be started;
 // transition-stalled, with a text that says the tool stopped the command, when

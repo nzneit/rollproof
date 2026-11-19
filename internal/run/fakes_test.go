@@ -136,6 +136,7 @@ type fakeCluster struct {
 	w                                                       *world
 	storeErr, deployerErr, watcherErr, targetErr, deleteErr error
 	images                                                  map[string]config.ImageRef
+	setup                                                   deploy.Result
 	target                                                  probe.Target
 	removed                                                 []string
 	kept                                                    string
@@ -157,6 +158,17 @@ func (c *fakeCluster) Deployer(cfg *config.Config) (deploy.Deployer, []string, e
 		return nil, c.removed, c.deployerErr
 	}
 	return c.w.deployer, c.removed, nil
+}
+
+// Setup records "setup", runs its hook and gives the scripted result, or a
+// success when none was scripted.
+func (c *fakeCluster) Setup(ctx context.Context) deploy.Result {
+	c.w.calls.add("setup")
+	c.w.hook("setup")
+	if c.setup.Ending == "" {
+		return deploy.Result{Name: "setup", Ending: deploy.Succeeded}
+	}
+	return c.setup
 }
 
 // Watcher records "watcher", runs its hook and gives the fake watcher.
@@ -602,7 +614,7 @@ func passes(from, to int) []probe.Event {
 	var events []probe.Event
 	for s := from; s <= to; s++ {
 		at := t0.Add(time.Duration(s) * time.Second)
-		events = append(events, probe.Event{Obs: &verdict.Observation{Written: at, T: at, OK: true, N: 200, Ms: 30, Lag: 2}})
+		events = append(events, probe.Event{Obs: &verdict.Observation{Written: at, T: at, OK: true, N: 200, Ms: 30, HasMs: true, Lag: 2, HasLag: true}})
 	}
 	return events
 }
@@ -611,5 +623,5 @@ func passes(from, to int) []probe.Event {
 // t0+written.
 func failureAt(at, written time.Duration) probe.Event {
 	return probe.Event{Obs: &verdict.Observation{Written: t0.Add(written), T: t0.Add(at), OK: false, N: 1,
-		Class: "refused", Ms: 1}}
+		Class: "refused", Ms: 1, HasMs: true}}
 }

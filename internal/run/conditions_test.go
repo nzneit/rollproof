@@ -50,6 +50,48 @@ func TestInstallCondition(t *testing.T) {
 	}
 }
 
+func TestSetupCondition(t *testing.T) {
+	rows := []struct {
+		name string
+		in   deploy.Result
+		ok   bool
+		code verdict.Code
+		text string
+	}{
+		{"succeeded", deploy.Result{Name: "setup", Ending: deploy.Succeeded}, false, "", ""},
+		{"stopped by a signal", deploy.Result{Name: "setup", Ending: deploy.StoppedBySignal, ExitCode: -1}, false, "", ""},
+		{"exited non-zero", deploy.Result{Name: "setup", Ending: deploy.ExitedNonZero, ExitCode: 3},
+			true, verdict.SetupFailed, "a setup command exited with code 3"},
+		{"killed by a signal", deploy.Result{Name: "setup", Ending: deploy.ExitedNonZero, ExitCode: -1},
+			true, verdict.SetupFailed, "a setup command was killed by a signal"},
+		{"not started", deploy.Result{Name: "setup", Ending: deploy.NotStarted, ExitCode: -1},
+			true, verdict.SetupFailed, "a setup command could not be started"},
+		{"stopped at the limit", deploy.Result{Name: "setup", Ending: deploy.StoppedAtLimit, ExitCode: -1},
+			true, verdict.SetupFailed, "a setup command was still running at limits.timeout and the tool stopped it"},
+		{"an answer the tool could not read", deploy.Result{Name: "setup", Ending: deploy.ExitedNonZero, ExitCode: 0},
+			true, verdict.InternalError, "a setup command gave an answer the tool could not read"},
+		{"an ending the tool does not know", deploy.Result{Name: "setup", Ending: deploy.Ending("gone")},
+			true, verdict.InternalError, "a setup command ended in a way the tool does not know"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			got, ok := setupCondition(row.in)
+			if ok != row.ok {
+				t.Fatalf("ok = %v, want %v", ok, row.ok)
+			}
+			if !row.ok {
+				if diff := cmp.Diff(verdict.Condition{}, got); diff != "" {
+					t.Errorf("condition (-want +got):\n%s", diff)
+				}
+				return
+			}
+			if got.Code != row.code || got.Text != row.text {
+				t.Errorf("condition = {%q, %q}, want {%q, %q}", got.Code, got.Text, row.code, row.text)
+			}
+		})
+	}
+}
+
 func TestCommandCondition(t *testing.T) {
 	rows := []struct {
 		name string

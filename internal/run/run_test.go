@@ -126,7 +126,7 @@ func TestPass(t *testing.T) {
 	if code := w.run(context.Background()); code != 0 {
 		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
 	}
-	want := []string{"load", "check", "create", "store", "deployer", "fetch", "watcher",
+	want := []string{"load", "check", "create", "store", "deployer", "fetch", "setup", "watcher",
 		"install", "install-ready", "target", "probe", "start", "install-settled", "deploy", "transition-deploy",
 		"rollback", "transition-rollback", "probe-stop", "end-commands", "watch-stop", "delete"}
 	if diff := cmp.Diff(want, w.calls.list()); diff != "" {
@@ -185,7 +185,7 @@ func TestDeployFailsRollbackNotRun(t *testing.T) {
 }
 
 func TestEachBeforeFailure(t *testing.T) {
-	setUp := []string{"load", "check", "create", "store", "deployer", "fetch"}
+	setUp := []string{"load", "check", "create", "store", "deployer", "fetch", "setup"}
 	then := func(tail ...string) []string { return append(append([]string{}, setUp...), tail...) }
 	rows := []struct {
 		name  string
@@ -207,7 +207,10 @@ func TestEachBeforeFailure(t *testing.T) {
 		}, "cluster-failed", []string{"load", "check", "create", "store", "end-commands", "delete"}},
 		{"fetch", func(w *world) {
 			w.deployer.fetchErr = verdict.Condition{Code: verdict.ChartFetchFailed, Text: "the previous release's chart could not be fetched"}
-		}, "chart-fetch-failed", then("end-commands", "delete")},
+		}, "chart-fetch-failed", []string{"load", "check", "create", "store", "deployer", "fetch", "end-commands", "delete"}},
+		{"setup fails", func(w *world) {
+			w.cluster.setup = deploy.Result{Name: "setup", Ending: deploy.ExitedNonZero, ExitCode: 1}
+		}, "setup-failed", then("end-commands", "delete")},
 		{"target", func(w *world) {
 			w.cluster.targetErr = verdict.Condition{Code: verdict.TargetUnsupported, Text: "the Service orders/orders is headless"}
 		}, "target-unsupported", then("watcher", "install", "install-ready", "target", "end-commands", "watch-stop", "delete")},
@@ -244,6 +247,27 @@ func TestEachBeforeFailure(t *testing.T) {
 				t.Errorf("decided by %q, want %q", r.decided(), row.code)
 			}
 		})
+	}
+}
+
+// A setup command stopped by a signal is the signal's, not a failed command: the
+// run reports interrupted and nothing after the set-up starts.
+func TestSetupStoppedBySignal(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.cluster.setup = deploy.Result{Name: "setup", Ending: deploy.StoppedBySignal, ExitCode: -1}
+	w.hooks["setup"] = cancel
+	if code := w.run(ctx); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"interrupted"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	calls := w.calls.list()
+	if slices.Contains(calls, "watcher") || slices.Contains(calls, "install") {
+		t.Errorf("the run went on after the signal: calls %q", calls)
 	}
 }
 
@@ -1764,7 +1788,7 @@ func TestTheReaderStartsWithTheProbe(t *testing.T) {
 	var early []probe.Event
 	for i := range 5000 { // one check every 2 ms for the probe's first 10 s
 		at := first.Add(time.Duration(i) * 2 * time.Millisecond)
-		early = append(early, probe.Event{Obs: &verdict.Observation{Written: at, T: at, OK: true, N: 1, Ms: 30, Lag: 2}})
+		early = append(early, probe.Event{Obs: &verdict.Observation{Written: at, T: at, OK: true, N: 1, Ms: 30, HasMs: true, Lag: 2, HasLag: true}})
 	}
 	w.probe.events = append(early, w.probe.events...)
 	done := make(chan int, 1)

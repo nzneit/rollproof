@@ -168,6 +168,14 @@ func (s *session) Deployer(cfg *config.Config) (deploy.Deployer, []string, error
 	return helm, runner.Removed(), nil
 }
 
+// Setup runs the configuration's setup commands in order on the runner that
+// Deployer made, so that they lose the same variables and write their evidence
+// under commands/ as setup, setup-2 and so on. Deployer must have been called
+// first.
+func (s *session) Setup(ctx context.Context) deploy.Result {
+	return deploy.Setup(ctx, s.runner, s.cfg.Setup, s.cfg.Limits.Timeout)
+}
+
 // Watcher follows the workloads of the test's namespace. The Service whose
 // endpoints a transition reads comes later, from UseService.
 func (s *session) Watcher(ctx context.Context, cfg *config.Config) (run.Watcher, error) {

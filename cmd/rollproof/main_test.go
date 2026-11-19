@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+
 	"rollproof/internal/cluster"
 	"rollproof/internal/config"
 	"rollproof/internal/deploy"
@@ -326,6 +328,37 @@ func TestEndCommands(t *testing.T) {
 			t.Error("EndCommands did not close the runner's evidence")
 		}
 	})
+}
+
+// TestSessionSetup pins the evidence names the setup commands run under and that
+// the first command that fails ends the set-up.
+func TestSessionSetup(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Dir:    dir,
+		Setup:  [][]string{{"sh", "-c", "exit 0"}, {"sh", "-c", "exit 3"}, {"sh", "-c", "exit 0"}},
+		Deploy: config.Deploy{Helm: &config.Helm{Previous: &config.Release{}}},
+		Limits: config.Limits{Timeout: time.Minute},
+	}
+	var names []string
+	s := &session{
+		c:   &cluster.Cluster{Kubeconfig: filepath.Join(dir, "kubeconfig")},
+		cfg: cfg,
+		evidence: func(name string) (io.WriteCloser, error) {
+			names = append(names, name)
+			return &recordingEvidence{}, nil
+		},
+	}
+	if _, _, err := s.Deployer(cfg); err != nil {
+		t.Fatal(err)
+	}
+	res := s.Setup(context.Background())
+	if res.Ending != deploy.ExitedNonZero || res.ExitCode != 3 {
+		t.Errorf("setup ended %s with code %d, want exit-nonzero with code 3", res.Ending, res.ExitCode)
+	}
+	if diff := cmp.Diff([]string{"commands/setup", "commands/setup-2"}, names); diff != "" {
+		t.Errorf("evidence names (-want +got):\n%s", diff)
+	}
 }
 
 // recordingEvidence is an evidence writer that records that it was closed.

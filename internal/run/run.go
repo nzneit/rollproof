@@ -58,6 +58,11 @@ type Watcher interface {
 type Cluster interface {
 	Store(ctx context.Context) (probeImage string, images map[string]config.ImageRef, err error)
 	Deployer(cfg *config.Config) (deploy.Deployer, []string, error)
+	// Setup runs the configuration's setup commands in order on the run's command runner, each
+	// bounded by limits.timeout, and returns the Result of the first that did not succeed, or a
+	// Result named setup with Ending Succeeded when all did or there were none. run calls it once,
+	// after Deployer and Fetch and before Watcher; a context that ends stops the command that runs.
+	Setup(ctx context.Context) deploy.Result
 	Watcher(ctx context.Context, cfg *config.Config) (Watcher, error)
 	Target(ctx context.Context, cfg *config.Config) (probe.Target, error)
 	Probe(cfg *config.Config, probeImage string, raw io.Writer) probe.Probe
@@ -269,6 +274,16 @@ func (s *runState) setUp(ctx context.Context) bool {
 		return false
 	}
 	s.releases = d.Releases()
+	// The setup commands run after the charts are fetched and before the watch
+	// starts (section 7, "Setup commands").
+	res := c.Setup(ctx)
+	if s.interrupted(ctx) {
+		return false
+	}
+	if cond, failed := setupCondition(res); failed {
+		s.tl.Before = append(s.tl.Before, cond)
+		return false
+	}
 	// Step 6: the watcher, before the install. It needs the probe's target, and
 	// so the target's Service, only in a transition.
 	wt, err := c.Watcher(ctx, cfg)
