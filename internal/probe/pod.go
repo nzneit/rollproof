@@ -39,8 +39,7 @@ type Probe interface {
 	Events() <-chan Event
 	Start(ctx context.Context) (Started, error)
 	Stop(ctx context.Context) (Facts, error)
-	// Counts joins the Probe interface with the contract of Pod's Counts. run calls it when it
-	// cannot use Stop's Facts.
+	// run calls Counts when it cannot use Stop's Facts.
 	Counts() (lines, jsonText int)
 }
 
@@ -48,7 +47,8 @@ type Probe interface {
 // observation and the moment the tool read it.
 const ClockBound = 2 * time.Second
 
-// stopMargin is how long Stop waits past the drain for the probe's log to end.
+// stopMargin is how long Stop waits past the drain for the probe's log to end, and the longest
+// that each of its calls to the API, and its send of a last exit's fault, may wait.
 var stopMargin = 5 * time.Second
 
 // PodOptions is what the probe's pod needs: its image by digest, its arguments, the drain,
@@ -84,7 +84,7 @@ const (
 	stageNew lifeStage = iota
 	stageStarting
 	stageStarted
-	stageEnded // Start failed, or Stop returned
+	stageEnded // Start failed, or Stop was called
 )
 
 var _ Probe = (*Pod)(nil)
@@ -222,7 +222,7 @@ type probeRun struct {
 
 	follower     *follower
 	followerDone chan struct{}
-	endedAt      time.Time // what the follower's run gave: when its last stream ended; read after followerDone
+	endedAt      time.Time // when the log ended, as the follower's run gave it; read after followerDone
 	watcherDone  chan struct{}
 
 	firstCh, exitCh chan struct{} // closed when the first observation, or an exit before it, is noted
@@ -282,8 +282,8 @@ func (p *Pod) Counts() (lines, jsonText int) {
 // asked, because nothing ran to stop.
 //
 // Start is called once, and before Stop: a Start after either gives an error and creates no
-// pod. The probe's run is kept from the moment it exists, so that Counts reads it and a Stop
-// after a Start that panicked stops the follower and the watcher that Start started.
+// pod. Counts reads the log's lines while Start runs, and a Stop after a Start that panicked
+// stops what that Start had begun.
 func (p *Pod) Start(ctx context.Context) (Started, error) {
 	p.mu.Lock()
 	if p.state != stageNew {
@@ -309,6 +309,8 @@ func (p *Pod) Start(ctx context.Context) (Started, error) {
 		firstCh: make(chan struct{}), exitCh: make(chan struct{}),
 	}
 	r.follower = newFollower(p.open, p.running, p.o.Raw, p.o.Now, func(e Event) { p.emit(r, e) })
+	// The run is kept from the moment it exists, so that Counts reads it and a Stop after a Start
+	// that panicked stops the follower and the watcher started below.
 	p.mu.Lock()
 	p.run = r
 	p.mu.Unlock()
@@ -520,8 +522,6 @@ func (p *Pod) Stop(ctx context.Context) (Facts, error) {
 // the follower and the watcher and closes Events before it goes on.
 func (p *Pod) halt(ctx context.Context, r *probeRun) (Facts, error) {
 	defer func() {
-		// A panic leaves nothing of the run behind: the follower and the watcher end, and
-		// Events closes, before the panic goes on.
 		if v := recover(); v != nil {
 			r.cancel()
 			<-r.followerDone

@@ -223,9 +223,10 @@ func transitionRecords(trs []transitionFacts) []report.Transition {
 	return out
 }
 
-// probeRecord returns the probe's entry. When the tool asked the probe to stop and Stop gave its
-// Facts, the counts and stopped_when_asked are those Facts'. Otherwise stopped_when_asked is null,
-// the counts are those that Counts gave, and a note after the target's says why (section 10).
+// probeRecord returns the probe's entry. When the tool asked the probe to stop and Stop returned
+// no error, the counts and stopped_when_asked are those of its Facts. Otherwise
+// stopped_when_asked is null, the counts are those that Counts gave, and a note after the
+// target's says why (section 10).
 func probeRecord(f facts, h *config.HTTP, settings []report.Setting) report.Probe {
 	var names []string
 	for k := range h.Headers { // names only: a header's value is never read

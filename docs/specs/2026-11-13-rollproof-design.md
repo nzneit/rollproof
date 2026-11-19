@@ -1901,8 +1901,9 @@ results: /tmp/rollproof-results-7f3a
   - The probe's lines also say how many of its lines were JSON objects with no `ok` field, that
     the server's certificate was not verified when the URL is `https`, that a Service sends one
     client to one pod when it does, and that the probe did not stop when asked when it did not
-    (section 6), or why the tool did not ask it. The console names each variable that the tool took out of its commands'
-    environment (section 7), and prints every warning.
+    (section 6), or, when the tool did not judge the probe's stop, why not. The console names
+    each variable that the tool took out of its commands' environment (section 7), and prints
+    every warning.
 - **`result.json`.** The same facts for machines. It is the stable contract for wrappers. It
   holds:
   - a schema version, and whether the file is final;
@@ -2677,9 +2678,11 @@ which step proves which point.
       creation by `limits.timeout` on its own, but the code counted one deadline from before kind
       created the nodes, so a slow creation used up the waits for the registry and for the nodes'
       readiness. The code now follows section 8. A creation that hangs can therefore take kind's
-      own time and twice `limits.timeout` before it fails. What lost: **a limit of its own for the
-      cluster's creation**, a new setting for a fault of the code; and **a larger
-      `limits.timeout` in the fixture that met it**, which would hide the fault.
+      own time and twice `limits.timeout` before it fails, and longer when the registry's image
+      is slow to pull: the registry's limit covers the pull, but the tool checks it only once the
+      container has started. What lost: **a limit of its own for the cluster's creation**, a new
+      setting for a fault of the code; and **a larger `limits.timeout` in the fixture that met
+      it**, which would hide the fault.
 
 27. **A signal, and a failure of the tool, rulings of 2026-11-18.** The next plan's reviews found
     three things the design did not say, and the maintainer asked whether the tool treats Ctrl-C

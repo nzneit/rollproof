@@ -112,7 +112,8 @@ func (f *follower) run(ctx context.Context) (ended time.Time) {
 		}
 		rc, err := f.open(ctx, since)
 		if err != nil {
-			// No stream's end was the end of the log here, so the end is now.
+			// No stream's end was the end of the log here, so the end is now, never an earlier
+			// stream's end: a log whose end nobody saw must not read as one that ended in the drain.
 			switch {
 			case ctx.Err() != nil:
 				if reopen {

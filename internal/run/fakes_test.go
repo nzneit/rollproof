@@ -448,8 +448,8 @@ func (p *fakeProbe) Events() <-chan probe.Event {
 }
 
 // Start records "start", runs its hook and sends every scripted event into the probe's channel.
-// With startWaits it then waits until ctx ends; with startErr, or when ctx ended, it closes the
-// channel, as a Start that failed does, and returns the error.
+// With startWaits it then waits until ctx ends, closes the channel, as a Start that failed does,
+// and returns ctx's error; with startErr it closes the channel and returns that error.
 func (p *fakeProbe) Start(ctx context.Context) (probe.Started, error) {
 	defer p.returned.Store(true)
 	p.w.calls.add("start")

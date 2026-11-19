@@ -330,8 +330,9 @@ func settingValue(s []Setting, key string) string {
 	return ""
 }
 
-// probeLines are the lines under the probe's target, each indented 12 spaces. Only a probe that
-// did not stop when asked is said to; one whose stop the tool did not judge has a note instead.
+// probeLines are the lines under the probe's target, each indented 12 spaces. The line that says
+// the probe did not stop when asked comes only when StoppedWhenAsked is false; when it is nil,
+// the tool did not judge the stop, and the probe's notes say why.
 func probeLines(p Probe) []string {
 	const indent = "            "
 	rate := settingValue(p.Settings, "probe.http.rate")

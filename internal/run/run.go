@@ -332,9 +332,10 @@ func (s *runState) installStep(ctx context.Context) bool {
 
 // startProbe performs step 9: the probe and its first observation. The goroutine that reads the
 // probe's events starts before the probe does, so that no event waits for a reader; it is the
-// only reader of them until the probe is stopped. A start that failed, other than by its
-// context, has begun its own stop, and Stop gives what that stop left without a new call, also
-// after a signal; a start that its context ended left the pod as it is (section 6).
+// only reader of them until the probe is stopped. A start that failed other than by its
+// context has ended the probe itself, and Stop gives the Facts and the error that it kept, also
+// after a signal; a start that gave its context's error left the pod as it is (section 6), and
+// Stop is not asked.
 func (s *runState) startProbe(ctx context.Context) bool {
 	p := s.cluster.Probe(s.cfg, s.probeImage, s.ev.file("probe.log"))
 	s.probe = p
@@ -495,9 +496,10 @@ func (s *runState) stopProbe(ctx context.Context) {
 // wait by the drain and stopMargin. Its last lines are read while the stop runs, or dropped when
 // the event reader is gone, as haltProbe says. A signal that came meanwhile is placed as
 // stopProbe places one, and the verdict is decided again with the internal-error that the
-// failure placed. A panic in the stop, or one of the reader, is the tool's failure too: it is
-// placed as one more internal-error beside the first, with a signal that came and was not yet
-// placed, and the verdict is decided again by decideAgain.
+// failure placed. A panic in Stop, or one of the reader, is the tool's failure too: it is placed
+// as one more internal-error beside the first before that decision. A panic of the stop before
+// Stop was called, or of that decision, is placed the same way, with a signal that came and was
+// not yet placed, and decideAgain decides once more.
 func (s *runState) stopAfterFailure() {
 	if s.probe == nil || s.stop != notAsked || s.parent.Err() != nil {
 		return
@@ -593,8 +595,8 @@ const (
 // warns when Stop gave an error. After a start that failed, Stop gives what that stop left. The
 // stop counts as the tool's failure from the moment the probe was asked until Stop returns, so
 // that a Stop that panicked is recorded as one and is not asked again. An error of Stop after its
-// context ended is a signal's doing (cutBySignal); any other, a refused or timed-out delete, is
-// the tool's failure (stopFailed).
+// context ended is a signal's doing (cutBySignal); any other, a refused or timed-out delete or a
+// start that panicked before its log was followed, is the tool's failure (stopFailed).
 func (s *runState) takeStop(ctx context.Context) {
 	s.stop = stopFailed
 	f, err := s.probe.Stop(ctx)
@@ -606,7 +608,8 @@ func (s *runState) takeStop(ctx context.Context) {
 		s.stop = cutBySignal
 	}
 	if err != nil {
-		// Stop's error is the pod delete's, or the context's: the probe's pod may still run.
+		// Stop's error is the pod delete's, the context's, or that of a start that panicked before
+		// its log was followed: the probe's pod may still run.
 		s.warnings.add("the probe could not be stopped: " + err.Error() + "; its pod may still be there")
 	}
 }
@@ -673,7 +676,8 @@ func (s *runState) decide(final bool) verdict.Decision {
 	if final {
 		d = s.passedWithAWindowOpen(t, d)
 	}
-	// The pods are kept before the decision is, so that a decision that panicked kept nothing.
+	// The decision is stored last, so that one that panicked, in Decide or while it kept the pods,
+	// leaves the decision before it in place, as decideAgain expects.
 	s.keepFirstFailures(d)
 	s.decision = d
 	return d

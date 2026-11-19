@@ -9,9 +9,9 @@ import (
 
 // Spec is what Create needs. An empty NodeImage or RegistryImage means the default. Namespace is
 // the workload's namespace. Timeout bounds each wait of the cluster's creation, the registry's
-// answer and the nodes' readiness, each counted from its own start; it is not one deadline over
-// the whole creation, and kind's own waits are not bounded by it. Keep leaves in place what a
-// failed step left.
+// answer and the nodes' readiness, each counted from its own start, the registry's from before
+// its image is pulled (see startRegistry); it is not one deadline over the whole creation, and
+// kind's own waits are not bounded by it. Keep leaves in place what a failed step left.
 type Spec struct {
 	Name, RunDir, NodeImage, RegistryImage string
 	Workers                                int
