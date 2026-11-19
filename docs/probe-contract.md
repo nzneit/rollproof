@@ -31,8 +31,10 @@ while true; do
 done
 ```
 
-This `probe.custom` block runs it. The image line, `command`, `args` and the `env` list follow
-section 8's example: the image carries its digest, and an `env` entry takes a value from a Secret.
+This `probe.custom` block runs it. Its image line, `args` and `env` list follow section 8's
+example: the image carries its digest, and an `env` entry takes a value from a Secret. Its
+`command` is the same argument list as section 8's `[sh, -c, "…"]`, written as a block so that the
+loop can be read.
 
 ```yaml
 probe:
@@ -107,12 +109,12 @@ is a whole line whose top-level `ok` is `false`, also when the line holds `ok` t
 them is `false`; its fault belongs to the last window, because a failure must not vanish because
 of the way it was printed (section 6).
 
-Two `t` values are a fault of the line. One is a `t` later than the moment its line was written,
-because a check cannot begin after its result. The other is a `t` earlier than the moment the tool
-asked for the probe's pod by more than 2 s, the bound of the clock check, because no check can
-have begun before the probe existed. Like every such fault, either makes the window in which the
-line was written not verified; for a failed check written during the drain, that window is the
-last one (section 6).
+A `t` is a fault of its line in either of two cases. One is a `t` later than the moment its line
+was written, because a check cannot begin after its result. The other is a `t` earlier than the
+moment the tool asked for the probe's pod by more than 2 s, the bound of the clock check, because
+no check can have begun before the probe existed. Like every such fault, either makes the window
+in which the line was written not verified; for a failed check written during the drain, that
+window is the last one (section 6).
 
 ## 6. Time
 
@@ -159,8 +161,9 @@ once as `probe-not-started`, with the API server's text (section 6).
 
 **The install window.** The first observation opens the install window, at the moment its line was
 written by the runtime's timestamp and not by a `t` on the line. A failed check in the install
-window is counted and is not judged. A probe therefore needs no warm-up of its own: the steady
-window begins when the install has settled (section 6).
+window is counted and is not judged. The steady window begins when the install has settled, and
+from there on a failed check is judged: in the steady window it makes the run not verified. A
+probe therefore needs no warm-up of its own (section 6).
 
 **Exit.** The probe's pod is never restarted: its restart policy is `Never`. The tool reads an
 exit from the state of the container named `probe`. A probe that exits before the tool stops it
@@ -173,7 +176,8 @@ tool's clock, by when observation lines were written and never by `t`, from the 
 observation to the end of the last window. A stretch longer than `limits.silence` with no
 observation makes every window it overlaps not verified. `limits.silence` is 5 s by default, and
 the configuration keeps it shorter than `limits.steady` and `limits.settle`, so a window with no
-observation at all is always silent (sections 6 and 8).
+observation at all is always silent. A custom probe that checks less often raises `limits.silence`,
+and raises `limits.steady` and `limits.settle` with it (sections 6 and 8).
 
 **Stop.** The tool stops the probe when the run's last window has ended, when a failure of the
 tool has cut a window short, or when the run ends before the probe's first observation, unless a
@@ -192,7 +196,9 @@ lost. The contract has no value for "not known yet" (section 6).
 
 **The log stream.** The tool follows the probe's log for the whole run. When the stream ends while
 the container still runs, the tool opens it again, and it must neither lose a line nor count one
-twice (section 6).
+twice. After the tool has asked the probe to stop, a stream that ends while the pod still reads the
+container as running is not opened again: the tool waits until the pod reads the container as
+ended, and the end of that stream is then the end of the log (section 6).
 
 ## 8. What the author owns
 
@@ -263,9 +269,10 @@ The console, the job summary and `result.json` give names and no values: the pro
 reference as resolved, which carries a digest (section 8), and the names of its `env` entries. Its
 `command` and `args` appear there as counts. The evidence folder may hold the values (section 8).
 
-The probe's lines say "a custom probe judged this run; the tool does not know what it checks". The
-second table's "probed" column reads "not known", because the tool cannot say which workloads the
-probe reaches. On a pass, one line stands in the place of the built-in probe's three facts in the
-list of what the run did not exercise: "whatever the custom probe does not check" (section 10).
+The report's lines about a custom probe say "a custom probe judged this run; the tool does not
+know what it checks". The second table's "probed" column reads "not known", because the tool
+cannot say which workloads the probe reaches. On a pass, one line stands in the place of the
+built-in probe's three facts in the list of what the run did not exercise: "whatever the custom
+probe does not check" (section 10).
 
 The tool vouches that the probe ran and reported, and for nothing that it checks (section 1).
