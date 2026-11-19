@@ -351,6 +351,8 @@ type fakeWatcher struct {
 	eventsErr   error
 	eventsWait  bool
 	eventsCalls []string
+	// eventsPanic makes WriteEvents panic with "the event list broke" once it kept the call log.
+	eventsPanic bool
 }
 
 // Finishes gives the scripted channel.
@@ -359,10 +361,13 @@ func (f *fakeWatcher) Finishes() <-chan watch.Finish { return f.finishes }
 // PodEvents gives the scripted pod events.
 func (f *fakeWatcher) PodEvents() []watch.PodEvent { return f.podEvents }
 
-// WriteEvents keeps the call log, then, with eventsWait, waits until ctx ends and returns its
-// error; otherwise it writes the scripted events and returns eventsErr.
+// WriteEvents keeps the call log, then, with eventsPanic, panics; with eventsWait, waits until
+// ctx ends and returns its error; otherwise it writes the scripted events and returns eventsErr.
 func (f *fakeWatcher) WriteEvents(ctx context.Context, w io.Writer) error {
 	f.eventsCalls = f.w.calls.list()
+	if f.eventsPanic {
+		panic("the event list broke")
+	}
 	if f.eventsWait {
 		<-ctx.Done()
 		return ctx.Err()

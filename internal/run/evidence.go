@@ -101,29 +101,29 @@ func (m *marks) end() {
 
 // run is the follower: it takes each finish as it arrives and writes the
 // file, and takes what waits when set asks, until stop is closed or the channel
-// is.
+// is. A panic stops it and is the warning of a failed write, given once as
+// write gives one; the run goes on, and set and end take the finishes
+// themselves from then on.
 func (m *marks) run(in <-chan watch.Finish, ask chan chan struct{}, stop, done chan struct{}) {
 	defer close(done)
+	defer func() {
+		if p := recover(); p != nil {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if !m.warned {
+				m.warned = true
+				m.warn("the evidence windows.json was not written: " + panicText(p))
+			}
+		}
+	}()
 	for {
 		select {
 		case f, ok := <-in:
-			m.mu.Lock()
-			if !ok {
-				m.in = nil
-				m.mu.Unlock()
-				return
-			}
-			m.finishes[f.Name] = append(m.finishes[f.Name], f.At)
-			open := m.takeWaiting()
-			m.write()
-			m.mu.Unlock()
-			if !open {
+			if !m.took(f, ok) {
 				return
 			}
 		case reply := <-ask:
-			m.mu.Lock()
-			open := m.takeWaiting()
-			m.mu.Unlock()
+			open := m.takeWaitingLocked()
 			close(reply)
 			if !open {
 				return
@@ -132,6 +132,29 @@ func (m *marks) run(in <-chan watch.Finish, ask chan chan struct{}, stop, done c
 			return
 		}
 	}
+}
+
+// took keeps the finish f that the follower received, takes every other that
+// waits, and writes the file; ok false is the channel's close. It reports
+// whether the channel is still open.
+func (m *marks) took(f watch.Finish, ok bool) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !ok {
+		m.in = nil
+		return false
+	}
+	m.finishes[f.Name] = append(m.finishes[f.Name], f.At)
+	open := m.takeWaiting()
+	m.write()
+	return open
+}
+
+// takeWaitingLocked is takeWaiting under mu.
+func (m *marks) takeWaitingLocked() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.takeWaiting()
 }
 
 // sync has the follower take every finish that waits, and reports whether it
@@ -143,8 +166,13 @@ func (m *marks) sync() bool {
 	reply := make(chan struct{})
 	select {
 	case m.ask <- reply:
-		<-reply
-		return true
+		// A follower that panics while it answers never closes the reply; its done ends the wait.
+		select {
+		case <-reply:
+			return true
+		case <-m.done:
+			return false
+		}
 	case <-m.done:
 		return false
 	}
@@ -233,8 +261,15 @@ func writeTimeline(w io.Writer, obs []verdict.Observation, pods []watch.PodEvent
 // completeEvidence writes the marks a last time, timeline.tsv and the events
 // of both namespaces, after the final result.json and before the cluster is
 // deleted. Each failure is one warning and changes no verdict. The events'
-// listing is bounded by completionLimit, also after a signal.
+// listing is bounded by completionLimit, also after a signal. A panic ends the
+// completion there and is the warning that a failure after the verdict was
+// decided gives.
 func (s *runState) completeEvidence() {
+	defer func() {
+		if p := recover(); p != nil {
+			s.warnings.add("the tool failed after the verdict was decided: " + panicText(p))
+		}
+	}()
 	s.marks.end()
 	if first := s.probeStart.First; !first.IsZero() {
 		t, _ := s.timeline()
@@ -269,16 +304,17 @@ func (s *runState) completeEvidence() {
 }
 
 // writeEvidence opens the evidence file name, has fill write it, and closes
-// it, and returns the first error of the three, so that each file's failure is
-// told once.
-func (s *runState) writeEvidence(name string, fill func(io.Writer) error) error {
+// it, also when fill panics, and returns the first error of the three, so that
+// each file's failure is told once.
+func (s *runState) writeEvidence(name string, fill func(io.Writer) error) (err error) {
 	f, err := s.w.Evidence(name)
 	if err != nil {
 		return err
 	}
-	err = fill(f)
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	return err
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	return fill(f)
 }

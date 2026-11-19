@@ -116,6 +116,57 @@ func TestMarks(t *testing.T) {
 		m.end() // a second end does nothing
 	})
 
+	t.Run("two finishes at one moment are both kept", func(t *testing.T) {
+		var files lastBytes
+		m := newMarks(files.replace, func(string) {})
+		m.set(ws)
+		finishes := make(chan watch.Finish, 2)
+		m.follow(finishes)
+		at := t0.Add(25 * time.Second)
+		finishes <- watch.Finish{Name: verdict.Deploy, At: at}
+		finishes <- watch.Finish{Name: verdict.Deploy, At: at}
+		m.end()
+		got := decodeMarks(t, files.get("windows.json"))[2].Finishes
+		if len(got) != 2 || !got[0].Equal(at) || !got[1].Equal(at) {
+			t.Errorf("the deploy's finishes are %v, want [%v %v]", got, at, at)
+		}
+	})
+
+	t.Run("a panic of the follower is one warning", func(t *testing.T) {
+		var mu sync.Mutex
+		var warned []string
+		calls := 0
+		panicked := make(chan struct{})
+		replace := func(string, []byte) error {
+			mu.Lock()
+			calls++
+			first := calls == 1
+			mu.Unlock()
+			if first {
+				close(panicked)
+				panic("the disk broke")
+			}
+			return nil
+		}
+		m := newMarks(replace, func(s string) { mu.Lock(); warned = append(warned, s); mu.Unlock() })
+		finishes := make(chan watch.Finish, 1)
+		m.follow(finishes)
+		finishes <- watch.Finish{Name: verdict.Deploy, At: t0.Add(25 * time.Second)}
+		<-panicked // the follower's write is the first, and it panics
+		done := make(chan struct{})
+		go func() { m.end(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("end did not return after the follower panicked")
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if len(warned) != 1 || warned[0] != "the evidence windows.json was not written: the disk broke" {
+			t.Errorf("warnings %q, want one for the follower's panic", warned)
+		}
+	})
+
 	t.Run("a closed channel ends the following", func(t *testing.T) {
 		var files lastBytes
 		m := newMarks(files.replace, func(string) {})

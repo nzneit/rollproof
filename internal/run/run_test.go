@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -895,9 +896,14 @@ func TestWindowMarksAsTheyHappen(t *testing.T) {
 	w.watcher.finishAt = map[verdict.WindowName][]time.Duration{verdict.Deploy: {15 * time.Second, 22 * time.Second}}
 	w.watcher.finishes = make(chan watch.Finish, 8)
 	var during []mark
-	w.hooks["rollback"] = func() { during = w.windowMarks() }
+	var duringErr error
+	// The hook runs on the command's goroutine: it keeps what it read, and the test judges it here.
+	w.hooks["rollback"] = func() { during, duringErr = w.readMarks() }
 	if code := w.run(context.Background()); code != 0 {
 		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if duringErr != nil {
+		t.Fatalf("windows.json during the rollback: %v", duringErr)
 	}
 	if len(during) != 4 {
 		t.Fatalf("marks during the rollback %+v, want four", during)
@@ -996,6 +1002,24 @@ func TestTimelineAndEventsAreWritten(t *testing.T) {
 // Review Focus 4: evidence that cannot be completed after the verdict is a warning, and the
 // verdict and result.json stand.
 func TestEvidenceFailuresAreWarnings(t *testing.T) {
+	t.Run("the completion panics", func(t *testing.T) {
+		w := newWorld(t)
+		w.watcher.eventsPanic = true
+		if code := w.run(context.Background()); code != 0 {
+			t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+		}
+		r := w.result()
+		if !r.Final || r.Verdict != "pass" {
+			t.Errorf("final %v, verdict %q; want a final pass", r.Final, r.Verdict)
+		}
+		want := []string{"the tool failed after the verdict was decided: the event list broke"}
+		if diff := cmp.Diff(want, r.Warnings); diff != "" {
+			t.Errorf("warnings (-want +got):\n%s", diff)
+		}
+		if !strings.HasPrefix(w.stdout.String(), "rollproof: PASS") {
+			t.Errorf("stdout begins %q, want the console's first line", w.stdout.String())
+		}
+	})
 	t.Run("the evidence folder is gone", func(t *testing.T) {
 		w := newWorld(t)
 		w.hooks["probe-stop"] = func() {
@@ -1364,18 +1388,29 @@ func TestNoGapBetweenWindows(t *testing.T) {
 	}
 }
 
-// windowMarks reads the windows' boundaries from the evidence folder.
+// windowMarks reads the windows' boundaries from the evidence folder, and fails the test when it
+// cannot. Only the test's goroutine calls it.
 func (w *world) windowMarks() []mark {
 	w.t.Helper()
+	marks, err := w.readMarks()
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return marks
+}
+
+// readMarks reads and decodes windows.json, and reports its error to the caller: safe from any
+// goroutine.
+func (w *world) readMarks() ([]mark, error) {
 	b, err := os.ReadFile(filepath.Join(w.out, "evidence", "windows.json"))
 	if err != nil {
-		w.t.Fatalf("read windows.json: %v", err)
+		return nil, fmt.Errorf("read windows.json: %w", err)
 	}
 	var marks []mark
 	if err := json.Unmarshal(b, &marks); err != nil {
-		w.t.Fatalf("decode windows.json: %v", err)
+		return nil, fmt.Errorf("decode windows.json: %w", err)
 	}
-	return marks
+	return marks, nil
 }
 
 func TestTheRecordKeepsThePodsAtTheFirstFailure(t *testing.T) {
