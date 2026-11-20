@@ -1336,9 +1336,16 @@ decided by the file, not by the folder it was started from.
 - A custom probe's `env` is a list of entries, as in a pod's container. An entry has a `name`,
   and either a `value` or a `valueFrom`.
 - In an entry of `registries`, `username` and `password` come together or not at all.
-- An entry's `mirror` is a host, with or without a path, and no scheme: HTTPS is implied. A path
-  whose first segment is `v2` holds the registry API's root; any other path is a prefix in front
-  of it (section 9).
+- An entry's `host` is a registry host as an image's name writes it: a DNS name or an IP address,
+  with an optional port, and no scheme and no path. Hosts are compared in lower case and with
+  their ports, so `registry.example` and `registry.example:443` are two hosts, as the nodes treat
+  them. Docker Hub is `docker.io`, which covers images named `docker.io/…`, `index.docker.io/…`,
+  or with no host at all (`library/orders`, `orders`).
+- `as` is a repository as an image's name writes it, with its host written out: a host in the
+  form above, then a path, with no tag and no digest.
+- An entry's `mirror` is a host in the same form, with or without a path, and no scheme: HTTPS is
+  implied. The path has no empty segment and no `/` at its end. A path whose first segment is
+  `v2` holds the registry API's root; any other path is a prefix in front of it (section 9).
 
 **What else is rejected.**
 
@@ -1352,6 +1359,13 @@ decided by the file, not by the folder it was started from.
   reference that ends in `@${images.NAME.digest}`.
 - The same host in two entries of `registries`.
 - A `mirror` that carries a scheme, a user name, a password, a query or a fragment.
+- A `host`, an `as` or a `mirror` that does not have the form above, and an `as` with a tag or a
+  digest.
+- `index.docker.io` or `registry-1.docker.io` as a `host` or as the host of an `as`. The text says
+  to write `docker.io`.
+- A `mirror` whose host, with its port, is the entry's own `host`.
+- `rollproof.test` as a `host`, as the host of an `as`, or as the host of a `mirror`. The tool
+  owns that name inside the run (section 9).
 - A `deploy.namespace` that section 7 reserves.
 - A probe URL that carries a user name or a password.
 - A combination of releases or commands that section 7 rejects, a `version` beside a chart path
@@ -1692,6 +1706,10 @@ runner's own Docker login file is never copied into a node.
 The entry configures nothing else. Helm runs with the runner's own configuration (section 7), and
 the tool itself pulls from no registry.
 
+For Docker Hub the entry's host is `docker.io` (section 8). Every form of a Docker Hub image's
+name reaches the nodes' settings for `docker.io`, and the tool writes the credentials under that
+key (`docs/proofs/p02b-mirror-forms.md`).
+
 `ca` is a PEM file with one or more certificates. The nodes trust them, in addition to the
 authorities they trust already, for the place they pull the host's images from: the entry's
 mirror when it has one, and the host otherwise.
@@ -1722,12 +1740,12 @@ setting therefore shows in the test, and is not passed over with no sign. The po
 name a mirror that lacks the image: they read `not found` under the image's own name. Nor do they
 name a mirror that is down, for a pull by digest of a host for which the run's registry is listed,
 because the runtime ranks the run's registry's answer above the mirror's failure. A mirror that is
-down can also take some 30 s to fail each attempt (`docs/proofs/p02b-mirror-forms.md`). A caller
-who wants the nodes to pull from the real host leaves `mirror` out. The settings file writes the mirror as its `server` line, the runtime's default place
-for the host, with the `ca` beside it, and the run's registry, when there is one, as the one place
-tried before it. The proof of section 14, point 2, ran this form: with an image missing from the
-mirror, the pull failed, and the real host received no request and no credentials
-(`docs/proofs/p02-mirror-credentials.md`).
+down can also take some 30 s to fail each attempt (`docs/proofs/p02b-mirror-forms.md`). A caller who
+wants the nodes to pull from the real host leaves `mirror` out. The settings file writes the mirror
+as its `server` line, the runtime's default place for the host, with the `ca` beside it, and the
+run's registry, when there is one, as the one place tried before it. The proof of section 14, point
+2, ran this form: with an image missing from the mirror, the pull failed, and the real host received
+no request and no credentials (`docs/proofs/p02-mirror-credentials.md`).
 
 What the source of the kubelet and of the container runtime shows about credentials, and that
 proof ran (section 16): the kubelet looks credentials up by the image's own name, matching the
@@ -1743,6 +1761,9 @@ adds credentials to a request only after a host has asked for them. These things
   original host. A caller lists a mirror's credentials in the entry of the host whose images it
   mirrors.
 - A mirror that serves several hosts is named in an entry for each, each with its credentials.
+  A mirror whose host is another entry's `host` takes nothing from that entry: that entry's `ca`
+  and credentials serve images named after its own host, so the entry that lists the mirror gives
+  the mirror's `ca` again.
 - A chart's own `imagePullSecrets` reach the runtime the same way, with no host attached. For a
   host with a mirror they go to the mirror, even when the chart meant them for the real host.
 - A mirror that answers with a token challenge gets only tokens. The entry's credentials go to
@@ -2009,7 +2030,11 @@ results: /tmp/rollproof-results-7f3a
     could not be scheduled, the text names the cluster's shape and `cluster.workers`. When the
     settle time started again, the text says what started it. When the command was still running
     and the tool stopped it, the text says so. A probe that never started is shown the same way,
-    by the state of its pod, or by the API server's text when it refused the pod.
+    by the state of its pod, or by the API server's text when it refused the pod. When a container
+    listed there waits for an image that could not be pulled, and an entry of `registries` gives
+    that image's host a mirror, the text names the mirror: the pod's events read `not found` under
+    the image's own name and do not name it (section 9). The same holds for a probe's pod that
+    never started and for an install that was not ready.
   - Every pass ends with the lists "exercised" and "not exercised" (see "What every report
     states").
   - The probe's lines also say how many of its lines were JSON objects with no `ok` field, that
@@ -2243,8 +2268,10 @@ A line leaves the list when a fixture shows the tool catching what it names.
   neither of a pair that needs exactly one, a `version` beside a chart path that exists, a chart
   version that is a number, a comma in a values file's path, the limits that section 8 holds
   against each other, a custom probe's image with no digest, a reserved namespace, a host listed
-  twice, a `mirror` with a scheme, a user name, a password, a query or a fragment, and the base
-  of relative paths.
+  twice, a `mirror` with a scheme, a user name, a password, a query or a fragment, a malformed
+  `host`, `as` or `mirror`, an `as` with a tag or a digest, Docker Hub's other names as a host, a
+  mirror on its own entry's host, `rollproof.test` in each of the three, and the base of relative
+  paths.
 - Probe lines, on a fake clock: the type and the range of each field, a top-level name twice, an
   observation behind a prefix, a cut last line, an unknown `v`, a `t` later than its line, a `t`
   earlier than the moment the tool asked for the probe's pod, by more than the bound of the clock
@@ -2278,7 +2305,7 @@ A line leaves the list when a fixture shows the tool catching what it names.
   with the install window deciding the verdict. One more is for a custom probe that gives neither
   `ms` nor `lag`. Golden files, too, for the kind configuration and node settings the tool
   generates. Among them a host that has `as`, a mirror, a `ca` and credentials together, a
-  mirror under a prefix, and a mirror whose path begins with `v2`.
+  mirror under a prefix, a mirror whose path begins with `v2`, and an entry for `docker.io`.
 - The deploy drivers against a fake command runner that records the arguments, the environment
   and the folder: the flags of section 7, that the variables it lists are gone, how each ending
   of a command maps to a reason, a command stopped at the limit, and one stopped because a signal
@@ -2506,7 +2533,7 @@ the next plan reads them: `docs/plans/2026-11-16-first-plan/README.md` and
 keeps no such list; its rulings are in section 14, point 24 (the node setting under Docker and
 Podman, and a `limits.settle` under about 7 s) and points 26 to 28. The plan for step 4 keeps its
 list in `docs/plans/2026-11-19-step4/README.md`, and its rulings are in point 29. Step 5's
-rulings before its plan are in point 30.
+rulings before its plan are in points 30 and 31.
 
 ## 14. Open points for the plan
 
@@ -2516,13 +2543,13 @@ order's second step answered points 1 and 9 to 12, what point 5 says of the comm
 Helm major, and point 8 for nerdctl only: there kind's own 30-second wait for a node's log line
 failed in 5 of 9 creations, and the tool tries the creation again. Their records are under
 `docs/proofs/`, whose index lists what they left unproved, point 8 with Docker among it. Points 7
-and 16 are settled by the fixture runs, and points 13 and 14 before the first release. Point 15
-is a caveat with nothing to settle, point 22 records two rules that stand for now, and point 23
-records why the install settles under the probe and what that leaves open. Points 24 to 28
-record findings and rulings of 2026-11-18 and 2026-11-19, and point 29 the rulings of 2026-11-19
-before the plan for step 4. The proofs of step 5 settled points 2 and 19, and point 30 records
-the rulings of 2026-11-20 before the plan for step 5. The build order of section 13 says which
-step proves which point.
+and 16 are settled by the fixture runs, and points 13 and 14 before the first release. Point 15 is a
+caveat with nothing to settle, point 22 records two rules that stand for now, and point 23 records
+why the install settles under the probe and what that leaves open. Points 24 to 28 record findings
+and rulings of 2026-11-18 and 2026-11-19, and point 29 the rulings of 2026-11-19 before the plan for
+step 4. The proofs of step 5 settled points 2 and 19, and points 30 and 31 record the rulings of
+2026-11-20 before the plan for step 5. The build order of section 13 says which step proves which
+point.
 
 1. **Registry order in the nodes.** That a node tries the run's registry first for a host and then
    falls back to the real registry is what the container runtime's documentation and source say
@@ -2981,6 +3008,34 @@ step proves which point.
       a developer's machine as well as on GitHub, and its workflow starts only by hand until the
       maintainer says otherwise (section 12). What lost: **a workflow on every pull request**,
       which would spend runner time that the maintainer has not given.
+31. **Names in `registries` and `images`, and a mirror in the report, rulings of 2026-11-20.**
+    A cold re-read of point 30's text, and a third run (`docs/proofs/p02b-mirror-forms.md`), left
+    five choices open. The maintainer ruled on all five the same day.
+    - **Docker Hub.** Every form of a Docker Hub image's name reaches the nodes' settings for
+      `docker.io`, and the kubelet takes credentials for it under `docker.io`, `index.docker.io`
+      or `https://index.docker.io/v1/` alike. The maintainer chose that a caller writes
+      `docker.io`, and that `index.docker.io` and `registry-1.docker.io` are rejected as a host
+      with a text that says so (section 8). What lost: **the other names taken quietly** as
+      Docker Hub, which gives one host three spellings in a file.
+    - **The form of `host`, `as` and `mirror`.** The text gave no form for `host` or `as`. The
+      maintainer chose the form of an image's name: a host is a DNS name or an IP address with an
+      optional port, compared in lower case and with its port; `as` is a repository with its host
+      written out and no tag or digest; a mirror's path has no empty segment and no `/` at its end
+      (section 8). What lost: **only the scheme rejected**, which leaves a port, a tag in `as` or
+      a trailing `/` to fail later, in a node.
+    - **A mirror on its own entry's host.** The maintainer chose that the configuration rejects
+      it (section 8); it either changes nothing or is a mistake. A mirror on another entry's host
+      takes nothing from that entry (section 9). What lost: **allowing it**.
+    - **`rollproof.test`.** The tool owns the settings for that host inside the run. The
+      maintainer had no strong view and took the recommendation: the configuration rejects it as a
+      `host`, as the host of an `as` and as a mirror's host (section 8). What lost: **allowing
+      it**, under which a caller's entry would collide with the tool's own settings.
+    - **A mirror that lacks an image, in the report.** A deploy whose new image the mirror lacks
+      stalls, and stays a fail: a production cluster behind the same mirror would stall too. The
+      pod's events then read `not found` under the image's own name. The maintainer chose that the
+      text of a stall, of an install that was not ready and of a probe that never started names
+      the mirror when the failed image's host has one (section 10). What lost: **a sentence of
+      documentation only**, which leaves the reader looking at the wrong registry.
 
 ## 15. Not in the first release
 
