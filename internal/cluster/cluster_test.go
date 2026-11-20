@@ -4,11 +4,19 @@ package cluster
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
+	"maps"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +37,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	kindcluster "sigs.k8s.io/kind/pkg/cluster"
 
+	"rollproof/internal/config"
 	"rollproof/internal/verdict"
 )
 
@@ -413,5 +422,81 @@ func TestKeepAfterFailure(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(kept.RunDir, "kubeconfig")); err != nil {
 		t.Errorf("the run's folder and its kubeconfig are not kept: %v", err)
+	}
+}
+
+// writeCA writes at path a self-signed ECDSA P-256 certificate authority in PEM form, mode 0644,
+// in the shape of config's test helper of the same name. Nothing checks its dates.
+func writeCA(t *testing.T, path string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "rollproof test authority"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		IsCA:         true,
+		KeyUsage:     x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Decisions 5, 9 and 10: every node holds each entry's ca, the settings file of each entry's host
+// and of each as host, the run's registry first for the as hosts, and the credentials file at
+// the kubelet's place.
+func TestCreateWritesRegistrySettings(t *testing.T) {
+	ctx := context.Background()
+	ca := filepath.Join(t.TempDir(), "corp-ca.pem")
+	writeCA(t, ca)
+	caBytes, err := os.ReadFile(ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := testSpec("registries", 1)
+	s.Registries = []config.Registry{
+		{Host: "registry.example", Username: "ci", Password: "pw", CA: ca, Mirror: "mirror.corp.example/registry-example"},
+		{Host: "docker.io", CA: ca},
+	}
+	s.AsHosts = []string{"registry.example", "registry.example:5000"}
+
+	c, err := Create(ctx, s, testEngine(t))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer c.Delete(ctx)
+
+	want := map[string]string{
+		"/etc/containerd/certs.d/registry.example/hosts.toml":      HostSettings(s.Registries[0], c.NodeRegistry),
+		"/etc/containerd/certs.d/registry.example/ca.pem":          string(caBytes),
+		"/etc/containerd/certs.d/docker.io/hosts.toml":             HostSettings(s.Registries[1], ""),
+		"/etc/containerd/certs.d/registry.example:5000/hosts.toml": HostsTOML(c.NodeRegistry),
+		"/etc/containerd/certs.d/rollproof.test/hosts.toml":        HostsTOML(c.NodeRegistry),
+		"/var/lib/kubelet/config.json":                             string(Credentials(s.Registries)),
+	}
+	paths := slices.Sorted(maps.Keys(want))
+	nodes := c.Nodes()
+	if len(nodes) != 2 {
+		t.Fatalf("Nodes() = %v, want 2", nodes)
+	}
+	for _, n := range nodes {
+		for _, path := range paths {
+			out, err := c.Exec(ctx, n, "cat", path)
+			if err != nil {
+				t.Errorf("node %s: %v", n, err)
+				continue
+			}
+			if string(out) != want[path] {
+				t.Errorf("node %s: %s holds %q, want %q", n, path, out, want[path])
+			}
+		}
 	}
 }

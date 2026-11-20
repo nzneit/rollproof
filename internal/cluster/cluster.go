@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/kind/pkg/cluster/nodes"
 	"sigs.k8s.io/kind/pkg/cluster/nodeutils"
 
+	"rollproof/internal/config"
 	"rollproof/internal/verdict"
 )
 
@@ -153,6 +154,10 @@ type Cluster struct {
 // parts stay behind and the text says so.
 // A step's error is a ClusterFailed Condition, and a name without rollproof-
 // an InternalError.
+// The credentials file is written, mode 0600, into the run's folder before
+// kind creates the nodes; each node gets every ca and settings file with
+// rollproof.test's. A file that cannot be read or written fails the step it
+// belongs to, cluster-failed, as today.
 func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	if err := remove(ctx, e, s.Name, s.RunDir); err != nil {
 		var c verdict.Condition
@@ -208,6 +213,12 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	if err := os.Mkdir(s.RunDir, 0o700); err != nil {
 		return fail("make the run's folder", err)
 	}
+	// Kind mounts the file into every node when it creates them (decision 9).
+	if creds := Credentials(s.Registries); creds != nil {
+		if err := os.WriteFile(filepath.Join(s.RunDir, credentialsName), creds, 0o600); err != nil {
+			return fail("write the nodes' credentials file", err)
+		}
+	}
 
 	// The reference kind is given, so that kind's own check finds the image there and does not
 	// pull it again, outside the limit.
@@ -246,8 +257,21 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	if err != nil {
 		return fail("write the node settings", err)
 	}
+	// cas holds each entry's ca, at the entry's index, read once for every node.
+	cas := make([][]byte, len(s.Registries))
+	for i, r := range s.Registries {
+		if r.CA == "" {
+			continue
+		}
+		if cas[i], err = os.ReadFile(r.CA); err != nil {
+			return fail("write the node settings", fmt.Errorf("registries[%d].ca: %w", i, err))
+		}
+	}
 	for _, n := range listed {
-		if err := nodeutils.WriteFile(n, "/etc/containerd/certs.d/"+TestHost+"/hosts.toml", HostsTOML(c.NodeRegistry)); err != nil {
+		if err := writeRegistryFiles(n, s.Registries, cas, s.AsHosts, c.NodeRegistry); err != nil {
+			return fail("write the node settings", fmt.Errorf("node %s: %w", n, err))
+		}
+		if err := nodeutils.WriteFile(n, settingsPath(TestHost), HostsTOML(c.NodeRegistry)); err != nil {
 			return fail("write the node settings", fmt.Errorf("node %s: %w", n, err))
 		}
 		var out bytes.Buffer
@@ -288,6 +312,43 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 		return fail("read the versions", err)
 	}
 	return c, nil
+}
+
+// writeRegistryFiles writes into node n, by decision 10, each entry's ca, then the settings file
+// of each entry's host and of each host of asHosts that no entry names. cas holds each entry's ca
+// as read, at the entry's index. The settings of a host of asHosts try the run's registry, at
+// runRegistry, first; a host whose settings are empty gets no file.
+func writeRegistryFiles(n nodes.Node, regs []config.Registry, cas [][]byte, asHosts []string, runRegistry string) error {
+	for i, r := range regs {
+		if r.CA != "" {
+			if err := nodeutils.WriteFile(n, caPath(r.Host), string(cas[i])); err != nil {
+				return err
+			}
+		}
+	}
+	entries := slices.Clone(regs)
+	for _, h := range asHosts {
+		if !slices.ContainsFunc(regs, func(r config.Registry) bool { return r.Host == h }) {
+			entries = append(entries, config.Registry{Host: h})
+		}
+	}
+	for _, r := range entries {
+		run := ""
+		if slices.Contains(asHosts, r.Host) {
+			run = runRegistry
+		}
+		if text := HostSettings(r, run); text != "" {
+			if err := nodeutils.WriteFile(n, settingsPath(r.Host), text); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// settingsPath returns the path, in every node, of the settings file of host, as written.
+func settingsPath(host string) string {
+	return "/etc/containerd/certs.d/" + host + "/hosts.toml"
 }
 
 // createKind is step 3 of Create: kind's Create of name with options. While kind's Create fails
