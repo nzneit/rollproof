@@ -1,6 +1,6 @@
 # Tasks 11 to 14: the mirror job
 
-Read section 12 ("The mirror job"), section 13 (the workflows during incubation), section 14, point 30 ("The mirror job"), the Method and Decision of `docs/proofs/p02b-mirror-forms.md` (cases C and D: names through the engine's `/etc/hosts`, the cut with `iptables-nft`), and decisions 16 to 21 of the README before these tasks. The job is a test of the suite under the build tag `mirror`; it runs on this machine (rootless nerdctl) and, when the maintainer says so, on GitHub (Docker).
+Read section 12 ("The mirror job"), section 13 (the workflows during incubation), section 14, point 30 ("The mirror job") and point 31 ("The mirror job's cut"), the Method and Decision of `docs/proofs/p02b-mirror-forms.md` (cases C and D: names through the engine's `/etc/hosts`, the cut with `iptables-nft`), and decisions 16 to 21 of the README before these tasks. The job is a test of the suite under the build tag `mirror`; it runs on this machine (rootless nerdctl) and, when the maintainer says so, on GitHub (Docker).
 
 ### Task 11: The stand-in registry
 

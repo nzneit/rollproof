@@ -2443,9 +2443,10 @@ nodes' route to public registries, so a pull that goes anywhere but the mirror o
 registry fails; a public pull that passes before the cut and fails after it shows that the cut
 holds. The engine's route is not cut: before the run, the job makes sure that the engine holds
 the node image and the registry image, so the run asks the engine for no pull (section 14, point
-31). This is the proof of the mirror, certificate and credential settings. The job ends with the search for the password, in both forms, in everything the run
-wrote. It is a test of the suite under a build tag of its own, so it runs on a developer's
-machine as well; its workflow starts only by hand until the maintainer says otherwise.
+31). This is the proof of the mirror, certificate and credential settings. The job ends with the
+search for the password, in both forms, in everything the run wrote. It is a test of the suite
+under a build tag of its own, so it runs on a developer's machine as well; its workflow starts
+only by hand until the maintainer says otherwise.
 
 **The action.** A workflow uses the action from its own repository, on the first fixture and on
 one that fails. It builds the tool's image in the job, pushes it to a registry container there,
