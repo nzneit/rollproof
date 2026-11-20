@@ -1336,16 +1336,22 @@ decided by the file, not by the folder it was started from.
 - A custom probe's `env` is a list of entries, as in a pod's container. An entry has a `name`,
   and either a `value` or a `valueFrom`.
 - In an entry of `registries`, `username` and `password` come together or not at all.
-- An entry's `host` is a registry host as an image's name writes it: a DNS name or an IP address,
-  with an optional port, and no scheme and no path. Hosts are compared in lower case and with
-  their ports, so `registry.example` and `registry.example:443` are two hosts, as the nodes treat
-  them. Docker Hub is `docker.io`, which covers images named `docker.io/…`, `index.docker.io/…`,
-  or with no host at all (`library/orders`, `orders`).
+- An entry's `host` is a registry host as an image's name writes it, in lower case, with no
+  scheme and no path: a DNS name that holds a dot, a DNS name or an IP address with a port, or
+  `localhost`. An IPv6 address is written in brackets. A name with neither a dot nor a port is
+  not a host in an image's name: `myregistry/team/orders` names an image on Docker Hub. Hosts are
+  compared as written, with their ports, so `registry.example` and `registry.example:443` are two
+  entries; only the check of a mirror against its own entry's host takes a port of 443 as none.
+  Docker Hub is `docker.io`, which covers images named `docker.io/…`, `index.docker.io/…`, or
+  with no host at all (`library/orders`, `orders`).
 - `as` is a repository as an image's name writes it, with its host written out: a host in the
-  form above, then a path, with no tag and no digest.
+  form above, then a path in the form of an image's name, with no tag and no digest. On
+  `docker.io` the path has two segments or more: Docker Hub's own images are written
+  `docker.io/library/orders`, the path the nodes ask for.
 - An entry's `mirror` is a host in the same form, with or without a path, and no scheme: HTTPS is
-  implied. The path has no empty segment and no `/` at its end. A path whose first segment is
-  `v2` holds the registry API's root; any other path is a prefix in front of it (section 9).
+  implied. The path's segments hold letters, digits, `-`, `.`, `_` and `~`; no segment is empty,
+  `.` or `..`, and the path has no `/` at its end. A path whose first segment is `v2` holds the
+  registry API's root; any other path is a prefix in front of it (section 9).
 
 **What else is rejected.**
 
@@ -1359,11 +1365,15 @@ decided by the file, not by the folder it was started from.
   reference that ends in `@${images.NAME.digest}`.
 - The same host in two entries of `registries`.
 - A `mirror` that carries a scheme, a user name, a password, a query or a fragment.
-- A `host`, an `as` or a `mirror` that does not have the form above, and an `as` with a tag or a
-  digest.
+- A `host`, an `as` or a `mirror` that does not have the form above: among them a host with an
+  upper-case letter, a host with neither a dot nor a port that is not `localhost`, and an IPv6
+  address without brackets, each with a text that says why. An `as` with a tag or a digest.
+- An `as` on `docker.io` whose path has one segment. The text says to write
+  `docker.io/library/NAME`.
 - `index.docker.io` or `registry-1.docker.io` as a `host` or as the host of an `as`. The text says
   to write `docker.io`.
-- A `mirror` whose host, with its port, is the entry's own `host`.
+- A `mirror` whose host is the entry's own `host`, compared with their ports, a port of 443
+  counting as none.
 - `rollproof.test` as a `host`, as the host of an `as`, or as the host of a `mirror`. The tool
   owns that name inside the run (section 9).
 - A `deploy.namespace` that section 7 reserves.
@@ -2281,9 +2291,12 @@ A line leaves the list when a fixture shows the tool catching what it names.
   version that is a number, a comma in a values file's path, the limits that section 8 holds
   against each other, a custom probe's image with no digest, a reserved namespace, a host listed
   twice, a `mirror` with a scheme, a user name, a password, a query or a fragment, a malformed
-  `host`, `as` or `mirror`, an `as` with a tag or a digest, Docker Hub's other names as a host and
-  as the host of an `as`, a mirror on its own entry's host, `rollproof.test` in each of the three,
-  and the base of relative paths.
+  `host`, `as` or `mirror`, among them a host in upper case, a host with neither a dot nor a
+  port, an IPv6 host without brackets, and a mirror's path with a `..` segment or an escaped
+  character, an `as` with a tag or a digest, an `as` on `docker.io` with a one-segment path,
+  Docker Hub's other names as a host and as the host of an `as`, a mirror on its own entry's
+  host, also with `:443` on one side, `rollproof.test` in each of the three, and the base of
+  relative paths.
 - Probe lines, on a fake clock: the type and the range of each field, a top-level name twice, an
   observation behind a prefix, a cut last line, an unknown `v`, a `t` later than its line, a `t`
   earlier than the moment the tool asked for the probe's pod, by more than the bound of the clock
@@ -3028,7 +3041,9 @@ point.
       which would spend runner time that the maintainer has not given.
 31. **Names in `registries` and `images`, and a mirror in the report, rulings of 2026-11-20.**
     A cold re-read of point 30's text, and the proof `docs/proofs/p02b-mirror-forms.md`, left
-    five choices open. The maintainer ruled on all five the same day.
+    five choices open. The maintainer ruled on all five the same day. A scoped re-check of the
+    text that recorded them left two more, on the form of `host` and on `as` for Docker Hub,
+    and the maintainer ruled on both the same day.
     - **Docker Hub.** Every form of a Docker Hub image's name reaches the nodes' settings for
       `docker.io`, and the kubelet takes credentials for it under `docker.io`, `index.docker.io`
       or `https://index.docker.io/v1/` alike. The maintainer chose that a caller writes
@@ -3039,10 +3054,23 @@ point.
       one host three spellings in a file.
     - **The form of `host`, `as` and `mirror`.** The text gave no form for `host` or `as`. The
       maintainer chose the form of an image's name: a host is a DNS name or an IP address with an
-      optional port, compared in lower case and with its port; `as` is a repository with its host
-      written out and no tag or digest; a mirror's path has no empty segment and no `/` at its end
-      (section 8). What lost: **only the scheme rejected**, which leaves a port, a tag in `as` or
-      a trailing `/` to fail later, in a node.
+      optional port; `as` is a repository with its host written out and no tag or digest; a
+      mirror's path has no empty segment and no `/` at its end (section 8). What lost: **only the
+      scheme rejected**, which leaves a port, a tag in `as` or a trailing `/` to fail later, in a
+      node. The re-check found that "a DNS name" and "as an image's name writes it" disagree. The
+      maintainer chose the image's name: a host holds a dot or a port or is `localhost`, an IPv6
+      address is in brackets, upper case is rejected, hosts are compared as written with their
+      ports, and a mirror's path takes letters, digits, `-`, `.`, `_` and `~`, with no `.` or
+      `..` segment. What lost: **upper case accepted** and lower-cased before the tool writes the
+      nodes' settings, a spelling the caller did not write and no run tried; and **any DNS name**,
+      under which `host: myregistry` would be taken and would never apply.
+    - **`as` on Docker Hub.** The nodes ask for a Docker Hub image under `library/` when its name
+      has one segment (`docs/proofs/p02b-mirror-forms.md`), so `as: docker.io/orders` would store
+      the image where no node asks for it. The maintainer chose that the configuration rejects an
+      `as` on `docker.io` with a one-segment path, with a text that says to write
+      `docker.io/library/NAME` (section 8). What lost: **the path completed quietly** with
+      `library/`, which stores the image under a path the caller did not write. Not run: `as` on
+      Docker Hub in either form.
     - **A mirror on its own entry's host.** The maintainer chose that the configuration rejects
       it (section 8); it either changes nothing or is a mistake. A mirror on another entry's host
       takes nothing from that entry (section 9). What lost: **allowing it**.
