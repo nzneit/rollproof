@@ -1611,9 +1611,8 @@ subnets, the cluster's service and pod subnets, the node names and the suffixes 
 service names (`.svc` and its two longer forms). A registry that the settings named otherwise
 would be asked for through the proxy, which cannot reach it. A run behind a proxy on nerdctl
 showed the nodes pulling from the run's registry with no request through the proxy (section 14,
-point 19). On the runner the registry
-listens on a port of the loopback address that each run picks for itself, so two runs do not
-collide.
+point 19). On the runner the registry listens on a port of the loopback address that each run
+picks for itself, so two runs do not collide.
 
 ### How the caller's image gets in
 
@@ -1628,13 +1627,14 @@ The tool puts the image into the run's registry and records its digest.
 
 The image is stored by digest only, never under a tag. A tag can come to name another image with
 no sign of it. When the run's registry does not hold a tag, or cannot be reached, a node goes on
-to the real registry and runs whatever that tag names there; and a node that already holds an
+to the next place for the host, the entry's mirror when it has one and the real registry
+otherwise, and runs whatever that tag names there; and a node that already holds an
 image under a tag does not pull that tag again. A digest names one content, wherever it is pulled
 from. A chart that takes only a tag writes the tag with the digest after it,
 `candidate@${images.orders.digest}`. The node's container runtime drops the tag from such a
 reference and asks the registry for the digest alone. Kubernetes still takes the default pull
 policy from the tag: `latest` before the digest gives `Always`, and any other tag gives
-`IfNotPresent`. The pull is by digest in both cases. The fall-back to the real registry and the
+`IfNotPresent`. The pull is by digest in both cases. The fall-back to the next place and the
 dropped tag were read from the runtime's source, and the proof of section 14, point 1, ran both,
 with images of one manifest each and a plain-HTTP registry standing in for the real host
 (`docs/proofs/p01-registry-order.md`).
@@ -1705,7 +1705,8 @@ A cache that expects its project name inside the API path, and not before it, is
 the API's root first. A path whose first segment is `v2`, such as
 `cache.corp.example/v2/proxy-project`, is used as written, and a node asks for
 `/v2/proxy-project/team/orders/…`; the tool writes it with the runtime's path override
-(`docs/proofs/p01b-mirror.md`). A mirror whose own prefix begins with a segment `v2` cannot be
+(`docs/proofs/p01b-mirror.md`, and with the mirror as the `server` line
+`docs/proofs/p02b-mirror-forms.md`). A mirror whose own prefix begins with a segment `v2` cannot be
 written. A mirror that speaks plain HTTP is not supported (section 15).
 
 **The order for one host.** A node has one list of places for each registry host, in this order:
@@ -1716,20 +1717,24 @@ written. A mirror that speaks plain HTTP is not supported (section 15).
 
 The list has no place for the real host when there is a mirror, so a node never goes past the
 mirror. A mirror that lacks an image, or is down, fails the pull, even where the real host could
-have served it: the pod's events give the mirror's answer, and the run ends as it ends for any
-image that cannot be pulled. A wrong mirror setting therefore shows in the test, and is not
-passed over with no sign. A caller who wants the nodes to pull from the real host leaves `mirror`
-out. The settings file writes the mirror as the runtime's default place for the host, with the
-`ca` beside it, and the run's registry, when there is one, as the one place tried before it.
-The proof of section 14, point 2, ran this form: with an image missing from the mirror, the pull
-failed, and the real host received no request and no credentials
+have served it, and the run ends as it ends for any image that cannot be pulled. A wrong mirror
+setting therefore shows in the test, and is not passed over with no sign. The pod's events do not
+name a mirror that lacks the image: they read `not found` under the image's own name. Nor do they
+name a mirror that is down, for a pull by digest of a host for which the run's registry is listed,
+because the runtime ranks the run's registry's answer above the mirror's failure. A mirror that is
+down can also take some 30 s to fail each attempt (`docs/proofs/p02b-mirror-forms.md`). A caller
+who wants the nodes to pull from the real host leaves `mirror` out. The settings file writes the mirror as its `server` line, the runtime's default place
+for the host, with the `ca` beside it, and the run's registry, when there is one, as the one place
+tried before it. The proof of section 14, point 2, ran this form: with an image missing from the
+mirror, the pull failed, and the real host received no request and no credentials
 (`docs/proofs/p02-mirror-credentials.md`).
 
 What the source of the kubelet and of the container runtime shows about credentials, and that
-proof ran (section 16): the kubelet looks credentials up by the registry host in the image's own
-name, and passes them on with no host attached. The container runtime then offers them to every
-host it contacts for that pull that asks for credentials. The run's registry asks for none, so
-it gets none. Three things follow.
+proof ran (section 16): the kubelet looks credentials up by the image's own name, matching the
+hosts the tool writes into its file, and passes them on with no host attached. The container
+runtime then offers them to every host it contacts for that pull that asks for credentials.
+The run's registry asks for none, so, by the runtime's source, it is sent none: the runtime
+adds credentials to a request only after a host has asked for them. These things follow.
 
 - An entry's username and password go to the one place after the run's registry: the mirror
   when there is one, and the host otherwise. With a mirror they are the mirror's credentials, and
@@ -1738,6 +1743,14 @@ it gets none. Three things follow.
   original host. A caller lists a mirror's credentials in the entry of the host whose images it
   mirrors.
 - A mirror that serves several hosts is named in an entry for each, each with its credentials.
+- A chart's own `imagePullSecrets` reach the runtime the same way, with no host attached. For a
+  host with a mirror they go to the mirror, even when the chart meant them for the real host.
+- A mirror that answers with a token challenge gets only tokens. The entry's credentials go to
+  the token service that the challenge names, which the nodes must reach and whose certificate
+  the entry's `ca` must cover.
+
+The runs of `docs/proofs/p02b-mirror-forms.md` showed the last two, a tag resolved through a
+mirror that is the `server` line, and images named after Docker Hub in each of its forms.
 
 **Who can read the credentials.** The file sits in every node, at the place where the kubelet
 reads it, and kind sets no Pod Security level. Any pod that mounts that path of its node can
@@ -2194,8 +2207,8 @@ A line leaves the list when a fixture shows the tool catching what it names.
   GitHub's own guidance warns against self-hosted runners on public repositories for this reason.
 - **What leaves the runner through the tool.** The nodes' pulls: to the mirrors that the
   configuration lists in place of their hosts, to the other hosts it lists, and to the hosts of
-  images that no entry names, each with its entry's credentials when it has them. Helm's pulls, with the caller's
-  own logins. Nothing else.
+  images that no entry names, each with its entry's credentials when it has them, and the token
+  services that those hosts name. Helm's pulls, with the caller's own logins. Nothing else.
 - A registry password arrives only through an environment variable. It is masked, in its plain
   and its encoded form, in everything the tool writes. Nothing else is masked (section 8). This
   rule has not had a security review (section 14).
@@ -2204,8 +2217,9 @@ A line leaves the list when a fixture shows the tool catching what it names.
   in it can read the file (section 9), so the credentials should be able to read only, and
   should expire soon.
 - A registry entry's credentials go to the entry's mirror when it has one, and to its host
-  otherwise. A mirror replaces its host, so the real host never sees credentials meant for the
-  mirror (section 9).
+  otherwise, and to a token service that the mirror's or host's challenge names. A mirror
+  replaces its host, so the real host never sees credentials meant for the mirror. A chart's own
+  pull secrets for a host with a mirror go to the mirror as well (section 9).
 - The built-in probe does not verify a server's certificate. It sends nothing secret, unless the
   caller put a credential into a header, and a header's value is not masked.
 - The tool does not read, copy or change the runner's Helm logins, its container engine's logins
@@ -2506,7 +2520,9 @@ and 16 are settled by the fixture runs, and points 13 and 14 before the first re
 is a caveat with nothing to settle, point 22 records two rules that stand for now, and point 23
 records why the install settles under the probe and what that leaves open. Points 24 to 28
 record findings and rulings of 2026-11-18 and 2026-11-19, and point 29 the rulings of 2026-11-19
-before the plan for step 4. The build order of section 13 says which step proves which point.
+before the plan for step 4. The proofs of step 5 settled points 2 and 19, and point 30 records
+the rulings of 2026-11-20 before the plan for step 5. The build order of section 13 says which
+step proves which point.
 
 1. **Registry order in the nodes.** That a node tries the run's registry first for a host and then
    falls back to the real registry is what the container runtime's documentation and source say
@@ -2525,11 +2541,14 @@ before the plan for step 4. The build order of section 13 says which step proves
    so that the node uses the registry settings it uses for the kubelet. The proof
    `docs/proofs/p01-registry-order.md` ran the order, both kinds of reference and the node's pull
    (section 9). `docs/proofs/p01b-mirror.md` ran the one list of places, with a mirror under a
-   path, in the form with a `server` line. How `mirror` says which of the two paths it names is
-   settled in point 30: by whether its path begins with `v2`.
+   path, in the form with a `server` line. Section 9 no longer writes that list: since point
+   30, a mirror is the `server` line and the real host has no place, the list that
+   `docs/proofs/p02-mirror-credentials.md` ran. How `mirror` says which of the two paths it
+   names is settled in point 30: by whether its path begins with `v2`.
 2. **Mirrors that need credentials.** Settled by a run on 2026-11-20
-   (`docs/proofs/p02-mirror-credentials.md`). An entry's credentials reach its mirror, and the
-   real host too whenever a pull goes on to it; credentials listed under the mirror's own host
+   (`docs/proofs/p02-mirror-credentials.md`). With the real host after the mirror, the form this
+   text had before, an entry's credentials reach the mirror, and the real host too whenever a
+   pull goes on to it; credentials listed under the mirror's own host
    are never used. Of the two ways to give a mirror credentials of its own, a header in the
    mirror's place in the node's settings worked, with and without credentials from the kubelet,
    and never reached the real host; the container runtime's own setting per host is ignored
@@ -2538,10 +2557,12 @@ before the plan for step 4. The build order of section 13 says which step proves
    lacks failed, and the real host got no request and no credentials. A `ca` at the top of the
    settings file is used for the real host, and the tool's `crictl pull` of an image in the run's
    registry needs no credentials. The maintainer chose that a listed mirror always forbids the
-   last step, so no header is needed (point 30). Not run: credentials that a credential-provider
-   plugin of the kubelet supplies, `imagePullSecrets`, and a registry or mirror that answers with
-   a token challenge, which the container runtime's own client meets with the kubelet's
-   credentials (read in source).
+   last step (point 30). The entry's credentials then reach the mirror alone and serve as the
+   mirror's own, so no header is needed. A second run the same day
+   (`docs/proofs/p02b-mirror-forms.md`) ran that form: with a path that begins with `v2`, with a
+   tag, with a chart's own pull secret, with Docker Hub's names, and with a mirror that
+   answers with a token challenge. Not run: credentials that a credential-provider plugin of the
+   kubelet supplies, and any of it on Docker.
 3. **Environment variables into a composite action.** Whether `env:` on the step that calls a
    composite action reaches the action's inner steps was not found in the pages read. The plan
    settles it with a run. If it does not, the first way out is `env:` at the job's level, which
@@ -2639,7 +2660,9 @@ before the plan for step 4. The build order of section 13 says which step proves
     it. Go never sends a loopback address through a proxy, and the tool's own clients reach only
     that address. Read and not run: the same on Docker, whose provider also takes a proxy from
     Docker's client settings when the environment names none. Not run: a proxy that needs a login
-    or speaks TLS, a caller's own `NO_PROXY`, and Helm's and the engine's pulls through a proxy.
+    or speaks TLS, a caller's own `NO_PROXY`, the variables in lower case only, Helm 4, a pull
+    from a mirror or from a registry with credentials behind the proxy, whether a workload's
+    pods see the variables, and Helm's and the engine's pulls through a proxy.
 20. **Signals.** GitHub sends a cancel signal to the first process of a step. The action starts
     the tool with `exec`, so that the tool is that process (section 8). Whether a shell would
     pass the signal on to a child was not read. The fixture with a signal covers the tool; a run
@@ -2951,9 +2974,9 @@ before the plan for step 4. The build order of section 13 says which step proves
       whose first segment is `v2` holds the API's root and is written with the runtime's path
       override (sections 8 and 9). What lost: **an `https://` URL** with the same rule, the
       proposal of `docs/proofs/p01b-mirror.md`; and **a second key** that names the kind of path,
-      which costs a key and a way to get the two out of step. Read and not run: the path override
-      on the default place of a settings file. The container runtime reads the top of the file
-      with the same fields as a host's own place, and the plan for step 5 runs it.
+      which costs a key and a way to get the two out of step. The path override on the `server`
+      line, which this form needs, ran in `docs/proofs/p02b-mirror-forms.md`: with it the cache
+      was asked for its own path, and without it the pull failed.
     - **The mirror job.** It is a test of the suite under a build tag of its own, so it runs on
       a developer's machine as well as on GitHub, and its workflow starts only by hand until the
       maintainer says otherwise (section 12). What lost: **a workflow on every pull request**,
@@ -3195,21 +3218,22 @@ and output are not filed in the repository.
 | The loop of section 6, unchanged but for its target, the API server's Service, run as user 65532 | That `nc -z -w1` against an open port, `sleep 0.1` and `trap` work in busybox 1.37.0 as that user, though the failure branch did not run; that the loop wrote 756 lines in 76.5 s, every one valid JSON with `ok` true; that the runtime's timestamps on them were 0.101 to 0.106 s apart, so each line reached the log on its own; that its pod, deleted with a grace period of 10 s, was gone after 1.0 s |
 | A shell as the first process of a container, `while true; do sleep 1; done`, with no trap, then with `trap 'exit 0' TERM` | That the shell with no trap ignored SIGTERM: its pod, deleted with a grace period of 10 s, was gone only after 11.1 s, past the grace period. With the trap it was gone after 0.9 s |
 
-Still not shown by any run or any page: that 15 s is long enough for an install to settle under
-the probe; that a node of Docker or Podman takes the setting of section 14, point 24; that a
-shorter time between the proxy's syncs would hide failures that the fixtures catch. And, from
-before the revision: that nodes behind a proxy on Docker reach the run's registry by its address;
-that Docker Desktop on Linux gives the nodes a clock of their own; that a pod in a privileged node can
-reach the runner; that the fixture for the known miss passes; that a job inside a container can
-reach the cluster; that a larger sync time of the proxy gives no delay that can be set; the two
-rollouts under a reloader; that Podman run as root lets the runner reach the node addresses as
-Docker does; that a port mapping cannot be added to a node after it was created; which Go version
-Helm's released binaries are built with; and where a pod goes when the node its volume is tied to
-cannot take it. And, left by the proofs of the build order's second step: that kind creates the
-cluster through Docker. Left by the proofs of step 5: the runtime's path override on the default
-place of a settings file, which step 5 writes for a mirror whose path begins with `v2`; a mirror
-that answers with a token challenge; and credentials from a credential-provider plugin. That the hosted runner's Docker runs
-as root is read from the image's install script, which no page states. What is known of these is
+Still not shown by any run or any page: that 15 s is long enough for an install to settle under the
+probe; that a node of Docker or Podman takes the setting of section 14, point 24; that a shorter
+time between the proxy's syncs would hide failures that the fixtures catch. And, from before the
+revision: that nodes behind a proxy on Docker reach the run's registry by its address; that Docker
+Desktop on Linux gives the nodes a clock of their own; that a pod in a privileged node can reach the
+runner; that the fixture for the known miss passes; that a job inside a container can reach the
+cluster; that a larger sync time of the proxy gives no delay that can be set; the two rollouts under
+a reloader; that Podman run as root lets the runner reach the node addresses as Docker does; that a
+port mapping cannot be added to a node after it was created; which Go version Helm's released
+binaries are built with; and where a pod goes when the node its volume is tied to cannot take it.
+And, left by the proofs of the build order's second step: that kind creates the cluster through
+Docker. Left by the proofs of step 5: credentials from a credential-provider plugin; on Docker, a
+mirror named by its container's name, a cut of the nodes' route, and nodes behind a proxy; and a
+proxy that needs a login or speaks TLS, a caller's own `NO_PROXY`, a pull from a mirror behind a
+proxy, and Helm's and the engine's pulls through a proxy. That the hosted runner's Docker runs as
+root is read from the image's install script, which no page states. What is known of these is
 reasoned from the sources above or is the drafting session's own knowledge, and section 14 lists
 those of them that need a test.
 
@@ -3222,9 +3246,11 @@ The run of 2026-11-19 showed the fourth for busybox's shell: as the first proces
 it ignores SIGTERM unless it sets a trap. Sections 6, 9 and 14 also rest on the project's own
 `docs/proofs/p05-helm-cli.md`, `docs/proofs/p08-kind-library.md`, `docs/proofs/p09-kind-release.md`,
 `docs/proofs/p10-rollout-rules.md`, `docs/proofs/p11-log-rotation.md` and
-`docs/proofs/p12-keys.md`. The proofs of step 5, on 2026-11-20, showed what section 9 says of
-credentials, a mirror that replaces its host, a `ca` for the real host, and nodes behind a proxy
-on nerdctl (`docs/proofs/p02-mirror-credentials.md`, `docs/proofs/p19-proxy.md`). Of the step 2
-proofs' two other limits, the first no longer applies: step 5 writes a mirror as the `server`
-line, never in the form with no `server` line. The second, a pull from a real host over HTTPS,
-ran in p02 with a private authority, a `ca` at the top of the settings file and no mirror.
+`docs/proofs/p12-keys.md`. The proofs of step 5, on 2026-11-20, showed on nerdctl where the
+credentials of section 9 go, a mirror that replaces its host, a `ca` for the real host, and
+nodes behind a proxy (`docs/proofs/p02-mirror-credentials.md`,
+`docs/proofs/p02b-mirror-forms.md`, `docs/proofs/p19-proxy.md`). This list
+named two more limits of the proofs of the build order's second step before. A mirror under a
+path in the form with no `server` line no longer applies: step 5 writes a mirror as the `server`
+line. A pull from a real host over HTTPS ran in p02, with a private authority, a `ca` at the top
+of the settings file and no mirror.
