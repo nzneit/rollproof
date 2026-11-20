@@ -31,14 +31,13 @@ type Stored struct {
 // Store packages the tool's binary at the given path as the probe's image and has the
 // control-plane node pull it; stores each entry of images, from the engine or from its archive
 // file, by digest, and has every node pull it. Nothing is stored under a tag. timeout bounds each
-// node's pull. An error is a Condition with ClusterFailed. An entry with as is an InternalError.
+// node's pull. An error is a Condition with ClusterFailed.
+//
+// An entry with as goes into the run's registry under the path of its repository after the host,
+// and Stored names it by the as itself (decision 11). The cluster must hold that host in
+// Spec.AsHosts, else a node's pull goes past the run's registry and fails cluster-failed.
 func Store(ctx context.Context, c *cluster.Cluster, binary string, images map[string]config.Image, timeout time.Duration) (Stored, error) {
 	names := slices.Sorted(maps.Keys(images))
-	for _, n := range names {
-		if im := images[n]; im.As != "" {
-			return Stored{}, verdict.Condition{Code: verdict.InternalError, Text: "images." + n + ": as is not built yet"}
-		}
-	}
 
 	probeFailed := func(err error) (Stored, error) {
 		return Stored{}, verdict.Condition{Code: verdict.ClusterFailed, Text: "the probe's image: " + err.Error()}
@@ -62,10 +61,11 @@ func Store(ctx context.Context, c *cluster.Cluster, binary string, images map[st
 	for _, n := range names {
 		var ref config.ImageRef
 		var err error
-		if im := images[n]; im.Archive != "" {
-			ref, err = storeArchive(ctx, c, n, im.Archive, "the archive")
+		im := images[n]
+		if at := placeOf(n, im); im.Archive != "" {
+			ref, err = storeArchive(ctx, c, n, at, im.Archive, "the archive")
 		} else {
-			ref, err = storeLocal(ctx, c, n, images[n].Local)
+			ref, err = storeLocal(ctx, c, n, at, im.Local)
 		}
 		if err != nil {
 			return Stored{}, err
@@ -78,6 +78,21 @@ func Store(ctx context.Context, c *cluster.Cluster, binary string, images map[st
 		}
 	}
 	return s, nil
+}
+
+// place is where an entry of images goes: path is its repository's path in the run's registry,
+// and repository is the name the nodes pull it by, with its host.
+type place struct{ path, repository string }
+
+// placeOf returns the place of the entry named entry: with no as, the entry's name under TestHost;
+// with as, the path after the as's host, and the as itself. config.Load has checked that an as is
+// a host and then a path, so the part after its first / is that path.
+func placeOf(entry string, im config.Image) place {
+	if im.As == "" {
+		return place{path: entry, repository: cluster.TestHost + "/" + entry}
+	}
+	_, path, _ := strings.Cut(im.As, "/")
+	return place{path: path, repository: im.As}
 }
 
 // pushImage pushes img to the registry at registry, as the runner reaches it, under repository

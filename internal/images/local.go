@@ -13,12 +13,12 @@ import (
 	"rollproof/internal/verdict"
 )
 
-// storeLocal puts the engine's image local, NAME:TAG, into the run's registry by digest, under the
-// repository entry, and returns where the nodes pull it from: TestHost/ENTRY and the digest. The
-// engine's archive of the image is a file in the run's folder until the push has ended. config.Load
-// has checked that entry is a valid component of a repository's path. An error is a Condition
-// with ClusterFailed.
-func storeLocal(ctx context.Context, c *cluster.Cluster, entry, local string) (config.ImageRef, error) {
+// storeLocal puts the engine's image local, NAME:TAG, into the run's registry by digest, under
+// at.path, and returns where the nodes pull it from: at.repository and the digest. The engine's
+// archive of the image is a file in the run's folder, named after entry, until the push has ended.
+// config.Load has checked that entry is a valid component of a repository's path. An error is a
+// Condition with ClusterFailed.
+func storeLocal(ctx context.Context, c *cluster.Cluster, entry string, at place, local string) (config.ImageRef, error) {
 	fail := func(text string) (config.ImageRef, error) {
 		return config.ImageRef{}, verdict.Condition{Code: verdict.ClusterFailed, Text: "images." + entry + ": " + text}
 	}
@@ -36,5 +36,5 @@ func storeLocal(ctx context.Context, c *cluster.Cluster, entry, local string) (c
 		return fail("the engine could not save " + local + ": " + lastLine(out, err))
 	}
 
-	return storeArchive(ctx, c, entry, file, "the engine's archive of "+local)
+	return storeArchive(ctx, c, entry, at, file, "the engine's archive of "+local)
 }

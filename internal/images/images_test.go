@@ -31,7 +31,8 @@ var (
 	sharedOnce sync.Once
 )
 
-// testCluster creates, once for the package, a cluster with one worker; TestMain deletes it.
+// testCluster creates, once for the package, a cluster with one worker whose nodes try the run's
+// registry first for the as hosts registry.example:5000 and docker.io; TestMain deletes it.
 func testCluster(t *testing.T) *cluster.Cluster {
 	t.Helper()
 	sharedOnce.Do(func() {
@@ -42,7 +43,8 @@ func testCluster(t *testing.T) *cluster.Cluster {
 		}
 		n := "rollproof-test-images"
 		shared, sharedErr = cluster.Create(context.Background(), cluster.Spec{
-			Name: n, RunDir: cluster.RunDir(n), Workers: 1, Namespace: "app", Timeout: 5 * time.Minute}, e)
+			Name: n, RunDir: cluster.RunDir(n), Workers: 1, Namespace: "app", Timeout: 5 * time.Minute,
+			AsHosts: []string{"registry.example:5000", "docker.io"}}, e)
 	})
 	if sharedErr != nil {
 		t.Fatalf("test cluster: %v", sharedErr)
@@ -193,6 +195,50 @@ func TestStoreArchiveIntoEveryNode(t *testing.T) {
 	}
 	if got := tags(t, c.PushRegistry, "app"); len(got) != 0 {
 		t.Errorf("the run's registry has tags %v for app", got)
+	}
+}
+
+// Review Focus 3: a node pulls an image stored under an as whose host has a port, through the
+// settings folder certs.d/registry.example:5000, and one stored under docker.io, through
+// certs.d/docker.io.
+func TestStoreAsIntoEveryNode(t *testing.T) {
+	ctx := context.Background()
+	c := testCluster(t)
+	dir, bin := tinyProgram(t)
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM scratch\nCOPY app /app\nENTRYPOINT [\"/app\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(c.Engine.Binary, "build", "-t", "rollproof-test-img:as", dir).CombinedOutput(); err != nil {
+		t.Fatalf("build the image: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		if out, err := exec.Command(c.Engine.Binary, "rmi", "rollproof-test-img:as").CombinedOutput(); err != nil {
+			t.Errorf("remove the local image rollproof-test-img:as: %v\n%s", err, out)
+		}
+	})
+	file := filepath.Join(t.TempDir(), "app.tar")
+	if out, err := exec.Command(c.Engine.Binary, "save", "-o", file, "rollproof-test-img:as").CombinedOutput(); err != nil {
+		t.Fatalf("save the image: %v\n%s", err, out)
+	}
+
+	as := map[string]string{"a": "registry.example:5000/team/app", "b": "docker.io/rollproof/app"}
+	s, err := Store(ctx, c, bin, map[string]config.Image{
+		"a": {Archive: file, As: as["a"]},
+		"b": {Archive: file, As: as["b"]},
+	}, 2*time.Minute)
+	if err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	for _, entry := range []string{"a", "b"} {
+		ref := s.Images[entry]
+		if ref.Repository != as[entry] || !strings.HasPrefix(ref.Digest, "sha256:") {
+			t.Errorf("%s stored as %+v, want the repository %s", entry, ref, as[entry])
+		}
+		for _, n := range c.Nodes() {
+			if out, err := c.Exec(ctx, n, "crictl", "inspecti", ref.Ref()); err != nil {
+				t.Errorf("%s does not hold %s: %v\n%s", n, ref.Ref(), err, out)
+			}
+		}
 	}
 }
 
