@@ -125,12 +125,12 @@ func TestAsHosts(t *testing.T) {
 }
 ```
 
-In `TestLoadFull`, the expected `CA` becomes `filepath.Join(filepath.Dir(real), "corp-ca.pem")`; in `TestPathsAreRelativeToTheFile`, `writeCA(t, filepath.Join(dir, "certs", "corp-ca.pem"))` before the load.
+In `TestLoadFull`, the expected `CA` becomes `filepath.Join(filepath.Dir(real), "corp-ca.pem")`; in `TestPathsAreRelativeToTheFile`, the project is `project(t, "chart", "images", "certs")`, so that the folder exists, and `writeCA(t, filepath.Join(dir, "certs", "corp-ca.pem"))` comes before the load.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `go test ./internal/config/ -run 'TestRegistriesRejects|TestCARejects|TestRegistriesAccepts|TestAsHosts|TestLoadFull|TestPathsAreRelativeToTheFile' -v`
-Expected: FAIL: the form cases load with no error, `AsHosts` is not defined, and `TestLoadFull` reads `corp-ca.pem` at the old path.
+Expected: FAIL: the form cases load with no error, and `AsHosts` is not defined. `TestLoadFull` is not among the expected failures: `absolutePaths` already makes `corp-ca.pem` absolute, so its new `CA` holds before any check of the `ca` exists.
 
 - [ ] **Step 3: Implement the checks in `internal/config/registries.go`, and `(*Config).AsHosts` with its interface comment from the Interfaces block**
 

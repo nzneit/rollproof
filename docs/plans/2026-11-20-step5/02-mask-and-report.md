@@ -123,16 +123,16 @@ git commit -m "Add the masker of registry passwords, for texts and for streams"
 
 **Files:**
 - Create: `internal/report/mask.go`
-- Modify: `internal/report/record.go` (the `mask:"keep"` tags of decision 22), `internal/report/result.go` (`Writer`, `Final`), `internal/report/evidence.go` (`Evidence`, `ReplaceEvidence`)
+- Modify: `internal/report/record.go` (the `mask:"keep"` tags of decision 22, `Setting.Key` and `Setting.Default` included), `internal/report/result.go` (`Writer`, `Final`), `internal/report/evidence.go` (`Evidence`, `ReplaceEvidence`)
 - Create: `internal/report/mask_test.go`
 
 **Interfaces:**
 - Consumes: `mask.New`, `(*mask.Masker).String`, `(*mask.Masker).Writer` (Task 2).
 - Produces: `func Mask(r Run, m *mask.Masker) Run`
-  Returns a copy of r in which m has masked every string, the strings of
-  lists, pointers and map values included, except map keys and the fields
-  tagged mask:"keep", which hold a fixed vocabulary. r is not changed. The
-  console prints the copy; Final writes it.
+  Returns a copy of r in which m has masked every string, those of lists
+  and pointers included, except map keys and the fields tagged mask:"keep",
+  which hold a fixed vocabulary; times and numbers are copied as they are.
+  r is not changed. The console prints the copy; Final writes it.
 - Produces: `func (w *Writer) SetMasker(m *mask.Masker)`
   From this call on, Final writes Mask of its record, Evidence's files mask
   what is written to them, and ReplaceEvidence masks its bytes. The run
@@ -158,19 +158,27 @@ func TestWriterMasksWhatItWrites(t *testing.T) {
 
 func TestMaskReachesEveryFreeTextField(t *testing.T) {
 	// fillStrings, a reflective test helper, sets every string of a Run to "s3cret-pass": each
-	// string field, *string, list item and map value, with one map key "k". After Mask, a
-	// reflective walk lists the paths that still hold it. Want exactly these, from decision 22:
+	// string field, *string and list item. Run's only maps are map[string]int (FailedByClass of
+	// Windows[0] and of Install): each gets the one key "k". It also sets every time.Time and
+	// *time.Time (Windows[0].Start, .End, .FirstFailure; Install.Ready, .FirstObservation,
+	// .Settled, .LastFailure) to one moment, at. After Mask, a reflective walk lists the paths
+	// that still hold the password. Want exactly these, from decision 22:
 	// Verdict, Driver, Reasons[0].Code, .Verdict, .Window, Windows[0].Name, .Result,
 	// Transitions[0].Name, .Command, .Restart, Transitions[0].Workloads[0].Probed,
-	// Probes[0].Kind, Releases[0].Role, Images[0].RunBy[0].Transition, Cluster.Provider.
+	// Probes[0].Kind, Releases[0].Role, Settings[0].Key, .Default, Probes[0].Settings[0].Key,
+	// .Default, Images[0].RunBy[0].Transition, Cluster.Provider.
+	// Every time of the copy equals at, and each map of the copy still has the key "k".
 	// The filled Run is unchanged after the call.
 }
 
 func TestMaskKeepsTheVocabulary(t *testing.T) {
-	m := mask.New([]mask.Credential{{Username: "ci", Password: "pass"}})
+	m := mask.New([]mask.Credential{{Username: "ci", Password: "pass"}, {Username: "ci2", Password: "rate"}})
 	r := Mask(Run{Verdict: "pass", Windows: []Window{{Name: "steady", Result: "pass"}},
-		Reasons: []Reason{{Code: "probe-failures", Verdict: "fail", Text: "the probe said pass"}}}, m)
-	// r.Verdict == "pass", r.Windows[0].Result == "pass", r.Reasons[0].Text == "the probe said ***".
+		Reasons:  []Reason{{Code: "probe-failures", Verdict: "fail", Text: "the probe said pass"}},
+		Settings: []Setting{{Key: "probe.http.rate", Value: "100", Default: "200"}},
+		Probes:   []Probe{{Kind: "http", Settings: []Setting{{Key: "probe.http.rate", Value: "100", Default: "200"}}}}}, m)
+	// r.Verdict == "pass", r.Windows[0].Result == "pass", r.Reasons[0].Text == "the probe said ***",
+	// r.Settings[0].Key == "probe.http.rate", r.Probes[0].Settings[0].Key == "probe.http.rate".
 }
 
 func TestNoMaskerChangesNothing(t *testing.T) {
@@ -186,7 +194,7 @@ Expected: FAIL: `Mask` and `SetMasker` are not defined.
 
 - [ ] **Step 3: Implement `Mask` in `internal/report/mask.go` and `SetMasker` in `result.go`, each with its interface comment from the Interfaces block**
 
-`Mask` copies by reflection: a struct of this package is walked field by field, skipping a field tagged `mask:"keep"`; a string is masked with `m.String`; a pointer, a list and a map are copied with their contents walked, a map's keys kept; any other value, such as a `time.Time`, is copied as it is. Tag the fields that decision 22 lists in `record.go`. `Writer` holds the masker in an `atomic.Pointer[mask.Masker]`; `write` encodes `Mask(r, …)`; `Evidence` returns `m.Writer(f)`; `ReplaceEvidence` writes `[]byte(m.String(string(b)))`.
+`Mask` copies by reflection: a struct of this package is walked field by field, skipping a field tagged `mask:"keep"`; a string is masked with `m.String`; a pointer, a list and a map are copied with their contents walked, a map's keys kept; any other value, such as a `time.Time`, is copied as it is. Tag the fields that decision 22 lists in `record.go`, `Setting.Key` and `Setting.Default` among them. `Writer` holds the masker in an `atomic.Pointer[mask.Masker]`; `write` encodes `Mask(r, …)`; `Evidence` returns `m.Writer(f)`; `ReplaceEvidence` writes `[]byte(m.String(string(b)))`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 

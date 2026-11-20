@@ -5,9 +5,8 @@ Read section 9 ("The run's registry", "How the caller's image gets in", "Registr
 ### Task 4: The settings file for each host
 
 **Files:**
-- Modify: `internal/cluster/hosts.go`, `internal/cluster/hosts_test.go`
-- Create: `internal/cluster/testdata/hosts-as-mirror-ca-credentials.golden.toml`, `hosts-mirror-prefix.golden.toml`, `hosts-mirror-v2.golden.toml`, `hosts-mirror-prefix-v2.golden.toml`, `hosts-mirror-root.golden.toml`, `hosts-docker-io-mirror.golden.toml`, `hosts-docker-io-ca.golden.toml`, `hosts-ca.golden.toml`, `hosts-as-ca.golden.toml`, `hosts-as-port-ca.golden.toml`
-
+- Modify: `internal/cluster/hosts.go`, `internal/cluster/hosts_test.go` (`testdata/hosts-test.golden.toml` stays as it is)
+- Create: `internal/cluster/testdata/hosts-as-mirror-ca-credentials.golden.toml`, `hosts-mirror-prefix.golden.toml`, `hosts-mirror-v2.golden.toml`, `hosts-mirror-v2-only.golden.toml`, `hosts-mirror-prefix-v2.golden.toml`, `hosts-mirror-root.golden.toml`, `hosts-docker-io-mirror.golden.toml`, `hosts-docker-io-ca.golden.toml`, `hosts-ca.golden.toml`, `hosts-as-ca.golden.toml`, `hosts-as-port-ca.golden.toml`, `hosts-ipv6-port-ca.golden.toml`
 **Interfaces:**
 - Consumes: `config.Registry` as it is.
 - Produces: `func HostSettings(entry config.Registry, runRegistry string) string`
@@ -35,6 +34,7 @@ func TestHostSettingsGolden(t *testing.T) {
 		{"hosts-as-mirror-ca-credentials.golden.toml", config.Registry{Host: "registry.example", Username: "ci", Password: "pw", CA: ca, Mirror: "mirror.corp.example/registry-example"}, run},
 		{"hosts-mirror-prefix.golden.toml", config.Registry{Host: "registry.example", Mirror: "mirror.corp.example/registry-example"}, ""},
 		{"hosts-mirror-v2.golden.toml", config.Registry{Host: "registry.example", CA: ca, Mirror: "cache.corp.example/v2/proxy-project"}, ""},
+		{"hosts-mirror-v2-only.golden.toml", config.Registry{Host: "registry.example", Mirror: "mirror.example/v2"}, ""},
 		{"hosts-mirror-prefix-v2.golden.toml", config.Registry{Host: "registry.example", Mirror: "mirror.corp.example/cache/v2"}, ""},
 		{"hosts-mirror-root.golden.toml", config.Registry{Host: "registry.example", Mirror: "mirror.corp.example:8443"}, ""},
 		{"hosts-docker-io-mirror.golden.toml", config.Registry{Host: "docker.io", Username: "ci", Password: "pw", CA: ca, Mirror: "mirror.corp.example/docker-io"}, run},
@@ -42,6 +42,7 @@ func TestHostSettingsGolden(t *testing.T) {
 		{"hosts-ca.golden.toml", config.Registry{Host: "registry.example", CA: ca}, ""},
 		{"hosts-as-ca.golden.toml", config.Registry{Host: "registry.example", CA: ca}, run},
 		{"hosts-as-port-ca.golden.toml", config.Registry{Host: "registry.example:5000", CA: ca}, run},
+		{"hosts-ipv6-port-ca.golden.toml", config.Registry{Host: "[fd00::5]:5000", CA: ca}, ""},
 	} {
 		t.Run(tc.file, func(t *testing.T) { golden(t, tc.file, []byte(HostSettings(tc.entry, tc.runRegistry))) })
 	}
@@ -68,6 +69,12 @@ server = "https://mirror.corp.example/registry-example"
 server = "https://cache.corp.example/v2/proxy-project"
 override_path = true
 ca = "/etc/containerd/certs.d/registry.example/ca.pem"
+```
+
+```toml
+# hosts-mirror-v2-only.golden.toml (decision 6: a first segment v2, alone)
+server = "https://mirror.example/v2"
+override_path = true
 ```
 
 ```toml
@@ -113,7 +120,12 @@ ca = "/etc/containerd/certs.d/registry.example:5000/ca.pem"
   capabilities = ["pull"]
 ```
 
-The comment lines above name the files; they are not part of them. Each file ends with a line end.
+```toml
+# hosts-ipv6-port-ca.golden.toml (decision 14)
+ca = "/etc/containerd/certs.d/[fd00::5]:5000/ca.pem"
+```
+
+The comment lines above name the files; they are not part of them. Each file ends with a line end. The last file pins only what the tool writes for a bracketed IPv6 host: containerd's read of the folder `certs.d/[fd00::5]:5000` is not run, in any record or in any test of this plan.
 
 ```go
 func TestHostSettingsNeedsNoFile(t *testing.T) {
@@ -139,7 +151,7 @@ Expected: FAIL: `HostSettings` is not defined.
 
 - [ ] **Step 3: Implement `HostSettings` in `internal/cluster/hosts.go`, with its interface comment from the Interfaces block, and `HostsTOML` as a call of it**
 
-The top-level keys come before the run's table, in the order `server`, `override_path`, `ca`, because TOML puts every key after a table into that table. A `ca` is written as `/etc/containerd/certs.d/HOST/ca.pem`, with the host as written (decision 7); a helper `caPath(host string) string` gives it, for Task 5 too. The mirror's path decides `override_path`: its first segment `v2` writes the path as it is; a last segment `v2` with another first writes the path and `/v2`; any other path, or none, writes no `override_path`.
+The top-level keys come before the run's table, in the order `server`, `override_path`, `ca`, because TOML puts every key after a table into that table. A `ca` is written as `/etc/containerd/certs.d/HOST/ca.pem`, with the host as written (decision 7); a helper `caPath(host string) string` gives it, for Task 5 too. The mirror's path decides `override_path` (decision 6): a path whose first segment is `v2`, `v2` alone included, is written as it is, with `override_path = true`; a path whose last segment is `v2` and whose first is not is written with `/v2` after it, with `override_path = true`; any other path, or none, is written as it is, with no `override_path`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -149,7 +161,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add internal/cluster/hosts.go internal/cluster/hosts_test.go internal/cluster/testdata/hosts-as-mirror-ca-credentials.golden.toml internal/cluster/testdata/hosts-mirror-prefix.golden.toml internal/cluster/testdata/hosts-mirror-v2.golden.toml internal/cluster/testdata/hosts-mirror-prefix-v2.golden.toml internal/cluster/testdata/hosts-mirror-root.golden.toml internal/cluster/testdata/hosts-docker-io-mirror.golden.toml internal/cluster/testdata/hosts-docker-io-ca.golden.toml internal/cluster/testdata/hosts-ca.golden.toml internal/cluster/testdata/hosts-as-ca.golden.toml internal/cluster/testdata/hosts-as-port-ca.golden.toml
+git add internal/cluster/hosts.go internal/cluster/hosts_test.go internal/cluster/testdata/hosts-as-mirror-ca-credentials.golden.toml internal/cluster/testdata/hosts-mirror-prefix.golden.toml internal/cluster/testdata/hosts-mirror-v2.golden.toml internal/cluster/testdata/hosts-mirror-v2-only.golden.toml internal/cluster/testdata/hosts-mirror-prefix-v2.golden.toml internal/cluster/testdata/hosts-mirror-root.golden.toml internal/cluster/testdata/hosts-docker-io-mirror.golden.toml internal/cluster/testdata/hosts-docker-io-ca.golden.toml internal/cluster/testdata/hosts-ca.golden.toml internal/cluster/testdata/hosts-as-ca.golden.toml internal/cluster/testdata/hosts-as-port-ca.golden.toml internal/cluster/testdata/hosts-ipv6-port-ca.golden.toml
 git commit -m "Write a node's settings file for each shape of a registries entry"
 ```
 
@@ -234,6 +246,7 @@ func TestCreateWritesRegistrySettings(t *testing.T) {
 	//   Registries: {registry.example, ci, pw, CA: <the CA file>, Mirror: mirror.corp.example/registry-example}
 	//               and {docker.io, CA: <the CA file>};
 	//   AsHosts:    registry.example and registry.example:5000.
+	// Right after Create returns, defer c.Delete(ctx), as TestCreateAndDelete does.
 	// After Create, in each node (c.Exec cat):
 	//   /etc/containerd/certs.d/registry.example/hosts.toml      == HostSettings(Registries[0], c.NodeRegistry)
 	//   /etc/containerd/certs.d/registry.example/ca.pem          == the CA file's bytes
@@ -253,6 +266,8 @@ Expected: FAIL: `Credentials`, `Spec.Registries` and `Spec.AsHosts` are not defi
 - [ ] **Step 3: Implement `Credentials` in `credentials.go` and the changes to `Spec`, `KindConfig` and `Create`, each with its interface comment from the Interfaces block**
 
 `Credentials` marshals a map with `json.MarshalIndent` and two spaces, then a line end. The file's name is a constant `credentialsName = "node-credentials.json"`. In `Create`, right after the run's folder is made: when `Credentials(s.Registries)` is not nil, write it with mode 0600, failing the step "write the nodes' credentials file". In the node loop, before `rollproof.test`'s file: for each entry with a `ca`, `os.ReadFile(entry.CA)` once (before the loop) and `nodeutils.WriteFile` to `caPath(host)`; then, for each entry and then each host of `AsHosts` that no entry names, `HostSettings` with `c.NodeRegistry` when the host is in `AsHosts`, written to `/etc/containerd/certs.d/HOST/hosts.toml` when not empty. A failure fails the step "write the node settings" with the node's name, as today; a `ca` that cannot be read names its key, `registries[i].ca`.
+
+Then write the golden file of the mount: `go test ./internal/cluster/ -run TestKindConfigMountsTheCredentials -update`, and read `testdata/kind-credentials.golden.yaml` against the test's mount: each of the four nodes has `extraMounts` with that one entry, `containerPath: /var/lib/kubelet/config.json`, `hostPath: /tmp/rollproof-x/node-credentials.json` and `readOnly: true`, and the file is otherwise `kind-rootless.golden.yaml`.
 
 - [ ] **Step 4: Run the unit tests to verify they pass**
 
@@ -275,7 +290,7 @@ git commit -m "Write the registries' settings, certificates and credentials file
 
 **Files:**
 - Modify: `internal/images/images.go` (`Store`), `internal/images/archive.go` (`storeArchive`), `internal/images/local.go` (`storeLocal`)
-- Modify: `internal/images/own_test.go` (remove `TestStoreRefusesWhatIsNotBuilt`), `internal/images/archive_test.go`, `internal/images/images_test.go`
+- Modify: `internal/images/own_test.go` (remove `TestStoreRefusesWhatIsNotBuilt`), `internal/images/archive_test.go` (the new tests; the calls of `storeArchive` in `TestStoreArchivePushesByDigest` and `TestStoreArchiveFailures`), `internal/images/images_test.go`
 
 **Interfaces:**
 - Consumes: `cluster.Spec.AsHosts` (Task 5).
@@ -336,7 +351,7 @@ Expected: FAIL: `placeOf` is not defined.
 
 - [ ] **Step 3: Implement `placeOf` and `as` in `Store`, with `Store`'s interface comment from the Interfaces block**
 
-`type place struct{ path, repository string }` and `placeOf(entry string, im config.Image) place` in `images.go`: with no `As`, the entry's name under `cluster.TestHost`; with `As`, the part after its first `/` and the `As` itself. `storeArchive(ctx, c, entry string, at place, file, what string)` pushes under `at.path` and returns `at.repository`; `storeLocal` passes the place on. `Store` no longer refuses an entry with `As`, and its node pull is unchanged: `crictl pull` of the returned reference.
+`type place struct{ path, repository string }` and `placeOf(entry string, im config.Image) place` in `images.go`: with no `As`, the entry's name under `cluster.TestHost`; with `As`, the part after its first `/` and the `As` itself. `storeArchive(ctx context.Context, c *cluster.Cluster, entry string, at place, file, what string)` pushes under `at.path` and returns `at.repository`. Its two callers in `archive_test.go`, `TestStoreArchivePushesByDigest` and `TestStoreArchiveFailures`, pass `placeOf("orders", config.Image{Archive: …})` with the file each uses, which is the place of today (`orders`, `rollproof.test/orders`). `storeLocal(ctx context.Context, c *cluster.Cluster, entry string, at place, local string)` passes the place on to `storeArchive`. `Store` works out each entry's place once, with `placeOf`, and hands it to `storeArchive` or `storeLocal`. `Store` no longer refuses an entry with `As`, and its node pull is unchanged: `crictl pull` of the returned reference.
 
 - [ ] **Step 4: Run the unit tests to verify they pass**
 

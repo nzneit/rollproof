@@ -5,7 +5,7 @@ Read section 8 ("Secrets"), section 10 ("What a run writes", "On a signal"), sec
 ### Task 9: Masking in `run`; `registries` wired and off `NotBuilt`
 
 **Files:**
-- Modify: `internal/run/run.go` (the `writer` interface, `runState`, `setUp`, every print), `internal/run/run_test.go`, `internal/run/fakes_test.go`
+- Modify: `internal/run/run.go` (the `writer` interface, `runState`, `setUp`, `startProbe`, `takeStop`, every print), `internal/run/evidence.go` (`completeEvidence`), `internal/run/run_test.go`, `internal/run/fakes_test.go`
 - Modify: `cmd/rollproof/wire.go` (`create`, `session.Watcher`, `podOptions`), `cmd/rollproof/main_test.go`
 - Modify: `internal/config/notbuilt.go`, `internal/config/notbuilt_test.go`
 
@@ -57,6 +57,31 @@ func TestTheMaskerComesRightAfterLoad(t *testing.T) {
 	w.checkErr = verdict.Condition{Code: verdict.RunnerUnsupported, Text: "the engine said s3cret-pass"}
 	// Exit 2; result.json's reason text is "the engine said ***"; stdout holds no "s3cret".
 }
+
+func TestStderrIsMasked(t *testing.T) {
+	const pw1 = "s3cret-pass"
+	// In the style of TestAPanicInTheFinalWriteIsARefusedWrite: a runState built in the test, with
+	// mask: mask.New([]mask.Credential{{Username: "ci", Password: pw1}}), and s.finish() called.
+	// Once a configuration is loaded, a run writes to Stderr only "rollproof: cannot write
+	// results: …", in finish and in rewriteFinal (run.go). The path tested is finish's refused
+	// write, in two cases:
+	//   w: &panicWriter{text: "the results writer broke: " + pw1}: finish's deferred recover
+	//      writes "rollproof: cannot write results: the results writer broke: ***\n";
+	//   w: &panicWriter{err: errors.New("the disk said " + pw1)}: finish's branch for an error of
+	//      writeFinal writes "rollproof: cannot write results: the disk said ***\n".
+	// stderr is exactly that line, and holds no "s3cret".
+}
+
+func TestProbeLogIsClosed(t *testing.T) {
+	const pw1 = "s3cret-pass"
+	// The world with w.cfg.Registries = {registry.example, ci, pw1} and
+	// w.cluster.rawText = "first line\nlast line " + pw1 + "\n", run twice:
+	//   a run that passes (exit 0), where takeStop asks the probe to stop;
+	//   a run that a signal ends in the deploy, as TestSignalDuringDeploy does (exit 2), where
+	//   Stop is never asked.
+	// In both, w.out/evidence/probe.log is exactly "first line\nlast line ***\n": the tail that the
+	// masker held back was written when run closed the file.
+}
 ```
 
 `TestNotBuilt` in `run_test.go` gives the world an image with `As: "registry.example/team/orders"` in place of a registry, and wants the text "not built yet: images.orders.as"; `TestRunNotBuilt` in `main_test.go` does the same with `images: { orders: { local: orders:candidate, as: registry.example/team/orders } }` in place of its `registries` line. In `notbuilt_test.go`, the cases "registries" and "several at once" no longer list `registries`.
@@ -65,9 +90,12 @@ In `main_test.go`:
 
 ```go
 func TestClusterSpec(t *testing.T) {
+	ev := func(string) (io.WriteCloser, error) { return nil, nil }
 	// For a configuration with two registries, clusterSpec(cfg, "rollproof-x", true, ev) gives
 	// Name "rollproof-x", RunDir cluster.RunDir("rollproof-x"), NodeImage, RegistryImage, Workers,
 	// Namespace and Timeout from cfg, Keep true, Evidence ev, and Registries equal to cfg.Registries.
+	// Functions are compared by pointer:
+	// reflect.ValueOf(s.Evidence).Pointer() == reflect.ValueOf(ev).Pointer().
 }
 ```
 
@@ -75,12 +103,14 @@ func TestClusterSpec(t *testing.T) {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go test ./internal/run/ ./cmd/rollproof/ ./internal/config/ -run 'TestPasswordsAreMaskedEverywhere|TestTheMaskerComesRightAfterLoad|TestNotBuilt|TestRunNotBuilt|TestClusterSpec|TestPodOptions' -v`
-Expected: FAIL: the world stops at "not built yet: registries", and `clusterSpec` is not defined.
+Run: `go test ./internal/run/ ./cmd/rollproof/ ./internal/config/ -run 'TestPasswordsAreMaskedEverywhere|TestTheMaskerComesRightAfterLoad|TestStderrIsMasked|TestProbeLogIsClosed|TestNotBuilt|TestRunNotBuilt|TestClusterSpec|TestPodOptions' -v`
+Expected: FAIL: the world stops at "not built yet: registries", `runState` has no `mask`, and `clusterSpec` is not defined.
 
 - [ ] **Step 3: Implement the changes, each named one with its interface comment from the Interfaces block**
 
-In `run.go`: `runState` gains `mask *mask.Masker`; right after `Load` returns a configuration, `s.mask = mask.New(credentialsOf(cfg))` and `s.w.SetMasker(s.mask)`, before `NotBuilt` and `Check`. `credentialsOf(cfg *config.Config) []mask.Credential` takes each entry's username and password. The console is `report.Console(report.Mask(rec, s.mask))`; every other line written to `Stdout` or `Stderr` goes through `s.mask.String` (a nil masker before `Load` leaves it as it is). `panicWriter` in `run_test.go` gains a `SetMasker` that does nothing.
+In `run.go`: `runState` gains `mask *mask.Masker`; right after `Load` returns a configuration, `s.mask = mask.New(credentialsOf(cfg))` and `s.w.SetMasker(s.mask)`, before `NotBuilt` and `Check`. `credentialsOf(cfg *config.Config) []mask.Credential` takes each entry's username and password. The console is `report.Console(report.Mask(rec, s.mask))`; every other line written to `Stdout` or `Stderr` goes through `s.mask.String` (a nil masker before `Load` leaves it as it is). `panicWriter` in `run_test.go` gains a `SetMasker` that does nothing and two fields: `text`, the value its `Final` panics with (the text of today when empty), and `err`, which `Final` returns in place of the panic when set.
+
+`probe.log` is closed, so that the masker's held-back tail reaches the file (decision 3). Today `startProbe` closes it only when `Cluster.Probe` fails, and nothing closes it on the other paths. `runState` gains `probeLog io.Closer`: `startProbe` keeps `raw` there once `Cluster.Probe` has returned a probe (when `Probe` fails, it closes `raw` at once, as today). A method `closeProbeLog()` closes it once and sets it to nil. `takeStop` calls it right after `s.probe.Stop` returns, whatever Stop gave: the probe's last lines are in by then. `completeEvidence` (in `evidence.go`) calls it first, for the paths where Stop is never asked (a start that its context cut, a run that a signal ended) and for a Stop that panicked. A write that reaches the file after its Close is a write that the evidence file warns about once (`evidenceFile`), as for any other evidence file.
 
 In `wire.go`: `create` calls `cluster.Create(ctx, clusterSpec(cfg, n, keep, evidence), w.engine)`; `session.Watcher` sets `MirrorNote: cfg.MirrorNote`; `podOptions` sets `MirrorNote: cfg.MirrorNote` for both probes.
 
@@ -99,7 +129,7 @@ Expected: PASS. A run with no `registries` writes what it wrote before.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add internal/run/run.go internal/run/run_test.go internal/run/fakes_test.go cmd/rollproof/wire.go cmd/rollproof/main_test.go internal/config/notbuilt.go internal/config/notbuilt_test.go
+git add internal/run/run.go internal/run/evidence.go internal/run/run_test.go internal/run/fakes_test.go cmd/rollproof/wire.go cmd/rollproof/main_test.go internal/config/notbuilt.go internal/config/notbuilt_test.go
 git commit -m "Mask registry passwords in everything a run writes, and build registries from end to end"
 ```
 

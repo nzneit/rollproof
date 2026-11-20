@@ -133,7 +133,7 @@ git commit -m "Name the mirror in a stall's and an install's text when a pod wai
 ### Task 8: The note in `probe`, and the report's golden file
 
 **Files:**
-- Modify: `internal/probe/pod.go` (`PodOptions`, `podStateText` and its caller), `internal/probe/pod_test.go`
+- Modify: `internal/probe/pod.go` (`PodOptions`, `podStateText` and its caller), `internal/probe/pod_test.go` (`TestPodStateTextNamesTheMirror`, a case of `TestStartTimesOut`)
 - Modify: `internal/report/console_test.go`; Create: `internal/report/testdata/console-stall-mirror.golden.txt`
 
 **Interfaces:**
@@ -169,6 +169,8 @@ func TestPodStateTextNamesTheMirror(t *testing.T) {
 }
 ```
 
+`TestStartTimesOut`, the Start-level table of probe-not-started texts, checks that `Start` passes `p.o.MirrorNote` on. Its table gains a field `note func(string) string`, which the test sets as `s.pod.o.MirrorNote` right after `newProbe`, and a case "image not pulled, through a mirror": the status of the case "image not pulled"; a note function that gives `note` for `probeImage`, the image of the pod that `Start` creates, and "" for any other, with `note` the sentence of `TestPodStateTextNamesTheMirror`, made a constant of the test file that both tests share; and the wanted parts `"Pending"` and `"ImagePullBackOff; " + note`. The other cases leave `note` nil, and their texts hold no "; the nodes pull".
+
 In `console_test.go`, a record `stallMirrorRun()`: `stallRun()` whose `transition-stalled` reason's detail lines are
 
 ```
@@ -181,8 +183,8 @@ with no `pod-unschedulable` reason, added to `TestConsoleExamples` as `{"testdat
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go test ./internal/probe/ ./internal/report/ -run 'TestPodStateTextNamesTheMirror|TestConsoleExamples' -v`
-Expected: FAIL: `podStateText` takes one argument, and the golden file is missing.
+Run: `go test ./internal/probe/ ./internal/report/ -run 'TestPodStateTextNamesTheMirror|TestStartTimesOut|TestConsoleExamples' -v`
+Expected: FAIL: `podStateText` takes one argument, `PodOptions` has no `MirrorNote`, and the golden file is missing.
 
 - [ ] **Step 3: Implement the note in `probe/pod.go`, with `PodOptions.MirrorNote`'s interface comment from the Interfaces block, and write the golden file**
 

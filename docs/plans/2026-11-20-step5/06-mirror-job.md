@@ -13,13 +13,16 @@ Read section 12 ("The mirror job"), section 13 (the workflows during incubation)
   A stand-in registry for the mirror job: an in-memory registry behind TLS,
   a Basic login and path prefixes, filled from image archives before it
   listens, writing a line for each connection and each request. It stands
-  for an organization's mirror or for a real host; it is never released.
+  for an organization's mirror or for a real host, and is never released;
+  a package of the project's own module, with no go.mod of its own, as
+  fixtures/probe.
 - Produces: `func newHandler(reg http.Handler, prefixes []string, user, password string, log io.Writer) http.Handler`
-  Serves reg behind a Basic login; with prefixes, only paths under one of
-  them, the prefix taken off, and 404 for any other. No or wrong
-  credentials get 401 and WWW-Authenticate: Basic realm="rollproof-mirrorjob".
-  After each answer it writes REQ METHOD PATH user=USER status=CODE, with
-  the path as received and no query, and USER - when absent.
+  Serves reg behind a Basic login; with prefixes, only a path equal to a
+  prefix or that begins with a prefix and /, the prefix taken off, and 404
+  for any other. No or wrong credentials get 401 and WWW-Authenticate:
+  Basic realm="rollproof-mirrorjob". After each answer it writes REQ METHOD
+  PATH user=USER status=CODE, with the path as received and no query, and
+  USER - when absent.
 - Produces: `func logConnections(l net.Listener, log io.Writer) net.Listener`
   Returns l, writing CONN ADDRESS for each connection it accepts, before
   any byte of it is read.
@@ -43,8 +46,9 @@ The program's flags: `-listen ADDR` (TLS), `-cert FILE`, `-key FILE`, `-user NAM
 func TestHandlerStripsThePrefix(t *testing.T) {
 	// reg answers 200 with the path it saw. Through newHandler(reg, []string{"/docker-io", "/real"},
 	// "u", "p", log), with Basic u:p: GET /docker-io/v2/x/manifests/d reaches reg as /v2/x/manifests/d;
-	// /real/v2/ reaches it as /v2/; /other/v2/ and /v2/ are 404 and never reach reg. With no
-	// prefixes, /v2/ reaches reg as /v2/.
+	// /real/v2/ reaches it as /v2/; /other/v2/, /really/v2/ and /v2/ are 404 and never reach reg
+	// (a prefix matches only the whole path or a path that goes on with /). With no prefixes,
+	// /v2/ reaches reg as /v2/.
 }
 
 func TestHandlerAsksForALogin(t *testing.T) {
@@ -126,8 +130,10 @@ git commit -m "Add the stand-in registry of the mirror job"
   host's stand-in, which the mirror lacks (decision 19).
 - Produces: `func mirrorSetup(in mirrorInputs) [][]string`
   The job's setup commands, in order: start both stand-ins, wait for each,
-  cut the route in each node, resolve the real host's name in a node, and
-  print the password plainly and in base64.
+  a public pull in a node, which must pass, the cut in each of the four
+  nodes, the same pull, which must fail within 15 s, the resolution of the
+  real host's name in a node, and the password printed plainly and in
+  base64.
 - Produces: `const cutScript = …`
   The script that cuts a node's route to everything but the engine
   network's subnets, kind's pod and service subnets, loopback, and IPv6
@@ -166,21 +172,31 @@ The names, as constants in `mirror_helpers_test.go`: `mirrorName = "rollproof-mi
 
 `images` `{"candidate": {"local": "rollproof-fixture:candidate", "as": "docker.io/rollproof/fixture"}}`, `literal` `{"previous": {"docker.io/rollproof/fixture", in.previousDigest}}`. `mirrorReplacesItsHost` has `images` `{}` and also `literal["candidate"] = {realHost + "/team/candidate", in.candidateDigest}`.
 
-`mirrorSetup`, with E the engine and each node `rollproof-e2e-control-plane`, `-worker`, `-worker2`, `-worker3`:
+`mirrorSetup`, with E the engine, gives exactly these commands, in this order:
 
 ```go
 {E, "run", "-d", "--name", mirrorName, "--network", "kind", "-v", in.certs + ":/certs:ro", "-v", in.archives + ":/images:ro",
 	"-e", "STANDIN_PASSWORD=${env." + passwordVar + "}", standinImage, "-listen", ":8443", "-cert", "/certs/server.pem",
 	"-key", "/certs/server-key.pem", "-user", jobUser, "-prefix", "/docker-io", "-prefix", "/real",
 	"-load", "rollproof/fixture=/images/previous.tar"},
-{E, "run", "-d", "--name", realName, /* the same mounts, variable, certificate and user */ "-listen", ":5443",
+{E, "run", "-d", "--name", realName, "--network", "kind", "-v", in.certs + ":/certs:ro", "-v", in.archives + ":/images:ro",
+	"-e", "STANDIN_PASSWORD=${env." + passwordVar + "}", standinImage, "-listen", ":5443", "-cert", "/certs/server.pem",
+	"-key", "/certs/server-key.pem", "-user", jobUser,
 	"-load", "team/candidate=/images/candidate.tar"},
 {E, "exec", mirrorName, "/standin", "-check", "https://127.0.0.1:8443/v2/"},
 {E, "exec", realName, "/standin", "-check", "https://127.0.0.1:5443/v2/"},
-{E, "exec", NODE, "sh", "-c", cutScript}, // once for each of the four nodes
+{E, "exec", "rollproof-e2e-worker", "crictl", "pull", "registry.k8s.io/pause:3.10"},
+{E, "exec", "rollproof-e2e-control-plane", "sh", "-c", cutScript},
+{E, "exec", "rollproof-e2e-worker", "sh", "-c", cutScript},
+{E, "exec", "rollproof-e2e-worker2", "sh", "-c", cutScript},
+{E, "exec", "rollproof-e2e-worker3", "sh", "-c", cutScript},
+{E, "exec", "rollproof-e2e-worker", "sh", "-c",
+	`if timeout 15 crictl pull registry.k8s.io/pause:3.10; then echo "rollproof: a public pull passed the cut" >&2; exit 1; fi`},
 {E, "exec", "rollproof-e2e-worker", "getent", "hosts", realName},
 {"sh", "-c", `printf '%s\n' "$` + passwordVar + `"; printf '%s' "` + jobUser + `:$` + passwordVar + `" | base64 -w0; echo`},
 ```
+
+The real host's stand-in has no `-prefix`: it serves the registry at its root, where its candidate is `/v2/team/candidate/…`. The public pull before the cut must pass and the same pull after the cut in every node must fail within 15 s, as p02b's case D gated the cut (decision 18): a pull by tag always asks the registry, and `registry.k8s.io` is in no entry, so no mirror answers for it. A `setup` command that fails fails the run, and so the job.
 
 `cutScript`, exact (p02b's rules, with the subnets read from the node's own routes, decision 18):
 
@@ -305,8 +321,8 @@ func TestMirror(t *testing.T) {
 	forms := passwordForms(jobUser, pw)
 
 	t.Run("through the mirror", func(t *testing.T) {
-		// Before: `E rm -f -v` of mirrorName and realName. Cleanup: when the test failed, log both
-		// stand-ins' logs; then remove both.
+		// Before: removeStandins(t). Cleanup: when the test failed, log both stand-ins' logs
+		// (E logs mirrorName, E logs realName); then removeStandins(t).
 		r := runFixture(t, throughTheMirror(in))
 		expect(t, r, result{exit: 0, verdict: "pass",
 			windows: map[string]string{"steady": "pass", "deploy": "pass", "rollback": "pass"}})
@@ -327,11 +343,14 @@ func TestMirror(t *testing.T) {
 		// "only from its mirror " + mirrorHost + "/real".
 		// The mirror's log: a request with path "/real/v2/team/candidate/manifests/" +
 		// in.candidateDigest, user "rollproof", status 404.
-		// The real host's log: no CONN from an address other than 127.0.0.1 (R25).
+		// The real host's log holds "LOAD team/candidate@" + in.candidateDigest: it held the
+		// candidate. It has no CONN from an address other than 127.0.0.1 (R25).
 		// findForms(outDir(t), forms) is empty; a file under outDir(t)/evidence/commands holds "***".
 	})
 }
 ```
+
+`removeStandins(t *testing.T)`, a helper in `mirror_test.go`, removes the two stand-ins as `removeKeptCluster` removes containers: it lists every container with `E ps -a --format {{.Names}}` and runs `E rm -f -v` only of `mirrorName` and of `realName`, each when it is listed, because `rm` of a name that is absent fails on both engines. A failure of either command is a test error.
 
 - [ ] **Step 2: Vet it**
 
@@ -343,7 +362,7 @@ Expected: no output.
 Run: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags mirror -p 1 ./e2e/ -run TestMirror -v -timeout 60m`
 Expected: PASS for both subtests; afterwards `nerdctl ps -a` lists no container whose name begins with `rollproof-e2e-` or `rollproof-mirrorjob-`.
 
-**Stop rule.** When a subtest fails because the job's environment does not behave as the proofs recorded (a node that cannot resolve a stand-in's name, a cut that the script cannot apply, a settings folder with a port that containerd does not read, credentials under a key with a port that the kubelet does not match), stop and report to the maintainer with the results folder and the stand-ins' logs. Do not change the expected results to make the job pass.
+**Stop rule.** When a subtest fails because the job's environment does not behave as the proofs recorded (a node that cannot resolve a stand-in's name, a public pull that fails before the cut or passes after it, a cut that the script cannot apply, a settings folder with a port that containerd does not read, credentials under a key with a port that the kubelet does not match), stop and report to the maintainer with the results folder and the stand-ins' logs. Do not change the expected results to make the job pass.
 
 - [ ] **Step 4: Commit**
 
@@ -404,13 +423,19 @@ jobs:
 
 In `README.md`, after "What works now", one paragraph:
 
-> `registries` tells the cluster's nodes how to pull from a host. A `mirror` replaces the host: the nodes pull its images from the mirror alone, and a mirror that lacks an image fails the pull. A `ca` adds a certificate authority for the place the nodes pull from. `username` and `password` go into a credentials file that every node mounts and that any pod in the cluster can read, so give credentials that can only read and expire soon. Write Docker Hub as `docker.io`. `as` in `images` stores an image under the repository that the real manifests name, so the manifest under test is the one that deploys. A registry password is masked as `***` in the console, in `result.json` and in the evidence folder, in its plain form and in each form the tool writes it in; nothing else is masked. A mirror that the nodes must reach without a proxy goes into the caller's own `NO_PROXY`, which kind passes into the nodes (read in kind's source, not run).
+> `registries` tells the cluster's nodes how to pull from a host. A `mirror` replaces the host: the nodes pull its images from the mirror alone, and a mirror that lacks an image fails the pull. A `ca` adds a certificate authority for the place the nodes pull from. `username` and `password` go into a credentials file that every node mounts; any pod that mounts that path of its node can therefore read it, so give credentials that can only read and expire soon. Write Docker Hub as `docker.io`. `as` in `images` stores an image under the repository that the real manifests name, so the manifest under test is the one that deploys. A registry password is masked as `***` in the console, in `result.json` and in the evidence folder, in its plain form and in each form the tool writes it in; nothing else is masked. A mirror that the nodes must reach without a proxy goes into the caller's own `NO_PROXY`, which kind passes into the nodes (read in kind's source, not run).
 
 and, after the paragraph on the suite:
 
 > The mirror job, `go test -tags mirror -p 1 ./e2e/ -run TestMirror -v -timeout 60m` (with `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0` before it on nerdctl), runs the first fixture through a mirror that needs a login, sits under a path and serves TLS from a private authority, with the nodes' route to public registries cut, and then a run whose candidate the mirror lacks. Its workflow in the host repository, `rollproof-mirror.yml`, starts only by hand.
 
-In `e2e/doc.go`, a paragraph: the mirror job carries the tag `mirror`, shares `harness_test.go` with the suite, and runs with the command above.
+In `e2e/doc.go`, a paragraph: the mirror job carries the tag `mirror`, shares `harness_test.go` with the suite, and runs, one test at a time, with its own command, not the suite's:
+
+```
+go test -tags mirror -p 1 ./e2e/ -run TestMirror -v -timeout 60m
+```
+
+with `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0` before it on nerdctl, and `CGO_ENABLED=0` in the environment on Docker, as the workflow sets it.
 
 In `docs/proofs/README.md`, below the "Still unproved" line for `p02-mirror-credentials` and `p02b-mirror-forms`: "Run since by tests of the plan `docs/plans/2026-11-20-step5/`, not as proofs: a settings folder for a host with a port and `as` on Docker Hub (Task 6's cluster test), and a Docker Hub path other than `library/` (the mirror job, Task 13)."
 
