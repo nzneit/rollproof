@@ -382,8 +382,10 @@ func TestCustomImageForms(t *testing.T) {
 			t.Errorf("image %q: %v", image, err)
 		}
 	}
-	for _, image := range []string{"${images.probe.repository}", "x${images.probe.ref}", "a@b@${images.probe.digest}"} {
+	for _, image := range []string{"${images.probe.repository}", "x${images.probe.ref}", "a@b@${images.probe.digest}",
+		"not a repo@${images.probe.digest}"} {
 		_, err := loadText(t, custom(image))
 		rejected(t, err, "probe.custom.image")
+		rejected(t, err, "must name a digest: REPOSITORY@sha256:…, ${images.NAME.ref}, or a reference that ends in @${images.NAME.digest}")
 	}
 }

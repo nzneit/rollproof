@@ -67,8 +67,9 @@ func (c *Cluster) CollectLogs(ctx context.Context) error {
 	return collectLogs(ctx, c.Engine, c.provider, c.Name, c.RunDir, c.evidence)
 }
 
-// copyLogs writes every regular file under dir into the evidence under kind/<path>. A folder that
-// kind's collection did not make is no error: that collection's error says why.
+// copyLogs writes every regular file under dir into the evidence under kind/<path>, and closes
+// each file once it is copied. A folder that kind's collection did not make is no error: that
+// collection's error says why. An error to close a file is collected as a copy's error is.
 func copyLogs(evidence func(string) (io.WriteCloser, error), dir string) error {
 	var errs []error
 	walk := func(path string, d fs.DirEntry, err error) error {
@@ -86,8 +87,10 @@ func copyLogs(evidence func(string) (io.WriteCloser, error), dir string) error {
 		if err == nil {
 			var f *os.File
 			if f, err = os.Open(path); err == nil {
-				defer f.Close()
 				err = writeEvidence(evidence, filepath.Join("kind", rel), f)
+				if closeErr := f.Close(); closeErr != nil {
+					errs = append(errs, closeErr)
+				}
 			}
 		}
 		if err != nil {

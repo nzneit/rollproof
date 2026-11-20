@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -956,6 +957,81 @@ func TestAFinishIsWrittenWhileTheWindowIsOpen(t *testing.T) {
 	}
 	if !<-seen {
 		t.Error("the deploy's finish was not in windows.json within 5 s while its command ran")
+	}
+}
+
+// Rule 10: a pod log's evidence write that fails only at the watcher's Stop, after the console was
+// printed, is a warning on the console and in result.json.
+func TestWarningAtTheWatchersStop(t *testing.T) {
+	w := newWorld(t)
+	var podLog io.WriteCloser
+	w.hooks["watcher"] = func() { // a follower opens the pod's log and writes its first line
+		podLog, _ = w.evidence("pods/orders-a-1.log")
+		if _, err := podLog.Write([]byte("listening\n")); err != nil {
+			t.Error(err)
+		}
+	}
+	w.hooks["watch-stop"] = func() { // the file is closed under the follower, and its last write fails
+		_ = podLog.Close()
+		_, _ = podLog.Write([]byte("stopped\n"))
+	}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	const prefix = "the evidence pods/orders-a-1.log could not be written: "
+	r := w.result()
+	if len(r.Warnings) != 1 || !strings.HasPrefix(r.Warnings[0], prefix) {
+		t.Errorf("result.json's warnings are %q, want the pod log's", r.Warnings)
+	}
+	lines := strings.Split(strings.TrimSuffix(w.stdout.String(), "\n"), "\n")
+	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "warning: "+prefix) {
+		t.Errorf("the console's last line is %q, want the pod log's warning", last)
+	}
+}
+
+// Section 14, point 25: the checks that the probe's start met, whose lines were written about 2 s
+// after their t, are counted in the install window, and so are in timeline.tsv's rows, which then
+// begin at the second of the earliest of them; the rows' sums equal the counts of result.json.
+func TestTimelineHoldsTheChecksTheInstallCounts(t *testing.T) {
+	w := newWorld(t)
+	events := []probe.Event{failureAt(-17*time.Second, -15*time.Second)} // the first observation
+	events = append(events, passes(-15, -15)...)
+	events = append(events, failureAt(-16600*time.Millisecond, -14600*time.Millisecond),
+		failureAt(-16200*time.Millisecond, -14200*time.Millisecond))
+	w.probe.events = append(events, passes(-14, 70)...)
+	w.run(context.Background())
+	r := w.result()
+	if r.Install == nil || r.Install.Failed != 3 {
+		t.Fatalf("install %+v, want the three failures of the probe's start counted", r.Install)
+	}
+	b, err := os.ReadFile(filepath.Join(w.out, "evidence", "timeline.tsv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")[1:]
+	if !strings.HasPrefix(rows[0], "2026-11-13T09:59:43Z\t") {
+		t.Fatalf("timeline.tsv's first row is %q, want the second of the earliest check, 09:59:43", rows[0])
+	}
+	if len(rows) != 87 {
+		t.Errorf("%d rows, want 87: from t0-17s to the rollback's end at t0+70s", len(rows))
+	}
+	checks, failed := 0, 0
+	for _, row := range rows {
+		f := strings.Split(row, "\t")
+		c, err1 := strconv.Atoi(f[1])
+		n, err2 := strconv.Atoi(f[2])
+		if err1 != nil || err2 != nil {
+			t.Fatalf("row %q does not hold two counts", row)
+		}
+		checks, failed = checks+c, failed+n
+	}
+	want := r.Install.Checks
+	for _, win := range r.Windows {
+		want += win.Checks
+	}
+	if checks != want || failed != r.Install.Failed {
+		t.Errorf("the rows sum to %d checks and %d failed, want %d and %d, the counts of result.json",
+			checks, failed, want, r.Install.Failed)
 	}
 }
 

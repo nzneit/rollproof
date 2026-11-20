@@ -129,6 +129,9 @@ type world struct {
 	watcher                      *fakeWatcher
 	probe                        *fakeProbe
 	stdout, stderr               bytes.Buffer
+	// evidence is the opener of evidence files that the run gave Units.Create, which the real
+	// cluster unit hands to the watcher for its pod logs.
+	evidence func(string) (io.WriteCloser, error)
 }
 
 // fakeCluster is the Cluster that Units.Create returns.
@@ -622,6 +625,7 @@ func (w *world) units() Units {
 		},
 		Create: func(ctx context.Context, cfg *config.Config, name string, evidence func(string) (io.WriteCloser, error)) (Cluster, error) {
 			w.calls.add("create")
+			w.evidence = evidence
 			w.hook("create")
 			if w.createErr != nil {
 				return nil, w.createErr

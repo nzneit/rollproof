@@ -116,6 +116,47 @@ func TestCollectLogsCopiesEveryFile(t *testing.T) {
 	}
 }
 
+// openUnder counts the process's open file descriptors whose path is under dir.
+func openUnder(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, e := range entries {
+		if target, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name())); err == nil &&
+			strings.HasPrefix(target, dir+string(filepath.Separator)) {
+			n++
+		}
+	}
+	return n
+}
+
+// Each of kind's files is closed once it is copied, not when the walk ends.
+func TestCopyLogsClosesEachFile(t *testing.T) {
+	dir, evDir := t.TempDir(), t.TempDir()
+	for _, name := range []string{"a.log", "b.log", filepath.Join("node", "c.log"), filepath.Join("node", "d.log")} {
+		writeTestFile(t, filepath.Join(dir, name), "says "+name)
+	}
+	copies, most := 0, 0
+	ev := evidenceDir(evDir)
+	evidence := func(name string) (io.WriteCloser, error) {
+		copies++
+		most = max(most, openUnder(t, dir))
+		return ev(name)
+	}
+	if err := copyLogs(evidence, dir); err != nil {
+		t.Fatalf("copyLogs: %v", err)
+	}
+	if copies != 4 || most != 1 {
+		t.Errorf("%d copies with at most %d of kind's files open, want 4 with 1: the file being copied", copies, most)
+	}
+	if n := openUnder(t, dir); n != 0 {
+		t.Errorf("%d of kind's files are open after the copy, want none", n)
+	}
+}
+
 func TestCollectLogsWithNoRegistry(t *testing.T) {
 	replaceLogSeams(t)
 	runDir, evDir := t.TempDir(), t.TempDir()

@@ -226,6 +226,9 @@ type runState struct {
 	signalSeen  bool // a signal was already reported as the interrupted reason
 	commands    []*command
 	clusterSeen *report.Cluster
+	// finalWritten says that the final result.json is in place, so that a warning raised in the
+	// clean-up is printed and written again (lateWarnings).
+	finalWritten bool
 }
 
 // sequence performs steps 1 to 13 and returns the value of a panic, if one
@@ -947,6 +950,7 @@ func (s *runState) finish() (code int) {
 		return 2
 	}
 	written = true
+	s.finalWritten = true
 	before := len(s.warnings.all())
 	s.completeEvidence()
 	if len(s.warnings.all()) != before {
@@ -1023,7 +1027,9 @@ func (s *runState) cleanUpQuietly() {
 // warning.
 func (s *runState) cleanUp() {
 	if s.watcher != nil {
+		before := len(s.warnings.all())
 		s.watcher.Stop()
+		s.lateWarnings(before)
 	}
 	switch {
 	case s.o.KeepCluster:
@@ -1074,6 +1080,27 @@ func (s *runState) signalAfterTheVerdict() {
 func (s *runState) warnAfterConsole(text string) {
 	s.warnings.add(text)
 	fmt.Fprintln(s.o.Stdout, "warning: "+text)
+	func() {
+		defer func() { _ = recover() }()
+		if err := s.w.Final(s.record()); err != nil {
+			fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
+		}
+	}()
+}
+
+// lateWarnings prints the warnings from the first-th on, and replaces result.json with them, as
+// warnAfterConsole does. The watcher's pod-log followers write and close their evidence files
+// until its Stop, which comes after the console was printed, and a failed write or close is a
+// warning then (rule 10). It does nothing when no warning came, or when the final result.json was
+// never written: that write was refused, the console was not printed, and the exit code says so.
+func (s *runState) lateWarnings(first int) {
+	all := s.warnings.all()
+	if !s.finalWritten || len(all) <= first {
+		return
+	}
+	for _, text := range all[first:] {
+		fmt.Fprintln(s.o.Stdout, "warning: "+text)
+	}
 	func() {
 		defer func() { _ = recover() }()
 		if err := s.w.Final(s.record()); err != nil {

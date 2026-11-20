@@ -258,6 +258,26 @@ func writeTimeline(w io.Writer, obs []verdict.Observation, pods []watch.PodEvent
 	return b.Flush()
 }
 
+// timelineFrom is the moment from which timeline.tsv's rows begin: first, the runtime's stamp of
+// the probe's first observation, or the earliest t of an observation that the install window
+// counts when that is earlier. The install window, which opens no earlier than first, counts every
+// observation whose t is before its start (section 6), such as the checks that the probe's start
+// met and whose lines were written late, so that every check and failure the install record counts
+// falls in a row (section 14, point 25). A run with no install window counts none of them, and its
+// rows begin at first.
+func timelineFrom(t verdict.Timeline, first time.Time) time.Time {
+	if len(t.Windows) == 0 || t.Windows[0].Name != verdict.Install || t.Windows[0].Start.IsZero() {
+		return first
+	}
+	from := first
+	for _, o := range t.Observations {
+		if o.T.Before(from) {
+			from = o.T
+		}
+	}
+	return from
+}
+
 // completeEvidence writes the marks a last time, timeline.tsv and the events
 // of both namespaces, after the final result.json and before the cluster is
 // deleted. Each failure is one warning and changes no verdict. The events'
@@ -286,8 +306,9 @@ func (s *runState) completeEvidence() {
 		if s.watcher != nil {
 			pods = s.watcher.PodEvents()
 		}
+		from := timelineFrom(t, first)
 		if err := s.writeEvidence("timeline.tsv", func(w io.Writer) error {
-			return writeTimeline(w, t.Observations, pods, first, to)
+			return writeTimeline(w, t.Observations, pods, from, to)
 		}); err != nil {
 			s.warnings.add("the evidence timeline.tsv was not written: " + err.Error())
 		}

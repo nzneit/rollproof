@@ -65,15 +65,37 @@ var (
 	imageDigestRe = regexp.MustCompile(`^(?:[^$@]+|\$\{images\.[^}]+\.repository\})@\$\{images\.[^}]+\.digest\}$`)
 )
 
+// placeholderDigest and placeholderRepository stand in for the ${images.…} forms of
+// probe.custom.image when it is checked, before the images exist (section 8).
+const (
+	placeholderDigest     = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	placeholderRepository = "rollproof.test/placeholder"
+)
+
+// imageFormAnyRe is any one ${images.NAME.digest}, .repository or .ref form.
+var imageFormAnyRe = regexp.MustCompile(`\$\{images\.[^}]+\.(digest|repository|ref)\}`)
+
 // imageHasDigest reports whether probe.custom.image, as Load reads it before the images are
 // stored, names a digest: a reference with @ and a digest, the form ${images.NAME.ref} alone, or
 // a reference that ends in @${images.NAME.digest}. Before that @ stands a literal repository or
-// ${images.NAME.repository}; a part that holds an @ of its own is refused.
+// ${images.NAME.repository}; a part that holds an @ of its own is refused. Each form is then
+// replaced by a placeholder, a reference with a digest for .ref, a digest for .digest and a
+// repository for .repository, and the result must parse as a reference with a digest, so that a
+// literal part that no runtime could pull, such as one with a space, is refused at load.
 func imageHasDigest(image string) bool {
-	if imageRefRe.MatchString(image) || imageDigestRe.MatchString(image) {
-		return true
+	if strings.Contains(image, "${") && !imageRefRe.MatchString(image) && !imageDigestRe.MatchString(image) {
+		return false
 	}
-	_, err := name.NewDigest(image)
+	filled := imageFormAnyRe.ReplaceAllStringFunc(image, func(form string) string {
+		switch imageFormAnyRe.FindStringSubmatch(form)[1] {
+		case "digest":
+			return placeholderDigest
+		case "repository":
+			return placeholderRepository
+		}
+		return placeholderRepository + "@" + placeholderDigest
+	})
+	_, err := name.NewDigest(filled)
 	return err == nil
 }
 
