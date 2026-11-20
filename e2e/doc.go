@@ -9,8 +9,9 @@
 // The suite runs every row of section 12 under both Helm majors and takes
 // about two and a half hours. It needs Linux, a container engine that kind supports
 // (docker, nerdctl or podman), the Helm binaries and kubectl under .tools/,
-// which `go run ./hack/fetchhelm` puts there, and busybox's archive at
-// .tools/busybox-1.37.0.tar, which the first run of the suite pulls and saves.
+// which `go run ./hack/fetchhelm` puts there (kubectl for linux/amd64 only),
+// and busybox's archive at .tools/busybox-1.37.0.tar, which the first run of
+// the suite pulls and saves.
 // Each run creates the cluster rollproof-e2e and deletes it at its end, so
 // the suite runs one test at a time:
 //
