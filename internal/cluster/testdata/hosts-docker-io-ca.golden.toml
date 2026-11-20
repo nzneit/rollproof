@@ -1,0 +1,1 @@
+ca = "/etc/containerd/certs.d/docker.io/ca.pem"

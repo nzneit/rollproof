@@ -1,0 +1,2 @@
+server = "https://mirror.example/v2"
+override_path = true

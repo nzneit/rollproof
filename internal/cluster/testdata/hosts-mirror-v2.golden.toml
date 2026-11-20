@@ -1,0 +1,3 @@
+server = "https://cache.corp.example/v2/proxy-project"
+override_path = true
+ca = "/etc/containerd/certs.d/registry.example/ca.pem"
