@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -327,12 +328,30 @@ func TestDaemonSet(t *testing.T) {
 }
 
 // Row 23. The chart has a hook after the install and one before the upgrade, each a Job that runs
-// longer than the settle time: pass; no window closes while Helm runs.
+// longer than the settle time: pass; no window closes while Helm runs. Helm exits only after the
+// post-install Job has completed, and the install is not ready until Helm has exited (section 7),
+// so the install's ready time in result.json comes at or after that Job's completion event in
+// evidence/events.txt; and the deploy's first finish comes 20 s or more after its start, the
+// pre-upgrade hook's run.
 func TestHooksLongerThanTheSettleTime(t *testing.T) {
 	values := map[string]any{"hooks": true, "hookSleep": "20s"}
 	f := fixture{name: "hooks-longer-than-the-settle-time", previous: values, candidate: values}
 	underBothHelms(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
+		rec := readRecord(t, outDir(t))
+		if rec.Install == nil {
+			t.Fatal("result.json has no install")
+		}
+		// The event's time is a whole second, truncated by the API server, and the ready time is
+		// truncated to the millisecond; neither is rounded up. In a correct run the true ready time
+		// is at or after the true completion, and truncation keeps that order, because a second is
+		// a whole number of milliseconds. The coarser second can only make the check easier to meet
+		// (by under a second), never harder; an install ready while the 20 s hook ran fails it.
+		completed := jobCompleted(t, outDir(t), "orders", "orders-post-install")
+		if rec.Install.Ready.Before(completed) {
+			t.Errorf("install ready %s, before the post-install Job completed at %s",
+				rec.Install.Ready.Format(time.RFC3339Nano), completed.Format(time.RFC3339Nano))
+		}
 		marks, err := readMarks(filepath.Join(outDir(t), "evidence", "windows.json"))
 		if err != nil {
 			t.Fatal(err)
@@ -346,6 +365,38 @@ func TestHooksLongerThanTheSettleTime(t *testing.T) {
 			t.Errorf("deploy: start %v, finishes %v; want the first finish 20 s or more after the start", m.Start, m.Finishes)
 		}
 	})
+}
+
+// jobCompleted returns the time of the latest event with reason Completed about job/name in
+// namespace, read from out/evidence/events.txt, whose lines are tab-separated: the time in RFC
+// 3339, the namespace, the type, the reason, the object as kind/name, the count and the message
+// (watch.WriteEvents). It fails the test when the file cannot be read, a matching line's time
+// cannot be read, or no line matches.
+func jobCompleted(t *testing.T, out, namespace, name string) time.Time {
+	t.Helper()
+	path := filepath.Join(out, "evidence", "events.txt")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the events: %v", err)
+	}
+	var latest time.Time
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) < 7 || f[1] != namespace || f[3] != "Completed" || f[4] != "job/"+name {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339, f[0])
+		if err != nil {
+			t.Fatalf("%s: the time of %q: %v", path, line, err)
+		}
+		if at.After(latest) {
+			latest = at
+		}
+	}
+	if latest.IsZero() {
+		t.Fatalf("%s has no Completed event of job/%s in namespace %s", path, name, namespace)
+	}
+	return latest
 }
 
 // Row 24. The candidate's pods serve at first and then fail requests for some seconds, beginning

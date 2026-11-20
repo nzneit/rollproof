@@ -688,6 +688,7 @@ type recordWindow struct {
 
 // recordInstall is result.json's install, as the step 4 rows read it.
 type recordInstall struct {
+	Ready             time.Time  `json:"ready"`
 	FirstObservation  *time.Time `json:"first_observation"`
 	Settled           *time.Time `json:"settled"`
 	LastFailure       *time.Time `json:"last_failure"`
