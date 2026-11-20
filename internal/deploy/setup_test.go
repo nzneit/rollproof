@@ -57,13 +57,22 @@ func TestSetupStopsAtTheFirstFailure(t *testing.T) {
 	}
 }
 
+// The index Setup gives is the failed command's when it is the last of three.
+func TestSetupGivesTheIndexOfTheLastCommand(t *testing.T) {
+	h := newHarness(t, os.Environ())
+	r, i := Setup(t.Context(), h.runner, [][]string{{"true"}, {"true"}, {"sh", "-c", "exit 5"}}, time.Minute)
+	if r.Ending != ExitedNonZero || r.ExitCode != 5 || i != 2 {
+		t.Errorf("Setup gave %+v and index %d, want exit-nonzero, exit code 5, index 2", r, i)
+	}
+}
+
 func TestSetupEndings(t *testing.T) {
 	setKillAfter(t, 200*time.Millisecond)
 	h := newHarness(t, os.Environ())
 	t.Cleanup(h.runner.Close)
 
-	if r, _ := Setup(t.Context(), h.runner, [][]string{{"rollproof-test-no-such-program"}}, time.Minute); r.Ending != NotStarted || r.ExitCode != -1 {
-		t.Errorf("a program that cannot start: %+v, want not-started, exit code -1", r)
+	if r, i := Setup(t.Context(), h.runner, [][]string{{"rollproof-test-no-such-program"}}, time.Minute); r.Ending != NotStarted || r.ExitCode != -1 || i != 0 {
+		t.Errorf("a program that cannot start: %+v and index %d, want not-started, exit code -1, index 0", r, i)
 	}
 
 	start := time.Now()

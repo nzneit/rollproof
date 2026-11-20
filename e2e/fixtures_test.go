@@ -345,8 +345,9 @@ func TestHooksLongerThanTheSettleTime(t *testing.T) {
 		// The event's time is a whole second, truncated by the API server, and the ready time is
 		// truncated to the millisecond; neither is rounded up. In a correct run the true ready time
 		// is at or after the true completion, and truncation keeps that order, because a second is
-		// a whole number of milliseconds. The coarser second can only make the check easier to meet
-		// (by under a second), never harder; an install ready while the 20 s hook ran fails it.
+		// a whole number of milliseconds, so a correct run never fails the check. The coarser
+		// second makes it easier to meet: it proves that the install was not ready more than a
+		// second before the hook completed, not that it was not ready in the hook's last second.
 		completed := jobCompleted(t, outDir(t), "orders", "orders-post-install")
 		if rec.Install.Ready.Before(completed) {
 			t.Errorf("install ready %s, before the post-install Job completed at %s",
