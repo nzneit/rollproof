@@ -980,12 +980,6 @@ func (s *runState) writeFinal(rec report.Run, n int) error {
 	return nil
 }
 
-// record returns the report's record of the run so far.
-func (s *runState) record() report.Run {
-	rec, _ := s.recordAndWarnings()
-	return rec
-}
-
 // recordAndWarnings returns the report's record of the run so far, and how many of the run's
 // warnings it holds.
 func (s *runState) recordAndWarnings() (report.Run, int) {
