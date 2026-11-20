@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"encoding/json"
 	"maps"
 	"os"
 	"path/filepath"
@@ -16,8 +17,11 @@ import (
 // The fixture probe, rollproof-fixture-probe:dev, with env; TARGET is set
 // to http://orders.orders.svc beside the given entries.
 func fixtureProbe(env map[string]string) *customProbe {
-	all := map[string]string{"TARGET": "http://orders.orders.svc"}
-	maps.Copy(all, env)
+	all := maps.Clone(env)
+	if all == nil {
+		all = map[string]string{}
+	}
+	all["TARGET"] = "http://orders.orders.svc"
 	return &customProbe{image: "probe", env: all}
 }
 
@@ -69,6 +73,112 @@ func checkSetupOutput(t *testing.T, want string) {
 	}
 }
 
+// checkCustomProbeRecord fails the test unless rec has exactly one probe, of kind custom, each
+// transition of ran is in rec with one workload or more, and every workload of every transition
+// in rec reads probed "not known": with a custom probe the tool checks no target (section 10).
+func checkCustomProbeRecord(t *testing.T, rec record, ran ...string) {
+	t.Helper()
+	if len(rec.Probes) != 1 || rec.Probes[0].Kind != "custom" {
+		t.Errorf("probes %+v; want one, of kind custom", rec.Probes)
+	}
+	for _, name := range ran {
+		if tr := rec.transition(t, name); len(tr.Workloads) == 0 {
+			t.Errorf("%s: no workload, want one or more", name)
+		}
+	}
+	for _, tr := range rec.Transitions {
+		for _, w := range tr.Workloads {
+			if w.Probed != "not known" {
+				t.Errorf("%s: %s probed %q, want not known", tr.Name, w.Workload, w.Probed)
+			}
+		}
+	}
+}
+
+// checkProbePodRestricted fails the test unless evidence/probe-pod.json in the test's results
+// folder holds a pod in the namespace rollproof-probe whose container probe has the settings of
+// the restricted Pod Security level that section 6 gives every probe pod: user 65532, not root,
+// no privilege escalation, every capability dropped and the runtime's default seccomp profile.
+func checkProbePodRestricted(t *testing.T) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(outDir(t), "evidence", "probe-pod.json"))
+	if err != nil {
+		t.Fatalf("the probe pod's evidence: %v", err)
+	}
+	var pod struct {
+		Metadata struct {
+			Namespace string `json:"namespace"`
+		} `json:"metadata"`
+		Spec struct {
+			Containers []struct {
+				Name            string `json:"name"`
+				SecurityContext *struct {
+					RunAsUser                *int64 `json:"runAsUser"`
+					RunAsNonRoot             *bool  `json:"runAsNonRoot"`
+					AllowPrivilegeEscalation *bool  `json:"allowPrivilegeEscalation"`
+					Capabilities             *struct {
+						Drop []string `json:"drop"`
+					} `json:"capabilities"`
+					SeccompProfile *struct {
+						Type string `json:"type"`
+					} `json:"seccompProfile"`
+				} `json:"securityContext"`
+			} `json:"containers"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(b, &pod); err != nil {
+		t.Fatalf("evidence/probe-pod.json: %v", err)
+	}
+	if pod.Metadata.Namespace != "rollproof-probe" {
+		t.Errorf("the probe pod ran in the namespace %q, want rollproof-probe", pod.Metadata.Namespace)
+	}
+	found := false
+	for _, c := range pod.Spec.Containers {
+		if c.Name != "probe" {
+			continue
+		}
+		found = true
+		sc := c.SecurityContext
+		if sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != 65532 || sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot ||
+			sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation ||
+			sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" ||
+			sc.SeccompProfile == nil || sc.SeccompProfile.Type != "RuntimeDefault" {
+			t.Errorf("the container probe's security settings are %s; want user 65532, runAsNonRoot, no privilege escalation, drop ALL and RuntimeDefault", securityText(sc))
+		}
+	}
+	if !found {
+		t.Errorf("evidence/probe-pod.json has no container probe")
+	}
+}
+
+// securityText is v as JSON, for a failure's text.
+func securityText(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err.Error()
+	}
+	return string(b)
+}
+
+// steadyStart fails the test unless rec has a first observation and a steady window that began
+// from 15 s (limits.settle) to under 20 s after it, the range in which section 12 holds the steady
+// window's start for the two rows whose probe fails its first seconds. It logs that time beside
+// logInstallFailures, for section 14, point 7, and returns the first observation and the start.
+func steadyStart(t *testing.T, rec record) (first, start time.Time) {
+	t.Helper()
+	s := rec.window(t, "steady")
+	if rec.Install == nil || rec.Install.FirstObservation == nil || s.Start == nil {
+		t.Fatalf("install %+v, steady %+v; want a first observation and a steady start", rec.Install, s)
+	}
+	first, start = *rec.Install.FirstObservation, *s.Start
+	d := start.Sub(first)
+	t.Logf("steady window: began %v after the first observation", d)
+	if d < 15*time.Second || d >= 20*time.Second {
+		t.Errorf("the steady window began %v after the first observation, want from 15 s to under 20 s", d)
+	}
+	return first, start
+}
+
 // logInstallFailures logs the figure that section 14, point 7, asks every run to record: the
 // install window's failures and how long before the steady window the last of them came.
 func logInstallFailures(t *testing.T, rec record) {
@@ -93,7 +203,9 @@ func TestCustomProbeGoesSilentOnTheCandidate(t *testing.T) {
 	underBothHelms(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 2, verdict: "not-verified", codes: []string{"probe-silent"}, decided: "probe-silent",
 			windows: map[string]string{"steady": "pass", "deploy": "not-verified", "rollback": "not-run"}})
-		checkReasonWindow(t, readRecord(t, outDir(t)), "probe-silent", "deploy")
+		rec := readRecord(t, outDir(t))
+		checkReasonWindow(t, rec, "probe-silent", "deploy")
+		checkCustomProbeRecord(t, rec, "deploy")
 	})
 }
 
@@ -105,7 +217,9 @@ func TestCustomProbeExitsOnTheCandidate(t *testing.T) {
 	underBothHelms(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 2, verdict: "not-verified", codes: []string{"probe-exited"}, decided: "probe-exited",
 			windows: map[string]string{"steady": "pass", "deploy": "not-verified", "rollback": "not-run"}})
-		checkReasonWindow(t, readRecord(t, outDir(t)), "probe-exited", "deploy")
+		rec := readRecord(t, outDir(t))
+		checkReasonWindow(t, rec, "probe-exited", "deploy")
+		checkCustomProbeRecord(t, rec, "deploy")
 	})
 }
 
@@ -117,9 +231,7 @@ func TestTCPLoopJudgesTheFirstFixture(t *testing.T) {
 	underBothHelms(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 		rec := readRecord(t, outDir(t))
-		if len(rec.Probes) != 1 || rec.Probes[0].Kind != "custom" {
-			t.Errorf("probes %+v; want one, of kind custom", rec.Probes)
-		}
+		checkCustomProbeRecord(t, rec, "deploy", "rollback")
 		if w := rec.workload(t, "deploy", "deployment/orders"); w.Probed != "not known" || w.PodsReplaced != 2 {
 			t.Errorf("deploy: deployment/orders probed %q, replaced %d; want not known and 2", w.Probed, w.PodsReplaced)
 		}
@@ -147,6 +259,8 @@ func TestProbeFailsItsFirstFiveSeconds(t *testing.T) {
 				t.Errorf("%s: %d failed, want none", name, w.Failed)
 			}
 		}
+		checkCustomProbeRecord(t, rec, "deploy", "rollback")
+		steadyStart(t, rec)
 		logInstallFailures(t, rec)
 	})
 }
@@ -163,16 +277,21 @@ func TestProbeFailsItsFirstTwentySeconds(t *testing.T) {
 		}
 		expect(t, r, result{exit: 2, verdict: "not-verified", codes: []string{"steady-not-clean"}, decided: "steady-not-clean",
 			windows: map[string]string{"steady": "not-verified", "deploy": "not-run", "rollback": "not-run"}})
+		first, start := steadyStart(t, rec)
 		s := rec.window(t, "steady")
-		if in.FirstObservation == nil || s.Start == nil {
-			t.Fatalf("install %+v, steady %+v; want a first observation and a steady start", in, s)
+		if in.Failed == 0 || s.Failed == 0 {
+			t.Errorf("install %d failed, steady %d failed; want failures in both", in.Failed, s.Failed)
 		}
-		if d := s.Start.Sub(*in.FirstObservation); d < 15*time.Second || d >= 20*time.Second {
-			t.Errorf("the steady window began %v after the first observation, want from 15 s to under 20 s", d)
+		// The failures from 15 s after the first observation on are the steady window's: the install
+		// window's last failure comes at that moment or before, and the steady window's first at its
+		// start or after.
+		if in.LastFailure == nil || in.LastFailure.After(first.Add(15*time.Second)) {
+			t.Errorf("install: the last failure at %v, want at or before %v, 15 s after the first observation", in.LastFailure, first.Add(15*time.Second))
 		}
-		if in.Failed == 0 || s.Failed == 0 || s.FirstFailure == nil || s.FirstFailure.Before(*s.Start) {
-			t.Errorf("install %d failed; steady %d failed, the first at %v; want failures in both", in.Failed, s.Failed, s.FirstFailure)
+		if s.FirstFailure == nil || s.FirstFailure.Before(start) {
+			t.Errorf("steady: the first failure at %v, want at or after its start %v", s.FirstFailure, start)
 		}
+		checkCustomProbeRecord(t, rec)
 		logInstallFailures(t, rec)
 	})
 }
@@ -185,9 +304,7 @@ func TestTCPLoopJudgesACandidateWithoutReadiness(t *testing.T) {
 	underBothHelms(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 1, verdict: "fail", codes: []string{"probe-failures"}, decided: "probe-failures", windows: failedDeploy})
 		rec := readRecord(t, outDir(t))
-		if len(rec.Probes) != 1 || rec.Probes[0].Kind != "custom" {
-			t.Errorf("probes %+v; want one, of kind custom", rec.Probes)
-		}
+		checkCustomProbeRecord(t, rec, "deploy")
 		checkReasonWindow(t, rec, "probe-failures", "deploy")
 		if d := rec.window(t, "deploy"); d.Failed == 0 {
 			t.Errorf("deploy: %d failed, want the TCP loop's failures", d.Failed)
@@ -200,9 +317,14 @@ func TestCustomProbeIgnoresSIGTERM(t *testing.T) {
 	f := fixture{name: "custom-probe-ignores-sigterm", custom: fixtureProbe(map[string]string{"IGNORE_TERM": "true"})}
 	underBothHelms(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
-		p := readRecord(t, outDir(t)).Probes
-		if len(p) != 1 || p[0].StoppedWhenAsked == nil || *p[0].StoppedWhenAsked {
+		rec := readRecord(t, outDir(t))
+		checkCustomProbeRecord(t, rec, "deploy", "rollback")
+		if p := rec.Probes; len(p) != 1 || p[0].StoppedWhenAsked == nil || *p[0].StoppedWhenAsked {
 			t.Errorf("probes %+v; want one whose stopped_when_asked is false", p)
+		}
+		const said = "the probe did not stop when asked; checks still in flight were not reported\n"
+		if c := readConsole(t); !strings.Contains(c, said) {
+			t.Errorf("the console does not hold %q:\n%s", said, c)
 		}
 	})
 }
@@ -214,8 +336,7 @@ func TestTCPLoopInARestrictedProbeNamespace(t *testing.T) {
 	underBothHelms(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 		checkSetupOutput(t, "namespace/rollproof-probe labeled")
-		if p := readRecord(t, outDir(t)).Probes; len(p) != 1 || p[0].Kind != "custom" {
-			t.Errorf("probes %+v; want one, of kind custom", p)
-		}
+		checkCustomProbeRecord(t, readRecord(t, outDir(t)), "deploy", "rollback")
+		checkProbePodRestricted(t)
 	})
 }
