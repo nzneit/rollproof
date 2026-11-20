@@ -2439,9 +2439,11 @@ login, it sits under a path of its host, and it serves TLS from a private author
 release's image is named after a public host and reaches the nodes only through that mirror. The
 candidate's enters through `images`, with `as` on the same host, so the job covers a host that
 has `as`, a mirror, a `ca` and credentials together. Once the mirror is filled, the job cuts the
-route from the nodes and the engine to public registries, so a pull that goes anywhere but the
-mirror or the run's registry fails. This is the proof of the mirror, certificate and credential
-settings. The job ends with the search for the password, in both forms, in everything the run
+nodes' route to public registries, so a pull that goes anywhere but the mirror or the run's
+registry fails; a public pull that passes before the cut and fails after it shows that the cut
+holds. The engine's route is not cut: before the run, the job makes sure that the engine holds
+the node image and the registry image, so the run asks the engine for no pull (section 14, point
+31). This is the proof of the mirror, certificate and credential settings. The job ends with the search for the password, in both forms, in everything the run
 wrote. It is a test of the suite under a build tag of its own, so it runs on a developer's
 machine as well; its workflow starts only by hand until the maintainer says otherwise.
 
@@ -3043,7 +3045,8 @@ point.
     A cold re-read of point 30's text, and the proof `docs/proofs/p02b-mirror-forms.md`, left
     five choices open. The maintainer ruled on all five the same day. A scoped re-check of the
     text that recorded them left two more, on the form of `host` and on `as` for Docker Hub,
-    and the maintainer ruled on both the same day.
+    and the maintainer ruled on both the same day. Writing the plan for step 5 left one more, on
+    the mirror job's cut, and the maintainer ruled on it the same day.
     - **Docker Hub.** Every form of a Docker Hub image's name reaches the nodes' settings for
       `docker.io`, and the kubelet takes credentials for it under `docker.io`, `index.docker.io`
       or `https://index.docker.io/v1/` alike. The maintainer chose that a caller writes
@@ -3084,6 +3087,15 @@ point.
       text of a stall, of an install that was not ready and of a probe that never started names
       the mirror when the failed image's host has one (section 10). What lost: **a sentence of
       documentation only**, which leaves the reader looking at the wrong registry.
+    - **The mirror job's cut.** Section 12 had the job cut the route from the nodes and the
+      engine to public registries. The engine pulls over the runner's own network: on GitHub the
+      one the job reports through, on a developer's machine the one the engine serves everything
+      else from, so a cut there would end the job or change the machine. The maintainer chose
+      that the job cuts the nodes' route, shown to hold by a public pull that passes before the
+      cut and fails after it, and makes sure before the run that the engine holds the node image
+      and the registry image, so the run asks it for no pull (point 28; section 12). What lost:
+      **a cut of the engine's route too**, which needs a network of the engine's own and a proof
+      that no run has made.
 
 ## 15. Not in the first release
 
