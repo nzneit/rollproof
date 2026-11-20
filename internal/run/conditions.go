@@ -90,12 +90,16 @@ func ofTheCandidate(c verdict.Condition, restartOnly bool) verdict.Condition {
 	return c
 }
 
-// setupCondition returns the condition a setup Result gives, if any:
+// setupCondition returns the condition the Result r of setup[i] gives, if any:
 // setup-failed when the command exited non-zero, could not be started or was
 // stopped at limits.timeout; internal-error when it gave an answer the tool
 // could not read or ended in a way this build does not know. A success and a
-// stop by a signal give none: run reports the signal as interrupted.
-func setupCondition(r deploy.Result) (verdict.Condition, bool) {
+// stop by a signal give none: run reports the signal as interrupted. The text
+// names the command by its configuration path, setup[i], and its first word
+// from words, the configuration's SetupWords: as the file writes it, so that no
+// value a ${…} form gives reaches the text. Without a word for i, the text
+// names the path alone.
+func setupCondition(r deploy.Result, i int, words []string) (verdict.Condition, bool) {
 	end, k := classify(r)
 	if k == noFailure {
 		return verdict.Condition{}, false
@@ -104,7 +108,11 @@ func setupCondition(r deploy.Result) (verdict.Condition, bool) {
 	if k == unreadable || k == unknown {
 		code = verdict.InternalError
 	}
-	return verdict.Condition{Code: code, Text: "a setup command " + end}, true
+	subject := fmt.Sprintf("setup[%d]", i)
+	if i >= 0 && i < len(words) && words[i] != "" {
+		subject += " (" + words[i] + ")"
+	}
+	return verdict.Condition{Code: code, Text: subject + " " + end}, true
 }
 
 // commandCondition returns the condition a transition's command gives, if any:

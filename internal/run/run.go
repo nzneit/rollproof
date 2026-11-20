@@ -73,10 +73,11 @@ type Cluster interface {
 	Store(ctx context.Context) (probeImage string, images map[string]config.ImageRef, err error)
 	Deployer(cfg *config.Config) (deploy.Deployer, []string, error)
 	// Setup runs the configuration's setup commands in order on the run's command runner, each
-	// bounded by limits.timeout, and returns the Result of the first that did not succeed, or a
-	// Result named setup with Ending Succeeded when all did or there were none. run calls it once,
-	// after Deployer and Fetch and before Watcher; a context that ends stops the command that runs.
-	Setup(ctx context.Context) deploy.Result
+	// bounded by limits.timeout, and returns the Result of the first that did not succeed with its
+	// index in setup, or a Result named setup with Ending Succeeded and the index -1 when all did
+	// or there were none. run calls it once, after Deployer and Fetch and before Watcher; a context
+	// that ends stops the command that runs.
+	Setup(ctx context.Context) (deploy.Result, int)
 	Watcher(ctx context.Context, cfg *config.Config) (Watcher, error)
 	Target(ctx context.Context, cfg *config.Config) (probe.Target, error)
 	// Probe returns the probe that the configuration names, not yet started: the built-in
@@ -308,11 +309,11 @@ func (s *runState) setUp(ctx context.Context) bool {
 	s.releases = d.Releases()
 	// The setup commands run after the charts are fetched and before the watch
 	// starts (section 7, "Setup commands").
-	res := c.Setup(ctx)
+	res, i := c.Setup(ctx)
 	if s.interrupted(ctx) {
 		return false
 	}
-	if cond, failed := setupCondition(res); failed {
+	if cond, failed := setupCondition(res, i, cfg.SetupWords); failed {
 		s.tl.Before = append(s.tl.Before, cond)
 		return false
 	}

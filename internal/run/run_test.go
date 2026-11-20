@@ -278,6 +278,22 @@ func TestSetupStoppedBySignal(t *testing.T) {
 	}
 }
 
+// A failed setup command is named in the reason by its path and its first word as the
+// configuration writes it, which the run takes from the index that Setup returns.
+func TestSetupFailureNamesTheCommand(t *testing.T) {
+	w := newWorld(t)
+	w.cfg.Setup = [][]string{{"kubectl", "apply"}, {"helm", "repo", "add"}}
+	w.cfg.SetupWords = []string{"kubectl", "${env.HELM}"}
+	w.cluster.setup = deploy.Result{Name: "setup", Ending: deploy.ExitedNonZero, ExitCode: 3}
+	w.cluster.setupIndex = 1
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if window, text := w.result().windowOf("setup-failed"); window != "" || text != "setup[1] (${env.HELM}) exited with code 3" {
+		t.Errorf("setup-failed in window %q with text %q", window, text)
+	}
+}
+
 func TestNotBuilt(t *testing.T) {
 	w := newWorld(t)
 	w.cfg.Registries = []config.Registry{{Host: "registry.example"}}

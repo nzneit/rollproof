@@ -18,9 +18,9 @@ import (
 func TestSetupRunsInOrder(t *testing.T) {
 	f := newFake()
 	cmds := [][]string{{"kubectl", "apply", "-f", "test/prerequisites.yaml"}, {"kubectl", "create", "secret", "generic", "probe-token"}}
-	r := Setup(t.Context(), f, cmds, 5*time.Minute)
-	if r.Name != "setup" || r.Ending != Succeeded {
-		t.Errorf("Setup gave %+v, want setup to succeed", r)
+	r, i := Setup(t.Context(), f, cmds, 5*time.Minute)
+	if r.Name != "setup" || r.Ending != Succeeded || i != -1 {
+		t.Errorf("Setup gave %+v and index %d, want setup to succeed and index -1", r, i)
 	}
 	want := []Command{{Name: "setup", Args: cmds[0], Timeout: 5 * time.Minute}, {Name: "setup", Args: cmds[1], Timeout: 5 * time.Minute}}
 	if d := cmp.Diff(want, f.calls); d != "" {
@@ -30,18 +30,18 @@ func TestSetupRunsInOrder(t *testing.T) {
 
 func TestSetupWithNoCommands(t *testing.T) {
 	f := newFake()
-	r := Setup(t.Context(), f, nil, time.Minute)
-	if r.Name != "setup" || r.Ending != Succeeded || r.ExitCode != 0 || len(f.calls) != 0 {
-		t.Errorf("Setup with no commands gave %+v after %d commands, want setup to succeed, exit code 0, none run", r, len(f.calls))
+	r, i := Setup(t.Context(), f, nil, time.Minute)
+	if r.Name != "setup" || r.Ending != Succeeded || r.ExitCode != 0 || i != -1 || len(f.calls) != 0 {
+		t.Errorf("Setup with no commands gave %+v and index %d after %d commands, want setup to succeed, exit code 0, index -1, none run", r, i, len(f.calls))
 	}
 }
 
 func TestSetupStopsAtTheFirstFailure(t *testing.T) {
 	h := newHarness(t, os.Environ())
 	marker := filepath.Join(t.TempDir(), "third-ran")
-	r := Setup(t.Context(), h.runner, [][]string{{"true"}, {"sh", "-c", "exit 4"}, {"touch", marker}}, time.Minute)
-	if r.Name != "setup" || r.Ending != ExitedNonZero || r.ExitCode != 4 {
-		t.Errorf("Setup gave %+v, want setup, exit-nonzero, exit code 4", r)
+	r, i := Setup(t.Context(), h.runner, [][]string{{"true"}, {"sh", "-c", "exit 4"}, {"touch", marker}}, time.Minute)
+	if r.Name != "setup" || r.Ending != ExitedNonZero || r.ExitCode != 4 || i != 1 {
+		t.Errorf("Setup gave %+v and index %d, want setup, exit-nonzero, exit code 4, index 1", r, i)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Errorf("the third command ran (stat: %v)", err)
@@ -62,12 +62,12 @@ func TestSetupEndings(t *testing.T) {
 	h := newHarness(t, os.Environ())
 	t.Cleanup(h.runner.Close)
 
-	if r := Setup(t.Context(), h.runner, [][]string{{"rollproof-test-no-such-program"}}, time.Minute); r.Ending != NotStarted || r.ExitCode != -1 {
+	if r, _ := Setup(t.Context(), h.runner, [][]string{{"rollproof-test-no-such-program"}}, time.Minute); r.Ending != NotStarted || r.ExitCode != -1 {
 		t.Errorf("a program that cannot start: %+v, want not-started, exit code -1", r)
 	}
 
 	start := time.Now()
-	if r := Setup(t.Context(), h.runner, [][]string{{"sh", "-c", "sleep 30"}}, 300*time.Millisecond); r.Ending != StoppedAtLimit {
+	if r, _ := Setup(t.Context(), h.runner, [][]string{{"sh", "-c", "sleep 30"}}, 300*time.Millisecond); r.Ending != StoppedAtLimit {
 		t.Errorf("a command past its limit: %+v, want stopped-at-limit", r)
 	}
 	if d := time.Since(start); d > 2*time.Second {
@@ -77,7 +77,7 @@ func TestSetupEndings(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	time.AfterFunc(100*time.Millisecond, cancel)
 	start = time.Now()
-	if r := Setup(ctx, h.runner, [][]string{{"sh", "-c", "sleep 30"}}, time.Minute); r.Ending != StoppedBySignal {
+	if r, _ := Setup(ctx, h.runner, [][]string{{"sh", "-c", "sleep 30"}}, time.Minute); r.Ending != StoppedBySignal {
 		t.Errorf("a command whose ctx ended: %+v, want stopped-by-signal", r)
 	}
 	if d := time.Since(start); d > time.Second {
@@ -90,7 +90,7 @@ func TestSetupEndings(t *testing.T) {
 func TestSetupCommandsReadNoInput(t *testing.T) {
 	h := newHarness(t, os.Environ())
 	start := time.Now()
-	r := Setup(t.Context(), h.runner, [][]string{
+	r, _ := Setup(t.Context(), h.runner, [][]string{
 		{"sh", "-c", `read line; echo "read gave $?"`},
 		{"sh", "-c", `printf "continue? [y/N] "; read answer || exit 3`},
 	}, 30*time.Second)

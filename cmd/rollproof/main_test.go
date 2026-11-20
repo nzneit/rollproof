@@ -447,7 +447,7 @@ func TestDeployerChoosesTheDriver(t *testing.T) {
 }
 
 // TestSessionSetup pins the evidence names the setup commands run under and that
-// the first command that fails ends the set-up.
+// the first command that fails ends the set-up, with its index.
 func TestSessionSetup(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{
@@ -468,9 +468,9 @@ func TestSessionSetup(t *testing.T) {
 	if _, _, err := s.Deployer(cfg); err != nil {
 		t.Fatal(err)
 	}
-	res := s.Setup(context.Background())
-	if res.Ending != deploy.ExitedNonZero || res.ExitCode != 3 {
-		t.Errorf("setup ended %s with code %d, want exit-nonzero with code 3", res.Ending, res.ExitCode)
+	res, i := s.Setup(context.Background())
+	if res.Ending != deploy.ExitedNonZero || res.ExitCode != 3 || i != 1 {
+		t.Errorf("setup ended %s with code %d at index %d, want exit-nonzero with code 3 at index 1", res.Ending, res.ExitCode, i)
 	}
 	if diff := cmp.Diff([]string{"commands/setup", "commands/setup-2"}, names); diff != "" {
 		t.Errorf("evidence names (-want +got):\n%s", diff)

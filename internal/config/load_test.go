@@ -152,8 +152,9 @@ func TestLoadFull(t *testing.T) {
 			CA:     "/etc/rollproof/corp-ca.pem",
 			Mirror: "mirror.corp.example/registry-example",
 		}},
-		Images: map[string]Image{"orders": {Local: "orders:candidate", As: "registry.example/team/orders"}},
-		Setup:  [][]string{{"kubectl", "apply", "-f", "test/prerequisites.yaml"}},
+		Images:     map[string]Image{"orders": {Local: "orders:candidate", As: "registry.example/team/orders"}},
+		Setup:      [][]string{{"kubectl", "apply", "-f", "test/prerequisites.yaml"}},
+		SetupWords: []string{"kubectl"},
 		Deploy: Deploy{
 			Namespace: "orders",
 			Selector:  "app=orders",
@@ -209,6 +210,28 @@ func TestLoadMinimal(t *testing.T) {
 	}
 	if h := c.Deploy.Helm; h == nil || h.Release != "orders" || h.Previous != nil || h.Candidate == nil {
 		t.Errorf("deploy.helm is %+v", h)
+	}
+}
+
+// SetupWords holds each setup command's first word as the file writes it: a form there stays a
+// form, and the value it gives is in Setup only.
+func TestSetupWordsAsWritten(t *testing.T) {
+	env := func(name string) (string, bool) {
+		if name == "TOOL" {
+			return planted, true
+		}
+		return "", false
+	}
+	text := variant(t, base, "deploy:\n", "setup:\n  - [kubectl, apply]\n  - [\"${env.TOOL}\", run]\ndeploy:\n")
+	c, err := loadWith(t, t.TempDir(), text, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := cmp.Diff([]string{"kubectl", "${env.TOOL}"}, c.SetupWords); d != "" {
+		t.Errorf("SetupWords (-want +got):\n%s", d)
+	}
+	if c.Setup[1][0] != planted {
+		t.Errorf("Setup[1][0] = %q, want the variable's value", c.Setup[1][0])
 	}
 }
 

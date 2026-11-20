@@ -214,9 +214,10 @@ func (s *session) Deployer(cfg *config.Config) (deploy.Deployer, []string, error
 
 // Setup runs the configuration's setup commands in order on the runner that
 // Deployer made, so that they lose the same variables and write their evidence
-// under commands/ as setup, setup-2 and so on. Deployer must have been called
-// first.
-func (s *session) Setup(ctx context.Context) deploy.Result {
+// under commands/ as setup, setup-2 and so on, and returns the Result of the
+// first that failed with its index, or a success with the index -1. Deployer
+// must have been called first.
+func (s *session) Setup(ctx context.Context) (deploy.Result, int) {
 	return deploy.Setup(ctx, s.runner, s.cfg.Setup, s.cfg.Limits.Timeout)
 }
 

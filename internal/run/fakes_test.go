@@ -156,6 +156,7 @@ type fakeCluster struct {
 	probeErr                                                error
 	images                                                  map[string]config.ImageRef
 	setup                                                   deploy.Result
+	setupIndex                                              int
 	target                                                  probe.Target
 	removed                                                 []string
 	kept                                                    string
@@ -179,15 +180,15 @@ func (c *fakeCluster) Deployer(cfg *config.Config) (deploy.Deployer, []string, e
 	return c.w.deployer, c.removed, nil
 }
 
-// Setup records "setup", runs its hook and gives the scripted result, or a
-// success when none was scripted.
-func (c *fakeCluster) Setup(ctx context.Context) deploy.Result {
+// Setup records "setup", runs its hook and gives the scripted result and
+// index, or a success and the index -1 when none was scripted.
+func (c *fakeCluster) Setup(ctx context.Context) (deploy.Result, int) {
 	c.w.calls.add("setup")
 	c.w.hook("setup")
 	if c.setup.Ending == "" {
-		return deploy.Result{Name: "setup", Ending: deploy.Succeeded}
+		return deploy.Result{Name: "setup", Ending: deploy.Succeeded}, -1
 	}
-	return c.setup
+	return c.setup, c.setupIndex
 }
 
 // Watcher records "watcher", runs its hook and gives the fake watcher.
