@@ -6,8 +6,12 @@ It tests, in a CI job or on a laptop, whether deploying a new version of a Kuber
 
 Nothing is released; the design is docs/specs/2026-11-13-rollproof-design.md.
 
-What works now, on Linux with nerdctl: `rollproof run` creates its own kind cluster, installs a previous release with Helm, deploys the candidate and rolls it back, all under the built-in HTTP probe. The first four fixtures of the design's section 12, and the one whose previous release fails every request, give their expected verdicts under Helm 3.22.1 and Helm 4.3.2. That suite needs the Helm binaries under `.tools/`; `go run ./hack/fetchhelm` fetches them first, then run `go test -tags e2e -p 1 ./e2e/ -timeout 120m`.
+What works now, on Linux with nerdctl: `rollproof run` creates its own kind cluster; deploys through Helm, with or without a previous release (a run with none tests a restart), or through the commands driver; runs the `setup` commands; judges with the built-in HTTP probe or with a custom probe that docs/probe-contract.md describes; takes images from the engine or from an archive; and writes `result.json`, the console report and the evidence folder.
 
-Not built yet: `registries`, `setup`, `deploy.commands`, `probe.custom`, `archive` and `as` in `images`, and a Helm run with no `previous`. A configuration that names one of them ends as `config-rejected`, with the text "not built yet" and the key's name.
+Every fixture of the design's section 12 gives its expected verdict under Helm 3.22.1 and Helm 4.3.2, and the first fixture also on `kindest/node:v1.34.11`, in one run of the suite on 2026-11-19 and 2026-11-20.
+
+To run the suite: `go run ./hack/fetchhelm` fetches the Helm binaries and kubectl 1.37.0 under `.tools/`; the suite's first run pulls busybox 1.37.0 by its digest into `.tools/`; `go test -tags e2e -p 1 ./e2e/ -timeout 360m` runs the suite in about four hours.
+
+Not built yet: `registries` and `as` in `images`. A configuration that names one of them ends as `config-rejected`, with the text "not built yet" and the key's name.
 
 Run the unit tests with `go test ./...`.
