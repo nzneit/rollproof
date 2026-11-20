@@ -57,12 +57,18 @@ func checkCommandsRecord(t *testing.T, rec record, roles ...string) {
 }
 
 // Row 10. A setup command fails: not verified. The run ends before the install window, so
-// result.json lists no window.
+// result.json lists no window. The reason names the command by its path, setup[0], and its first
+// word as the configuration writes it; kubectl exits with code 1 for an object it cannot find.
 func TestSetupCommandFails(t *testing.T) {
 	f := fixture{name: "setup-command-fails", setup: [][]string{{"kubectl", "get", "configmap", "rollproof-fixture-absent"}}}
 	underBothHelms(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 2, verdict: "not-verified", codes: []string{"setup-failed"}, decided: "setup-failed"})
 		checkSetupOutput(t, `configmaps "rollproof-fixture-absent" not found`)
+		const want = "setup[0] (kubectl) exited with code 1"
+		rec := readRecord(t, outDir(t))
+		if len(rec.Reasons) != 1 || rec.Reasons[0].Text != want {
+			t.Errorf("reasons %+v; want one with the text %q", rec.Reasons, want)
+		}
 	})
 }
 
