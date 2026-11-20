@@ -236,6 +236,72 @@ func TestMaskReachesEveryFreeTextField(t *testing.T) {
 	}
 }
 
+// TestMaskSharesNoMemoryWithTheRecord checks that the copy shares no pointer,
+// slice or map with the record it copies: writing through the copy, a kept
+// pointer field included, leaves the record as it was.
+func TestMaskSharesNoMemoryWithTheRecord(t *testing.T) {
+	const pw = "s3cret-pass"
+	m := mask.New([]mask.Credential{{Username: "ci", Password: pw}})
+	filled := filledRun(pw, t0.Add(time.Minute))
+	got := Mask(filled, m)
+
+	noSharedMemory(t, "Run", reflect.ValueOf(got), reflect.ValueOf(filled))
+
+	if got.Transitions[0].Command == nil || got.Transitions[0].Restart == nil {
+		t.Fatalf("the copy's Command and Restart are %v and %v, want them set",
+			got.Transitions[0].Command, got.Transitions[0].Restart)
+	}
+	*got.Transitions[0].Command = "changed"
+	*got.Transitions[0].Restart = "changed"
+	if c := filled.Transitions[0].Command; c == nil || *c != pw {
+		t.Errorf("the record's Command is %v, want %q", c, pw)
+	}
+	if c := filled.Transitions[0].Restart; c == nil || *c != pw {
+		t.Errorf("the record's Restart is %v, want %q", c, pw)
+	}
+}
+
+// noSharedMemory walks the copy got and the record want in step and reports
+// every pointer, slice and map of the copy that is the record's own memory. It
+// stops at a struct of another package, which the copy keeps as it is.
+func noSharedMemory(t *testing.T, path string, got, want reflect.Value) {
+	t.Helper()
+	switch got.Kind() {
+	case reflect.Pointer:
+		if got.IsNil() || want.IsNil() {
+			return
+		}
+		if got.Pointer() == want.Pointer() {
+			t.Errorf("%s is the record's own pointer", path)
+		}
+		noSharedMemory(t, path, got.Elem(), want.Elem())
+	case reflect.Slice:
+		if got.IsNil() || want.IsNil() {
+			return
+		}
+		if got.Pointer() == want.Pointer() {
+			t.Errorf("%s is the record's own slice", path)
+		}
+		for i := 0; i < got.Len() && i < want.Len(); i++ {
+			noSharedMemory(t, fmt.Sprintf("%s[%d]", path, i), got.Index(i), want.Index(i))
+		}
+	case reflect.Map:
+		if got.IsNil() || want.IsNil() {
+			return
+		}
+		if got.Pointer() == want.Pointer() {
+			t.Errorf("%s is the record's own map", path)
+		}
+	case reflect.Struct:
+		if got.Type().PkgPath() != pkgPath {
+			return
+		}
+		for i := 0; i < got.NumField(); i++ {
+			noSharedMemory(t, path+"."+got.Type().Field(i).Name, got.Field(i), want.Field(i))
+		}
+	}
+}
+
 // samePaths reports whether got and want hold the same paths, whatever their
 // order.
 func samePaths(got, want []string) bool {

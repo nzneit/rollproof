@@ -59,7 +59,7 @@ func masked(v reflect.Value, m *mask.Masker) reflect.Value {
 		t := v.Type()
 		for i := 0; i < t.NumField(); i++ {
 			if t.Field(i).Tag.Get("mask") == "keep" {
-				out.Field(i).Set(v.Field(i))
+				out.Field(i).Set(masked(v.Field(i), nil))
 				continue
 			}
 			out.Field(i).Set(masked(v.Field(i), m))
