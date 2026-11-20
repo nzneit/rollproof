@@ -418,7 +418,10 @@ func TestStartFloorsTAtTheCreate(t *testing.T) {
 	at := func(ms int) string { return logAt(ms).Format(time.RFC3339Nano) }
 	s.endsWhenDeleted(t, logLine(logAt(0), `{"ok":true}`)+
 		logLine(logAt(100), `{"ok":false,"t":"`+at(-1800)+`"}`)+ // 1.8 s before the ask: counted
-		logLine(logAt(200), `{"ok":false,"t":"`+at(-2100)+`"}`)) // 2.1 s before the ask: a fault
+		logLine(logAt(200), `{"ok":false,"t":"`+at(-2100)+`"}`)+ // 2.1 s before the ask: a fault
+		// 1.6 s before the ask and 2.1 s before its own stamp: counted, because the floor is the
+		// bound before the ask (section 6); counted from the stamp, it would be a fault.
+		logLine(logAt(500), `{"ok":false,"t":"`+at(-1600)+`"}`))
 	if _, err := s.pod.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -426,9 +429,10 @@ func TestStartFloorsTAtTheCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := allEvents(s.pod.Events())
-	if len(events) != 3 || events[1].Obs == nil || events[2].Fault == nil ||
-		events[2].Fault.Code != verdict.ProbeLineInvalid || !events[2].FailedCheck {
-		t.Errorf("events = %+v, want two observations and the early t's fault", events)
+	if len(events) != 4 || events[1].Obs == nil || events[2].Fault == nil ||
+		events[2].Fault.Code != verdict.ProbeLineInvalid || !events[2].FailedCheck ||
+		events[3].Obs == nil || !events[3].Obs.T.Equal(logAt(-1600)) {
+		t.Errorf("events = %+v, want two observations, the early t's fault, and the observation 1.6 s before the ask", events)
 	}
 }
 
@@ -544,8 +548,8 @@ func TestProbeExitsAfterStart(t *testing.T) {
 					if e.Fault == nil {
 						continue
 					}
-					if e.Fault.Code != verdict.ProbeExited || !e.Fault.At.Equal(c.want) {
-						t.Errorf("fault %+v, want probe-exited at %v", *e.Fault, c.want)
+					if e.Fault.Code != verdict.ProbeExited || !e.Fault.At.Equal(c.want) || e.FailedCheck {
+						t.Errorf("fault %+v (failed check %v), want probe-exited at %v, not a failed check", *e.Fault, e.FailedCheck, c.want)
 					}
 					return
 				case <-timeout:
@@ -724,8 +728,9 @@ func TestStopReportsAnExitOnce(t *testing.T) {
 			if n := exits(events); n != 1 {
 				t.Fatalf("%d probe-exited faults, want 1: %+v", n, events)
 			}
-			if f := events[len(events)-1].Fault; f == nil || !f.At.Equal(logAt(5000)) || f.Text != "the probe exited with exit code 1 (Error)" {
-				t.Errorf("last event = %+v, want the exit at the container's finishedAt", events[len(events)-1])
+			if e := events[len(events)-1]; e.Fault == nil || !e.Fault.At.Equal(logAt(5000)) ||
+				e.Fault.Text != "the probe exited with exit code 1 (Error)" || e.FailedCheck {
+				t.Errorf("last event = %+v, want the exit at the container's finishedAt, not a failed check", e)
 			}
 		})
 	}

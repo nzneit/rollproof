@@ -206,13 +206,19 @@ func validate(c *Config, x *index) error {
 // checkArchive returns the problem with the image archive at path, an absolute path, as a phrase
 // that quotes no value; it is empty when the file is a tar that holds a manifest.json naming
 // exactly one image the tool can read. A missing file gives "does not exist"; more than one image
-// "holds more than one image"; anything else "is not an image archive the tool can read".
+// "holds more than one image"; anything else "is not an image archive the tool can read". A path
+// that is not a regular file, such as a folder, a FIFO or a terminal, is never opened, so that it
+// cannot block the load.
 func checkArchive(path string) (problem string) {
 	const notAnArchive = "is not an image archive the tool can read"
-	if _, err := os.Stat(path); err != nil {
+	fi, err := os.Stat(path)
+	if err != nil {
 		if os.IsNotExist(err) {
 			return "does not exist"
 		}
+		return notAnArchive
+	}
+	if !fi.Mode().IsRegular() {
 		return notAnArchive
 	}
 	m, err := tarball.LoadManifest(func() (io.ReadCloser, error) { return os.Open(path) })

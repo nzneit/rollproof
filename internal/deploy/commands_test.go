@@ -129,7 +129,10 @@ func TestCommandsProgrammingErrors(t *testing.T) {
 
 // Section 12: the variables of section 7 are gone, and the command starts in the configuration's folder.
 func TestCommandsRunInTheFolderWithoutHelmVariables(t *testing.T) {
-	env := append(os.Environ(), "HELM_KUBEAPISERVER=https://elsewhere.example:6443", "HELM_DRIVER=sql")
+	// Every HELM_* variable of the shell that runs the test is dropped first, so that the exact
+	// Removed() list below holds whatever that shell exports.
+	env := slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "HELM_") })
+	env = append(env, "HELM_KUBEAPISERVER=https://elsewhere.example:6443", "HELM_DRIVER=sql")
 	h := newHarness(t, env)
 	d := NewCommands(CommandsOptions{Commands: config.Commands{Install: []string{"sh", "-c", "pwd -P; env"}},
 		Timeout: time.Minute, Runner: h.runner})

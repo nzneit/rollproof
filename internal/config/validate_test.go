@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -300,6 +302,11 @@ func TestArchiveThatIsNotAnImage(t *testing.T) {
 		make func(t *testing.T, path string)
 	}{
 		{"a folder", func(t *testing.T, p string) { mkdir(t, p) }},
+		{"a FIFO", func(t *testing.T, p string) {
+			if err := syscall.Mkfifo(p, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
 		{"an empty file", func(t *testing.T, p string) { writeFile(t, p, "") }},
 		{"not a tar", func(t *testing.T, p string) { writeFile(t, p, "not a tar S3CRET-VALUE\n") }},
 		{"an OCI layout with no manifest.json", func(t *testing.T, p string) {
@@ -315,7 +322,21 @@ func TestArchiveThatIsNotAnImage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			tc.make(t, filepath.Join(dir, "S3CRET-VALUE.tar"))
-			_, err := loadWith(t, dir, archiveConfig(t), noEnv)
+			// A load that blocks, as an open of a FIFO with no writer does, fails at a deadline
+			// instead of hanging the test.
+			path := filepath.Join(dir, "rollproof.yaml")
+			writeFile(t, path, archiveConfig(t))
+			done := make(chan error, 1)
+			go func() {
+				_, err := Load(path, noEnv)
+				done <- err
+			}()
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the load did not return within 10 s")
+			}
 			rejected(t, err, "images.orders.archive (line ")
 			rejected(t, err, "): is not an image archive the tool can read")
 		})

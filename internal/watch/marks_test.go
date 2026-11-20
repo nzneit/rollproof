@@ -277,27 +277,23 @@ func TestFinishesWhenAPodIsGone(t *testing.T) {
 	update(t, client, pod("orders-a-1", "a1", "ReplicaSet", "orders-a", true, true))
 	update(t, client, pod("orders-a-2", "a2", "ReplicaSet", "orders-a", true, true))
 	update(t, client, deployment("orders", 2, 2, 2, 2, 2, 2))
+	// The rollout is complete and the two old pods are deleting before the command exits, so that
+	// the exit is the last change before the pods go.
+	watched(t, w, "the rollout complete and both old pods deleting", func(tr *Tracker) bool {
+		return tr.workloads[orders].generation == 2 &&
+			tr.pods["a1"] != nil && !tr.pods["a1"].deleting.IsZero() &&
+			tr.pods["a2"] != nil && !tr.pods["a2"].deleting.IsZero() &&
+			tr.pods["b1"] != nil && tr.pods["b2"] != nil
+	})
 	close(exited)
 	// Every condition but the last holds: the command has exited, the rollout is complete, and the
 	// two old pods are deleted and not gone.
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		w.mu.Lock()
-		tr := w.tr.current()
-		ready := !tr.exited.IsZero() && w.tr.workloads[orders].generation == 2 &&
-			w.tr.pods["a1"] != nil && !w.tr.pods["a1"].deleting.IsZero() &&
-			w.tr.pods["a2"] != nil && !w.tr.pods["a2"].deleting.IsZero() &&
-			w.tr.pods["b1"] != nil && w.tr.pods["b2"] != nil
-		finished := tr.t.Finished
-		w.mu.Unlock()
-		if ready {
-			if !finished.IsZero() {
-				t.Fatalf("finished at %v while two deleted pods are not gone", finished)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the deploy's changes were not told within 5 s")
-		}
+	watched(t, w, "the command's exit", func(tr *Tracker) bool { return !tr.current().exited.IsZero() })
+	w.mu.Lock()
+	finished := w.tr.current().t.Finished
+	w.mu.Unlock()
+	if !finished.IsZero() {
+		t.Fatalf("finished at %v while two deleted pods are not gone", finished)
 	}
 	clock.Advance(2 * time.Second)
 	for _, name := range []string{"orders-a-1", "orders-a-2"} {
@@ -305,6 +301,10 @@ func TestFinishesWhenAPodIsGone(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Both gone records are in before drive moves the clock, so that they are at +3 s.
+	watched(t, w, "both old pods gone", func(tr *Tracker) bool {
+		return !tr.pods["a1"].gone.IsZero() && !tr.pods["a2"].gone.IsZero()
+	})
 	tr := drive(t, clock, res)
 	if !tr.Finished.Equal(at(3)) {
 		t.Errorf("finished %v, want +3 s", tr.Finished)
