@@ -257,7 +257,8 @@ func transitionRecords(trs []transitionFacts) []report.Transition {
 
 // restartAnswer is a restart's answer in result.json: "accepted" when the API server took every
 // change, "refused" when it refused one, which the Restart names, and nil when there is no Restart
-// yet or the run's context cut it short, so that the server refused nothing.
+// yet, or the run's context cut it short or limits.timeout stopped it, so that the server refused
+// nothing.
 func restartAnswer(rs *watch.Restart) *string {
 	switch {
 	case rs == nil:

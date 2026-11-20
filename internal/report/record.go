@@ -90,8 +90,8 @@ type Transition struct {
 	Command *string `json:"command"`
 	// Restart is whether the API server took the restart's change:
 	// "accepted" or "refused". Nil, null in result.json, for a deploy and
-	// a rollback, and for a restart that the run's context cut short, in
-	// which the server refused nothing.
+	// a rollback, and for a restart that the run's context cut short or
+	// that limits.timeout stopped, in which the server refused nothing.
 	Restart           *string    `json:"restart"`
 	SettleRestartedBy []string   `json:"settle_restarted_by"`
 	Workloads         []Workload `json:"workloads"`

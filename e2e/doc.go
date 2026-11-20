@@ -7,7 +7,7 @@
 // runs them too.
 //
 // The suite runs every row of section 12 under both Helm majors and takes
-// about four hours. It needs Linux, a container engine that kind supports
+// about two and a half hours. It needs Linux, a container engine that kind supports
 // (docker, nerdctl or podman), the Helm binaries and kubectl under .tools/,
 // which `go run ./hack/fetchhelm` puts there, and busybox's archive at
 // .tools/busybox-1.37.0.tar, which the first run of the suite pulls and saves.

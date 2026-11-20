@@ -260,6 +260,19 @@ mounts the token of the namespace's default service account, so that a probe can
 Kubernetes API with the rights that `setup` gave it. The built-in probe's pod mounts none (section
 6).
 
+The probe's image takes one of three forms, each with a digest; any other is rejected when the
+configuration loads (section 8):
+
+- `REPOSITORY@sha256:…`, an image in a registry, as in section 2;
+- `${images.NAME.ref}`, the image that the entry `NAME` of `images` stores;
+- a reference that ends in `@${images.NAME.digest}`, whose part before the `@` is a repository or
+  `${images.NAME.repository}`.
+
+A probe built on the runner needs no registry: list it in `images`, as `local: NAME:TAG` for an
+image in the runner's container engine or as `archive: PATH` for an image archive file that holds
+exactly one image, and name it `${images.NAME.ref}`. The tool puts it into the run's registry by
+its digest before the probe starts (sections 8 and 9).
+
 An image that `images` does not list is pulled by the kubelet with the probe's pod, by the pull
 policy `IfNotPresent` (sections 6 and 9).
 
