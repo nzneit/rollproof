@@ -226,9 +226,12 @@ type runState struct {
 	signalSeen  bool // a signal was already reported as the interrupted reason
 	commands    []*command
 	clusterSeen *report.Cluster
-	// finalWritten says that the final result.json is in place, so that a warning raised in the
-	// clean-up is printed and written again (lateWarnings).
+	// finalWritten says that the final result.json is in place, so that a warning raised after it
+	// is printed and written again (lateWarnings).
 	finalWritten bool
+	// warningsWritten is how many of the run's warnings the last result.json written holds; the
+	// console prints that same record, so these are the warnings already told.
+	warningsWritten int
 }
 
 // sequence performs steps 1 to 13 and returns the value of a panic, if one
@@ -937,7 +940,8 @@ func (s *runState) finish() (code int) {
 			code = 2
 		}
 	}()
-	if err := s.w.Final(s.record()); err != nil {
+	rec, n := s.recordAndWarnings()
+	if err := s.writeFinal(rec, n); err != nil {
 		// The decided verdict keeps its exit code (section 8): a window that had
 		// already failed is a fail, and everything else is not verified, because a
 		// pass whose result.json could not be written cannot be vouched for. The
@@ -951,19 +955,41 @@ func (s *runState) finish() (code int) {
 	}
 	written = true
 	s.finalWritten = true
-	before := len(s.warnings.all())
 	s.completeEvidence()
-	if len(s.warnings.all()) != before {
-		if err := s.w.Final(s.record()); err != nil {
+	if len(s.warnings.all()) != s.warningsWritten {
+		next, n := s.recordAndWarnings()
+		if err := s.writeFinal(next, n); err != nil {
 			fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
+		} else {
+			rec = next
 		}
 	}
-	fmt.Fprint(s.o.Stdout, report.Console(s.record()))
+	// The console prints the record last written, so that lateWarnings tells every warning that
+	// came after it.
+	fmt.Fprint(s.o.Stdout, report.Console(rec))
 	return s.decision.Verdict.ExitCode()
+}
+
+// writeFinal writes rec, which holds the first n of the run's warnings, as the final result.json,
+// and when that worked keeps n as the warnings told.
+func (s *runState) writeFinal(rec report.Run, n int) error {
+	if err := s.w.Final(rec); err != nil {
+		return err
+	}
+	s.warningsWritten = n
+	return nil
 }
 
 // record returns the report's record of the run so far.
 func (s *runState) record() report.Run {
+	rec, _ := s.recordAndWarnings()
+	return rec
+}
+
+// recordAndWarnings returns the report's record of the run so far, and how many of the run's
+// warnings it holds.
+func (s *runState) recordAndWarnings() (report.Run, int) {
+	warnings := s.warnings.all()
 	lines, jsonText := s.probeCounts()
 	return record(facts{
 		cfg:           s.cfg,
@@ -980,11 +1006,11 @@ func (s *runState) record() report.Run {
 		target:        s.target,
 		images:        s.images,
 		removed:       s.removed,
-		warnings:      s.warnings.all(),
+		warnings:      warnings,
 		cluster:       s.clusterFacts(),
 		version:       s.o.Version,
 		out:           s.w.Dir(),
-	})
+	}), len(warnings)
 }
 
 // clusterFacts is what the cluster says of itself, read once.
@@ -1027,10 +1053,9 @@ func (s *runState) cleanUpQuietly() {
 // warning.
 func (s *runState) cleanUp() {
 	if s.watcher != nil {
-		before := len(s.warnings.all())
 		s.watcher.Stop()
-		s.lateWarnings(before)
 	}
+	s.lateWarnings()
 	switch {
 	case s.o.KeepCluster:
 		if s.cluster != nil {
@@ -1080,33 +1105,33 @@ func (s *runState) signalAfterTheVerdict() {
 func (s *runState) warnAfterConsole(text string) {
 	s.warnings.add(text)
 	fmt.Fprintln(s.o.Stdout, "warning: "+text)
-	func() {
-		defer func() { _ = recover() }()
-		if err := s.w.Final(s.record()); err != nil {
-			fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
-		}
-	}()
+	s.rewriteFinal()
 }
 
-// lateWarnings prints the warnings from the first-th on, and replaces result.json with them, as
-// warnAfterConsole does. The watcher's pod-log followers write and close their evidence files
-// until its Stop, which comes after the console was printed, and a failed write or close is a
-// warning then (rule 10). It does nothing when no warning came, or when the final result.json was
-// never written: that write was refused, the console was not printed, and the exit code says so.
-func (s *runState) lateWarnings(first int) {
+// lateWarnings prints the warnings that came after the last result.json written, whose record the
+// console printed, and replaces result.json with them, as warnAfterConsole does. The watcher's
+// pod-log followers write and close their evidence files until its Stop, which comes after the
+// console was printed, and a failed write or close is a warning then (rule 10). It does nothing
+// when no warning came, or when the final result.json was never written: that write was refused,
+// the console was not printed, and the exit code says so.
+func (s *runState) lateWarnings() {
 	all := s.warnings.all()
-	if !s.finalWritten || len(all) <= first {
+	if !s.finalWritten || len(all) <= s.warningsWritten {
 		return
 	}
-	for _, text := range all[first:] {
+	for _, text := range all[s.warningsWritten:] {
 		fmt.Fprintln(s.o.Stdout, "warning: "+text)
 	}
-	func() {
-		defer func() { _ = recover() }()
-		if err := s.w.Final(s.record()); err != nil {
-			fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
-		}
-	}()
+	s.rewriteFinal()
+}
+
+// rewriteFinal writes result.json again with the run's record. A failure is printed and is not
+// allowed to escape: it would panic inside a deferred function.
+func (s *runState) rewriteFinal() {
+	defer func() { _ = recover() }()
+	if err := s.writeFinal(s.recordAndWarnings()); err != nil {
+		fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
+	}
 }
 
 // readerPanic gives the value of a panic that stopped the event reader, once.

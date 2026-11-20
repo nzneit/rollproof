@@ -132,6 +132,21 @@ type world struct {
 	// evidence is the opener of evidence files that the run gave Units.Create, which the real
 	// cluster unit hands to the watcher for its pod logs.
 	evidence func(string) (io.WriteCloser, error)
+	// onStdout, when set, is called after each write to the run's standard output, with what was
+	// written.
+	onStdout func(p []byte)
+}
+
+// hookedWriter writes to w and then calls after with what was written.
+type hookedWriter struct {
+	w     io.Writer
+	after func(p []byte)
+}
+
+func (h hookedWriter) Write(p []byte) (int, error) {
+	n, err := h.w.Write(p)
+	h.after(p)
+	return n, err
 }
 
 // fakeCluster is the Cluster that Units.Create returns.
@@ -638,8 +653,12 @@ func (w *world) units() Units {
 
 // run calls Run with the world's options and units.
 func (w *world) run(ctx context.Context) int {
+	var stdout io.Writer = &w.stdout
+	if w.onStdout != nil {
+		stdout = hookedWriter{w: &w.stdout, after: w.onStdout}
+	}
 	return Run(ctx, Options{ConfigPath: filepath.Join(w.cfg.Dir, "rollproof.yaml"), Out: w.out,
-		KeepCluster: w.keep, Stdout: &w.stdout, Stderr: &w.stderr, Version: "test",
+		KeepCluster: w.keep, Stdout: stdout, Stderr: &w.stderr, Version: "test",
 		Getenv: func(string) string { return "" }}, w.units())
 }
 

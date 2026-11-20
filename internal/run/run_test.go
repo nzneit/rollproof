@@ -989,6 +989,39 @@ func TestWarningAtTheWatchersStop(t *testing.T) {
 	}
 }
 
+// Rule 10: a pod log's evidence write that fails after the last result.json was written and the
+// console printed, and before the clean-up begins, is a warning in result.json and on the console,
+// told once.
+func TestWarningBetweenTheConsoleAndTheCleanUp(t *testing.T) {
+	w := newWorld(t)
+	var podLog io.WriteCloser
+	w.hooks["watcher"] = func() {
+		podLog, _ = w.evidence("pods/orders-a-1.log")
+	}
+	failed := false
+	w.onStdout = func(p []byte) { // the console's text: result.json is final, and cleanUp has not begun
+		if !failed && bytes.Contains(p, []byte("results: ")) && w.calls.count("watch-stop") == 0 {
+			failed = true
+			_ = podLog.Close()
+			_, _ = podLog.Write([]byte("stopped\n"))
+		}
+	}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if !failed {
+		t.Fatal("the console was not printed before the clean-up")
+	}
+	const prefix = "the evidence pods/orders-a-1.log could not be written: "
+	r := w.result()
+	if len(r.Warnings) != 1 || !strings.HasPrefix(r.Warnings[0], prefix) {
+		t.Errorf("result.json's warnings are %q, want the pod log's", r.Warnings)
+	}
+	if n := strings.Count(w.stdout.String(), prefix); n != 1 {
+		t.Errorf("the console tells the pod log's warning %d times, want once:\n%s", n, w.stdout.String())
+	}
+}
+
 // Section 14, point 25: the checks that the probe's start met, whose lines were written about 2 s
 // after their t, are counted in the install window, and so are in timeline.tsv's rows, which then
 // begin at the second of the earliest of them; the rows' sums equal the counts of result.json.
