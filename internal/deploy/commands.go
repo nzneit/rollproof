@@ -41,12 +41,13 @@ func (d *CommandsDriver) run(ctx context.Context, name string, args []string) Re
 	return d.o.Runner.Run(ctx, Command{Name: name, Args: args, Timeout: d.o.Timeout})
 }
 
-// Install runs the install command.
+// Install runs the install command and returns its Result unchanged.
 func (d *CommandsDriver) Install(ctx context.Context) Result {
 	return d.run(ctx, "install", d.o.Commands.Install)
 }
 
-// Deploy runs the deploy command.
+// Deploy runs the deploy command. With none configured it panics: Transitions then gives no
+// deploy window, so the call is the caller's mistake, not the run's.
 func (d *CommandsDriver) Deploy(ctx context.Context) Result {
 	if len(d.o.Commands.Deploy) == 0 {
 		panic("deploy: Deploy called with no deploy command")
@@ -54,7 +55,8 @@ func (d *CommandsDriver) Deploy(ctx context.Context) Result {
 	return d.run(ctx, "deploy", d.o.Commands.Deploy)
 }
 
-// Rollback runs the rollback command.
+// Rollback runs the rollback command. With none configured it panics, as Deploy does: no
+// rollback window is derived without the command.
 func (d *CommandsDriver) Rollback(ctx context.Context) Result {
 	if len(d.o.Commands.Rollback) == 0 {
 		panic("deploy: Rollback called with no rollback command")

@@ -4,7 +4,7 @@
 //
 //	GET /work?ms=N  sleeps N ms, answers 200 "<pod> <version>"
 //	GET /readyz     answers 200 (the server only listens once it can serve)
-//	GET /version    answers 200 "<version>", whatever FAIL_WORK says
+//	GET /version    answers 200 "<version>", whatever FAIL_WORK or FAIL_AFTER say
 //
 // START_DELAY       time after process start before it listens (warm-up)
 // SHUTDOWN          exit | drain-now | helper

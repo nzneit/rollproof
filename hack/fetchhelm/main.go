@@ -60,6 +60,8 @@ func main() {
 		if err == nil && runtime.GOARCH == "amd64" {
 			err = fetchKubectl(kubectlBase, runtime.GOARCH, kubectlSum, *dir)
 		} else if err == nil {
+			// Exit 0 all the same: the Helm binaries stay usable on arm64, and the e2e suite stops
+			// at its own check for kubectl.
 			fmt.Printf("kubectl %s: skipped: it is fetched for linux/amd64 only, and the e2e suite needs it\n", kubectlVersion)
 		}
 	}

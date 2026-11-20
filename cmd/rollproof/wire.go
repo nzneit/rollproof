@@ -247,7 +247,7 @@ func (s *session) Target(ctx context.Context, cfg *config.Config) (probe.Target,
 }
 
 // Probe makes the pod of the probe that the configuration names, the built-in
-// or a custom one, from probeOptions.
+// or a custom one. A custom env that a pod cannot hold is config-rejected.
 func (s *session) Probe(cfg *config.Config, probeImage string, raw io.Writer) (probe.Probe, error) {
 	o, err := s.probeOptions(cfg, probeImage, raw)
 	if err != nil {

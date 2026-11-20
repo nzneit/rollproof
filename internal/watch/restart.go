@@ -13,8 +13,8 @@ import (
 const restartedAtAnnotation = "kubectl.kubernetes.io/restartedAt"
 
 // Restart is how the tool's attempt to restart the watched workloads went. Began is the clock
-// before the first change and Ended the moment the last change returned or the first refusal
-// came: the restart's "command has exited". Accepted says that the API server took every change.
+// before the first change and Ended the moment the last change returned, the first refusal came
+// or ctx ended: the restart's "command has exited". Accepted says that the API server took every change.
 // When it refused one, Workload names that workload, as deployment/orders, and Text is the
 // server's answer.
 type Restart struct {
@@ -76,6 +76,8 @@ func (w *Watcher) restart(ctx context.Context, workload Workload, patch []byte) 
 		_, err = w.client.AppsV1().DaemonSets(w.o.Namespace).Patch(ctx, workload.Name,
 			types.StrategicMergePatchType, patch, opts)
 	default:
+		// Unreachable while the Tracker records only the three kinds above; a silent skip would
+		// leave a workload unchanged while Accepted said true.
 		return fmt.Errorf("restart %s: no such kind is watched", workload)
 	}
 	return err

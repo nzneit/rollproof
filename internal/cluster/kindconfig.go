@@ -15,9 +15,8 @@ import (
 // nodes' readiness. It is not one deadline over the whole creation, and kind's
 // own waits are not bounded by it. After a failure Keep leaves the nodes, the
 // run's folder, its kubeconfig and the registry container in place; the tool
-// deletes them otherwise. kind keeps the nodes of a failed attempt whatever
-// Keep says. Evidence holds a failed set-up's logs, kind's under kind/ and the
-// registry's as registry.log; nil collects nothing.
+// deletes them otherwise. Evidence holds a failed set-up's logs, kind's under
+// kind/ and the registry's as registry.log; nil collects nothing.
 type Spec struct {
 	Name, RunDir, NodeImage, RegistryImage string
 	Workers                                int

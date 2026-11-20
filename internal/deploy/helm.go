@@ -62,7 +62,7 @@ type fetchedRelease struct {
 // fetches the candidate only, Install installs the candidate, Transitions is
 // restart alone, and Releases is the candidate alone; Deploy and Rollback
 // then panic, because run never calls them for a restart. With a previous
-// release it is as before.
+// release it fetches both, installs the previous and gives deploy and rollback.
 func NewHelm(o HelmOptions) *HelmDriver {
 	return &HelmDriver{o: o}
 }

@@ -45,7 +45,7 @@ type Watcher interface {
 	InstallSettled(ctx context.Context, first time.Time) watch.Settling
 	Transition(ctx context.Context, name verdict.WindowName, began time.Time, exited <-chan struct{}) watch.Transition
 	// Restart restarts every watched workload as decision 3 says and returns when the
-	// last change was taken or the first was refused. run calls it once for a
+	// last change was taken, the first was refused or ctx ended. run calls it once for a
 	// restart's window, beside Transition, and hands its return to Transition as
 	// the end of the transition's command.
 	Restart(ctx context.Context) watch.Restart
@@ -818,7 +818,9 @@ func (s *runState) decide(final bool) verdict.Decision {
 
 // moveToolFaults places in the last window that began each condition of
 // t.Timed at or after that window's end that is a failure of the tool, or the
-// fault of a failed check's line (failedCheck[i] true for t.Timed[i]). Every
+// fault of a failed check's line (failedCheck[i] true for t.Timed[i]), so that
+// a failure does not vanish because of the way it was printed (design section
+// 6, section 14 point 29); verdict.Condition carries no such flag. Every
 // other condition after the last window stays where Decide puts it, and the
 // report shows it as a warning. With no begun window, or one still open, it
 // does nothing. It panics unless failedCheck is exactly as long as t.Timed.
@@ -1042,9 +1044,9 @@ func (s *runState) cleanUpQuietly() {
 	s.cleanUp()
 }
 
-// cleanUp performs step 15: the watcher is stopped, the cluster is deleted
-// unless it was asked for or a signal ended the run, and an error is a
-// warning.
+// cleanUp performs step 15: the watcher is stopped, the warnings raised since
+// the last result.json are told, the cluster is deleted unless it was asked
+// for or a signal ended the run, and an error is a warning.
 func (s *runState) cleanUp() {
 	if s.watcher != nil {
 		s.watcher.Stop()

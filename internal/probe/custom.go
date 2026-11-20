@@ -55,6 +55,8 @@ func envVarSource(m map[string]any) (*corev1.EnvVarSource, string) {
 	if err := json.Unmarshal(back, &held); err != nil {
 		return nil, form
 	}
+	// encoding/json matches a key written in another case and drops an unknown one without a
+	// word; a key of m that the round trip did not keep is one of those.
 	if p := firstMissing(m, held, ""); p != "" {
 		return nil, "valueFrom holds a key that a container does not take: " + p
 	}

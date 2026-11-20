@@ -295,7 +295,8 @@ func archiveConfig(t *testing.T) string {
 	return variant(t, base, "deploy:\n", "images:\n  orders:\n    archive: S3CRET-VALUE.tar\ndeploy:\n")
 }
 
-// Review Focus 3.
+// Review Focus 3: a path that is no image archive the tool can read, a FIFO among them, is
+// rejected when the configuration loads, with one text, and the load does not block.
 func TestArchiveThatIsNotAnImage(t *testing.T) {
 	for _, tc := range []struct {
 		name string

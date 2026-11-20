@@ -653,6 +653,7 @@ func (p *Pod) writeEvidence(ctx context.Context) {
 		}
 		return
 	}
+	// A Pod cannot fail to marshal, so no reason is written for that case; the file is skipped.
 	if b, err := json.MarshalIndent(pod, "", "  "); err == nil {
 		if w, openErr := open("probe-pod.json"); openErr == nil {
 			w.Write(b)

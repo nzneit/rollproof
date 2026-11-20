@@ -6,7 +6,7 @@
 // VERSION      the version a check looks for in the body, white space trimmed
 // ON_VERSION   silent: the check that first reads VERSION writes no line, and nothing more is written until SIGTERM
 // ON_VERSION   exit: the check that first reads VERSION writes no line, and the probe exits 0
-// FAIL_FIRST   a duration of failed-check lines, one every 2 ms, before the first check
+// FAIL_FIRST   a duration of failed-check lines, class fixture, one every 2 ms, before the first check
 // IGNORE_TERM  true: ignore SIGTERM
 //
 // A check passes on a status of 200 to 299. Its line is {"ok":true,"ms":N} or

@@ -23,10 +23,10 @@ import (
 )
 
 // fixture is one row of section 12: the chart values of each release, the
-// cluster's size, the limits that differ from the defaults, and which Helm
-// binary, with the fields that the rows of step 4 change.
+// cluster's size, the limits that differ from the defaults, which Helm
+// binary, and what the later rows change.
 //
-// The fields beside today's: cluster.node-image ("" is kind's default); a
+// The fields after helm: cluster.node-image ("" is kind's default); a
 // Helm run with no previous release; a candidate whose image values name the
 // previous image; the setup commands; the commands driver's roles in order
 // (nil is the Helm driver); a custom probe (nil is the built-in one); an

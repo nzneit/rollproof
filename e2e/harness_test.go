@@ -713,10 +713,8 @@ type recordWorkload struct {
 	Probed       string `json:"probed"`
 }
 
-// readRecord reads out/result.json as the step 4 rows read it: driver, name, reasons with
-// their windows, windows with their counts, the install record, transitions
-// with command, restart, settle restarts and workloads, probes, releases,
-// images and cluster. Fails the test when the file cannot be read.
+// readRecord reads out/result.json as the step 4 rows read it, and fails the test when the
+// file cannot be read or decoded.
 func readRecord(t *testing.T, out string) record {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(out, "result.json"))

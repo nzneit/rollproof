@@ -50,7 +50,9 @@ func invalid(fault string) Line { return Line{Kind: Invalid, Fault: fault} }
 //
 // asked is the moment the tool asked for the probe's pod, on the tool's clock. A line whose t is
 // earlier than asked by more than ClockBound is Invalid, because no check can have begun before
-// the probe existed; a t exactly ClockBound before asked is not. A zero asked skips this check.
+// the probe existed (section 14, point 29); a t exactly ClockBound before asked is not. A zero
+// asked skips this check. It is made here, not in the follower, because ParseLine is the one
+// reader of a line.
 func ParseLine(text string, written, asked time.Time) Line {
 	s := strings.TrimLeftFunc(text, unicode.IsSpace)
 	if !strings.HasPrefix(s, "{") {

@@ -1,3 +1,8 @@
+{{/*
+The two hook Jobs, rendered from one template. Their pods carry app.kubernetes.io/name:
+orders-hook, which neither the orders Service nor the orders anti-affinity selects, so that a
+sleeping hook pod is never a Ready endpoint and never takes a worker that a surge pod needs.
+*/}}
 {{- if .Values.hooks }}
 {{- range $i, $hook := list (dict "name" "orders-post-install" "hook" "post-install") (dict "name" "orders-pre-upgrade" "hook" "pre-upgrade") }}
 {{ if $i }}---
