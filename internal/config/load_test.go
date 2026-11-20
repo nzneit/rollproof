@@ -149,7 +149,7 @@ func TestLoadFull(t *testing.T) {
 		},
 		Registries: []Registry{{
 			Host:   "registry.example",
-			CA:     "/etc/rollproof/corp-ca.pem",
+			CA:     filepath.Join(filepath.Dir(real), "corp-ca.pem"),
 			Mirror: "mirror.corp.example/registry-example",
 		}},
 		Images:     map[string]Image{"orders": {Local: "orders:candidate", As: "registry.example/team/orders"}},

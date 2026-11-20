@@ -184,9 +184,10 @@ func TestChartPaths(t *testing.T) {
 }
 
 func TestPathsAreRelativeToTheFile(t *testing.T) {
-	dir, real := project(t, "chart", "images")
+	dir, real := project(t, "chart", "images", "certs")
 	t.Chdir(t.TempDir())
 	writeArchive(t, filepath.Join(dir, "images", "orders.tar"), 1)
+	writeCA(t, filepath.Join(dir, "certs", "corp-ca.pem"))
 	text := variant(t, base, candidateBlock, "    candidate:\n      chart: ./chart\n      values:\n        - test/values-kind.yaml\n        - { replicas: 2 }\n")
 	text = variant(t, text, "deploy:\n", "registries:\n  - host: registry.example\n    ca: certs/corp-ca.pem\n"+
 		"images:\n  orders:\n    archive: images/orders.tar\nsetup:\n  - [kubectl, apply, -f, test/prerequisites.yaml]\ndeploy:\n")

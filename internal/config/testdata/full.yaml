@@ -7,7 +7,7 @@ cluster:
 
 registries:
   - host: registry.example
-    ca: /etc/rollproof/corp-ca.pem
+    ca: corp-ca.pem
     mirror: mirror.corp.example/registry-example
 
 images:
