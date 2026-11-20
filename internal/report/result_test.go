@@ -102,16 +102,16 @@ func passRun() Run {
 	return Run{
 		Schema: 1, Final: true, Verdict: "pass", Driver: "helm", Name: "orders",
 		Windows: []Window{
-			{Name: "steady", Start: at(0), End: at(10_000), Result: "pass", Checks: 2000, SlowestMs: 41, LagMs: 6},
-			{Name: "deploy", Start: at(10_000), End: at(43_400), Result: "pass", Checks: 6680, SlowestMs: 212, LagMs: 38},
-			{Name: "rollback", Start: at(43_400), End: at(77_300), Result: "pass", Checks: 6780, SlowestMs: 187, LagMs: 35},
+			{Name: "steady", Start: at(0), End: at(10_000), Result: "pass", Checks: 2000, SlowestMs: new(41.0), LagMs: new(6.0)},
+			{Name: "deploy", Start: at(10_000), End: at(43_400), Result: "pass", Checks: 6680, SlowestMs: new(212.0), LagMs: new(38.0)},
+			{Name: "rollback", Start: at(43_400), End: at(77_300), Result: "pass", Checks: 6780, SlowestMs: new(187.0), LagMs: new(35.0)},
 		},
 		Install: &Install{Ready: *at(-21_000), FirstObservation: at(-15_000), Settled: at(0),
 			Checks: 3000, Failed: 6, FailedByClass: map[string]int{"refused": 5, "timeout": 1},
-			LastFailure: at(-14_900), SlowestMs: 44, LagMs: 9},
+			LastFailure: at(-14_900), SlowestMs: new(44.0), LagMs: new(9.0)},
 		Transitions: []Transition{
-			{Name: "deploy", Command: "ok", Workloads: []Workload{ordersReplaced(5300)}},
-			{Name: "rollback", Command: "ok", Workloads: []Workload{ordersReplaced(5200)}},
+			{Name: "deploy", Command: new("ok"), Workloads: []Workload{ordersReplaced(5300)}},
+			{Name: "rollback", Command: new("ok"), Workloads: []Workload{ordersReplaced(5200)}},
 		},
 		Probes: []Probe{{
 			Kind:   "http",
@@ -121,7 +121,7 @@ func passRun() Run {
 				{Key: "probe.http.timeout", Value: "2s", Default: "2s"},
 				{Key: "probe.http.expect-status", Value: "200-299", Default: "200-299"},
 			},
-			Lines: 78, CertificateChecked: true, StoppedWhenAsked: new(true),
+			Lines: 78, CertificateChecked: new(true), StoppedWhenAsked: new(true),
 		}},
 		Releases: []Release{
 			{Role: "previous", Chart: "orders", Version: "1.4.2", Source: "oci://registry.example/charts/orders"},
@@ -327,8 +327,11 @@ func TestProbeStoppedWhenAskedNull(t *testing.T) {
 
 func TestNoNulls(t *testing.T) {
 	// stopped_when_asked is null when the tool did not ask the probe to stop, stopped waiting for
-	// it, or failed while it stopped it (section 10).
-	keysThatMayBeNull := []string{"cluster", "end", "first_failure", "first_observation", "install", "last_failure", "quickest_stop_ms", "settled", "start", "stopped_when_asked"}
+	// it, or failed while it stopped it (section 10). A transition's command is null for a restart,
+	// and its restart for a deploy and a rollback (plan decision 5). certificate_checked is null for
+	// a custom probe only (plan decision 9): a custom probe's null is checked and taken out before
+	// the walk, so that the key is not on this list and an HTTP probe's null is still caught.
+	keysThatMayBeNull := []string{"cluster", "command", "end", "first_failure", "first_observation", "install", "lag_ms", "last_failure", "quickest_stop_ms", "restart", "settled", "slowest_ms", "start", "stopped_when_asked"}
 	for _, r := range []Run{
 		{},
 		{
@@ -336,10 +339,11 @@ func TestNoNulls(t *testing.T) {
 			Windows:     []Window{{Name: "steady"}},
 			Install:     &Install{},
 			Transitions: []Transition{{Name: "deploy", Workloads: []Workload{{Workload: "deployment/orders"}}}},
-			Probes:      []Probe{{Kind: "http"}},
+			Probes:      []Probe{{Kind: "http", CertificateChecked: new(true)}},
 			Releases:    []Release{{Role: "candidate"}},
 			Images:      []Image{{Name: "orders"}},
 		},
+		{Probes: []Probe{{Kind: "custom"}}},
 	} {
 		b, err := encode(r)
 		if err != nil {
@@ -348,6 +352,16 @@ func TestNoNulls(t *testing.T) {
 		var v any
 		if err := json.Unmarshal(b, &v); err != nil {
 			t.Fatal(err)
+		}
+		for _, p := range v.(map[string]any)["probes"].([]any) {
+			p := p.(map[string]any)
+			if p["kind"] != "custom" {
+				continue
+			}
+			if c, ok := p["certificate_checked"]; !ok || c != nil {
+				t.Errorf("a custom probe's certificate_checked is %v (present %v), want null in\n%s", c, ok, b)
+			}
+			delete(p, "certificate_checked")
 		}
 		var found []string
 		nulls(v, "", &found)
@@ -369,7 +383,7 @@ func TestNoNulls(t *testing.T) {
 // ready; no time of the first observation and no counts before it; no time of settling before it.
 func TestInstallRecordAtEachEnding(t *testing.T) {
 	counts := Install{Ready: *at(-21_000), FirstObservation: at(-15_000), Checks: 1200, Failed: 6,
-		FailedByClass: map[string]int{"refused": 5, "timeout": 1}, LastFailure: at(-14_900), SlowestMs: 44, LagMs: 9}
+		FailedByClass: map[string]int{"refused": 5, "timeout": 1}, LastFailure: at(-14_900), SlowestMs: new(44.0), LagMs: new(9.0)}
 	for _, c := range []struct {
 		name    string
 		install *Install
@@ -378,7 +392,7 @@ func TestInstallRecordAtEachEnding(t *testing.T) {
 		{"before the install was ready", nil, `null`},
 		{"before the probe's first observation", &Install{Ready: *at(-21_000)},
 			`{"ready":"2026-11-13T09:59:31.000Z","first_observation":null,"settled":null,"settle_restarted_by":[],` +
-				`"checks":0,"failed":0,"failed_by_class":{},"last_failure":null,"slowest_ms":0,"lag_ms":0}`},
+				`"checks":0,"failed":0,"failed_by_class":{},"last_failure":null,"slowest_ms":null,"lag_ms":null}`},
 		{"before the install had settled", &counts,
 			`{"ready":"2026-11-13T09:59:31.000Z","first_observation":"2026-11-13T09:59:37.000Z","settled":null,"settle_restarted_by":[],` +
 				`"checks":1200,"failed":6,"failed_by_class":{"refused":5,"timeout":1},"last_failure":"2026-11-13T09:59:37.100Z","slowest_ms":44,"lag_ms":9}`},
@@ -402,6 +416,45 @@ func TestInstallRecordAtEachEnding(t *testing.T) {
 				t.Errorf("install is\n%s\nwant\n%s", got.String(), c.want)
 			}
 		})
+	}
+}
+
+// customNoMsOrLagRun is a pass judged by a custom probe that gives neither ms nor lag (section 12).
+func customNoMsOrLagRun() Run {
+	r := passRun()
+	for i := range r.Windows {
+		r.Windows[i].SlowestMs, r.Windows[i].LagMs = nil, nil
+	}
+	r.Install.SlowestMs, r.Install.LagMs = nil, nil
+	for i := range r.Transitions {
+		r.Transitions[i].Workloads[0].Probed = "not known"
+	}
+	r.Probes = []Probe{{
+		Kind:     "custom",
+		Target:   "registry.example/tools/busybox@sha256:6d9ac9237a84afe1516540f40a0fafdc86859b2141954b4d643af7066d598b74",
+		EnvNames: []string{"TARGET"}, CommandCount: 3, Lines: 1530, StoppedWhenAsked: new(true),
+	}}
+	return r
+}
+
+func TestResultNullWithoutMsOrLag(t *testing.T) {
+	b, err := encode(customNoMsOrLagRun())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file struct {
+		Windows []map[string]any `json:"windows"`
+		Install map[string]any   `json:"install"`
+	}
+	if err := json.Unmarshal(b, &file); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range append(file.Windows, file.Install) {
+		for _, k := range []string{"slowest_ms", "lag_ms"} {
+			if v, ok := m[k]; !ok || v != nil {
+				t.Errorf("%s is %v (present %v), want null", k, v, ok)
+			}
+		}
 	}
 }
 
@@ -845,7 +898,7 @@ func TestWindowReadsBack(t *testing.T) {
 	w := Window{
 		Name: "deploy", Start: at(1000), End: at(2000), Result: "fail", Checks: 11, Failed: 7,
 		FailedAfterFinish: 3, CrossedStart: 2, FailedByClass: map[string]int{"timeout": 5, "status": 2},
-		FirstFailure: at(1500), SlowestMs: 13.5, LagMs: 17.25,
+		FirstFailure: at(1500), SlowestMs: new(13.5), LagMs: new(17.25),
 	}
 	b, err := json.Marshal(w)
 	if err != nil {

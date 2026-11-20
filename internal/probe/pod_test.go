@@ -3,9 +3,11 @@ package probe
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
+	"net/http"
 	"os"
 	goruntime "runtime"
 	"slices"
@@ -15,13 +17,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	restclient "k8s.io/client-go/rest"
+	fakerest "k8s.io/client-go/rest/fake"
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
 
@@ -63,6 +71,84 @@ func TestPodSpec(t *testing.T) {
 		if g := *podSpec(PodOptions{Drain: c.drain}).Spec.TerminationGracePeriodSeconds; g != c.grace {
 			t.Errorf("drain %v: grace %d s, want %d s", c.drain, g, c.grace)
 		}
+	}
+}
+
+const customImage = "registry.example/tools/busybox@sha256:6d9ac9237a84afe1516540f40a0fafdc86859b2141954b4d643af7066d598b74"
+
+// customOptions is a custom probe's pod as section 6's example writes it.
+func customOptions() PodOptions {
+	return PodOptions{
+		Image:   customImage,
+		Command: []string{"sh", "-c", `trap 'exit 0' TERM; while true; do if nc -z -w1 "$TARGET" 5432; then echo '{"ok":true}'; else echo '{"ok":false,"class":"refused"}'; fi; sleep 0.1; done`},
+		Env: []corev1.EnvVar{
+			{Name: "TARGET", Value: "orders-db.orders"},
+			{Name: "TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "probe-token"}, Key: "token"}}},
+		},
+		ServiceAccountToken: true,
+		Drain:               10 * time.Second,
+	}
+}
+
+func TestPodSpecCustom(t *testing.T) {
+	got, err := yaml.Marshal(podSpec(customOptions()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const path = "testdata/pod-custom.golden.yaml"
+	if *update {
+		if err := os.WriteFile(path, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("%s differs\n--- got\n%s--- want\n%s", path, got, want)
+	}
+}
+
+// A custom probe's pod differs from the built-in probe's only in its image, command, args, env,
+// drain and token (section 6).
+func TestCustomPodKeepsTheBuiltInSettings(t *testing.T) {
+	custom := podSpec(customOptions())
+	builtIn := podSpec(PodOptions{Image: probeImage, Args: []string{"probe", "http"}, Drain: 7 * time.Second})
+	if d := cmp.Diff(builtIn.ObjectMeta, custom.ObjectMeta); d != "" {
+		t.Errorf("metadata differs (-built-in +custom):\n%s", d)
+	}
+	bc, cc := builtIn.Spec.Containers[0], custom.Spec.Containers[0]
+	if cc.Name != "probe" || cc.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Errorf("container %q, pull policy %q; want probe, IfNotPresent", cc.Name, cc.ImagePullPolicy)
+	}
+	if d := cmp.Diff(bc.SecurityContext, cc.SecurityContext); d != "" {
+		t.Errorf("security context differs (-built-in +custom):\n%s", d)
+	}
+	if d := cmp.Diff(builtIn.Spec.NodeSelector, custom.Spec.NodeSelector); d != "" {
+		t.Errorf("node selector differs:\n%s", d)
+	}
+	if d := cmp.Diff(builtIn.Spec.Tolerations, custom.Spec.Tolerations); d != "" {
+		t.Errorf("tolerations differ:\n%s", d)
+	}
+	if custom.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Errorf("restart policy %q, want Never", custom.Spec.RestartPolicy)
+	}
+	if g := *custom.Spec.TerminationGracePeriodSeconds; g != 10 {
+		t.Errorf("grace %d s, want the custom probe's drain, 10 s", g)
+	}
+	if !slices.Equal(cc.Command, customOptions().Command) || cc.Args != nil {
+		t.Errorf("command %q, args %q; want the configured command and no args", cc.Command, cc.Args)
+	}
+	if d := cmp.Diff(customOptions().Env, cc.Env); d != "" {
+		t.Errorf("env differs:\n%s", d)
+	}
+	if a := custom.Spec.AutomountServiceAccountToken; a == nil || !*a || custom.Spec.ServiceAccountName != "" {
+		t.Errorf("token %v, service account %q; want the default service account's token mounted", a, custom.Spec.ServiceAccountName)
+	}
+	if a := builtIn.Spec.AutomountServiceAccountToken; a == nil || *a || bc.Command != nil || bc.Env != nil {
+		t.Errorf("the built-in probe's pod has token %v, command %q, env %v; want none of them", a, bc.Command, bc.Env)
 	}
 }
 
@@ -122,6 +208,20 @@ func newProbe(t *testing.T, l *fakeLog, status corev1.PodStatus, drain, startTim
 	return s
 }
 
+// NewPod refuses a probe with no raw writer at once, rather than panicking in the follower on
+// the probe's first line.
+func TestNewPodNeedsRaw(t *testing.T) {
+	var got any
+	func() {
+		defer func() { got = recover() }()
+		NewPod(PodOptions{})
+	}()
+	text, ok := got.(string)
+	if !ok || !strings.Contains(text, "PodOptions.Raw") {
+		t.Errorf("NewPod with no Raw panicked with %v, want a message naming PodOptions.Raw", got)
+	}
+}
+
 // setStatus replaces the status of the probe's pod.
 func (s probeSetup) setStatus(t *testing.T, status corev1.PodStatus) {
 	t.Helper()
@@ -174,6 +274,44 @@ func condition(err error) verdict.Condition {
 	var c verdict.Condition
 	errors.As(err, &c)
 	return c
+}
+
+// evidenceFiles is an Evidence that keeps each file in memory.
+type evidenceFiles struct {
+	mu    sync.Mutex
+	files map[string]*bytes.Buffer
+}
+
+type nopCloser struct{ *bytes.Buffer }
+
+func (nopCloser) Close() error { return nil }
+
+func (e *evidenceFiles) open(name string) (io.WriteCloser, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.files == nil {
+		e.files = map[string]*bytes.Buffer{}
+	}
+	b := &bytes.Buffer{}
+	e.files[name] = b
+	return nopCloser{b}, nil
+}
+
+func (e *evidenceFiles) get(name string) (string, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	b, ok := e.files[name]
+	if !ok {
+		return "", false
+	}
+	return b.String(), true
+}
+
+// refusedBy makes the API server refuse every create of a pod with err.
+func refusedBy(s probeSetup, err error) {
+	s.client.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, err
+	})
 }
 
 // endsWhenDeleted gives the probe of s one log stream: text, and then nothing until the probe's
@@ -263,6 +401,38 @@ func TestStartReturnsAtTheFirstObservation(t *testing.T) {
 	}
 	if !strings.Contains(s.raw.String(), "starting") {
 		t.Errorf("raw = %q, want every line", s.raw.String())
+	}
+}
+
+func TestStartFloorsTAtTheCreate(t *testing.T) {
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	s.clock.Set(logAt(-60_000)) // Start begins
+	s.client.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		s.clock.Set(logAt(0)) // the moment of the ask
+		return false, nil, nil
+	})
+	s.client.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		s.clock.Set(logAt(500)) // after the create
+		return false, nil, nil
+	})
+	at := func(ms int) string { return logAt(ms).Format(time.RFC3339Nano) }
+	s.endsWhenDeleted(t, logLine(logAt(0), `{"ok":true}`)+
+		logLine(logAt(100), `{"ok":false,"t":"`+at(-1800)+`"}`)+ // 1.8 s before the ask: counted
+		logLine(logAt(200), `{"ok":false,"t":"`+at(-2100)+`"}`)+ // 2.1 s before the ask: a fault
+		// 1.6 s before the ask and 2.1 s before its own stamp: counted, because the floor is the
+		// bound before the ask (section 6); counted from the stamp, it would be a fault.
+		logLine(logAt(500), `{"ok":false,"t":"`+at(-1600)+`"}`))
+	if _, err := s.pod.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pod.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	events := allEvents(s.pod.Events())
+	if len(events) != 4 || events[1].Obs == nil || events[2].Fault == nil ||
+		events[2].Fault.Code != verdict.ProbeLineInvalid || !events[2].FailedCheck ||
+		events[3].Obs == nil || !events[3].Obs.T.Equal(logAt(-1600)) {
+		t.Errorf("events = %+v, want two observations, the early t's fault, and the observation 1.6 s before the ask", events)
 	}
 }
 
@@ -378,8 +548,8 @@ func TestProbeExitsAfterStart(t *testing.T) {
 					if e.Fault == nil {
 						continue
 					}
-					if e.Fault.Code != verdict.ProbeExited || !e.Fault.At.Equal(c.want) {
-						t.Errorf("fault %+v, want probe-exited at %v", *e.Fault, c.want)
+					if e.Fault.Code != verdict.ProbeExited || !e.Fault.At.Equal(c.want) || e.FailedCheck {
+						t.Errorf("fault %+v (failed check %v), want probe-exited at %v, not a failed check", *e.Fault, e.FailedCheck, c.want)
 					}
 					return
 				case <-timeout:
@@ -558,8 +728,9 @@ func TestStopReportsAnExitOnce(t *testing.T) {
 			if n := exits(events); n != 1 {
 				t.Fatalf("%d probe-exited faults, want 1: %+v", n, events)
 			}
-			if f := events[len(events)-1].Fault; f == nil || !f.At.Equal(logAt(5000)) || f.Text != "the probe exited with exit code 1 (Error)" {
-				t.Errorf("last event = %+v, want the exit at the container's finishedAt", events[len(events)-1])
+			if e := events[len(events)-1]; e.Fault == nil || !e.Fault.At.Equal(logAt(5000)) ||
+				e.Fault.Text != "the probe exited with exit code 1 (Error)" || e.FailedCheck {
+				t.Errorf("last event = %+v, want the exit at the container's finishedAt, not a failed check", e)
 			}
 		})
 	}
@@ -827,6 +998,281 @@ func TestAStartThatCreatedNoPodStoppedWhenAsked(t *testing.T) {
 		t.Errorf("facts %+v; a probe whose pod was never created stopped when asked", f)
 	}
 }
+
+func TestStartRefusedPod(t *testing.T) {
+	gr := schema.GroupResource{Resource: "pods"}
+	for _, c := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"Pod Security", apierrors.NewForbidden(gr, "probe",
+			errors.New(`violates PodSecurity "restricted:latest": runAsNonRoot != true`)),
+			`violates PodSecurity "restricted:latest": runAsNonRoot != true`},
+		{"validation", apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, "probe", field.ErrorList{
+			field.Invalid(field.NewPath("spec", "containers").Index(0).Child("env").Index(0).Child("valueFrom"), "",
+				"may not have more than one field specified at a time")}),
+			"may not have more than one field specified at a time"},
+		{"a bad request", apierrors.NewBadRequest("the pod is not one the server reads"), "the pod is not one the server reads"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 10*time.Second)
+			refusedBy(s, c.err)
+			began := time.Now()
+			_, err := s.pod.Start(context.Background())
+			got := condition(err)
+			if got.Code != verdict.ProbeNotStarted || !strings.HasPrefix(got.Text, "the API server refused the probe's pod: ") ||
+				!strings.Contains(got.Text, c.want) {
+				t.Errorf("Start = %v, want probe-not-started with the API server's text", err)
+			}
+			if time.Since(began) > 2*time.Second {
+				t.Error("Start waited for StartTimeout")
+			}
+			closedWithin(t, s.pod.Events(), 2*time.Second)
+			if facts, _ := s.pod.Stop(context.Background()); !facts.StoppedWhenAsked {
+				t.Error("a probe that never ran did not stop when asked")
+			}
+		})
+	}
+}
+
+// A create that fails for another reason than a refusal stays the API's error, which run reports
+// as a failure of the tool.
+func TestStartCreateFailsOtherwise(t *testing.T) {
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 10*time.Second)
+	refusedBy(s, apierrors.NewServiceUnavailable("etcd is not answering"))
+	_, err := s.pod.Start(context.Background())
+	if err == nil || condition(err).Code != "" || !strings.Contains(err.Error(), "etcd is not answering") {
+		t.Errorf("Start = %v, want the API's error and no Condition", err)
+	}
+}
+
+// Review Focus 2: a custom probe's env reads a Secret that does not exist.
+func TestStartNamesAMissingSecret(t *testing.T) {
+	status := corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
+		Name: "probe", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+			Reason: "CreateContainerConfigError", Message: `secret "probe-token" not found`}},
+	}}}
+	s := newProbe(t, &fakeLog{}, status, 100*time.Millisecond, 300*time.Millisecond)
+	_, err := s.pod.Start(context.Background())
+	got := condition(err)
+	if got.Code != verdict.ProbeNotStarted ||
+		got.Text != `no observation within limits.timeout; the pod is Pending; container probe is waiting: CreateContainerConfigError: secret "probe-token" not found` {
+		t.Errorf("Start = %v, want probe-not-started that names the Secret's error", err)
+	}
+}
+
+// withSidecars makes every created probe pod carry a mesh's init container and proxy, as an
+// injector would add them.
+func withSidecars(s probeSetup) {
+	s.client.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		p := a.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
+		p.Spec.InitContainers = append(p.Spec.InitContainers, corev1.Container{Name: "istio-init"})
+		p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: "istio-proxy"})
+		return false, nil, nil
+	})
+}
+
+func TestStopWritesThePodAndItsOtherContainers(t *testing.T) {
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	withSidecars(s)
+	var ev evidenceFiles
+	s.pod.o.Evidence = ev.open
+	s.endsWhenDeleted(t, logLine(logAt(400), `{"ok":true}`))
+	s.clock.Set(logAt(700))
+	if _, err := s.pod.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ev.get("probe-pod.json"); ok {
+		t.Error("probe-pod.json was written before the stop")
+	}
+	if _, err := s.pod.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// The fake API removes the pod at its delete, so a pod in the file was read before the delete.
+	pod, ok := ev.get("probe-pod.json")
+	var read corev1.Pod
+	if !ok || json.Unmarshal([]byte(pod), &read) != nil || read.Name != "probe" || read.Status.Phase != corev1.PodRunning {
+		t.Errorf("probe-pod.json = %q, want the pod as the API gave it before its delete", pod)
+	}
+	for _, name := range []string{"probe-pod/istio-init.log", "probe-pod/istio-proxy.log"} {
+		if got, ok := ev.get(name); got != "fake logs" {
+			t.Errorf("%s = %q, %v; want the container's log", name, got, ok)
+		}
+	}
+	if _, ok := ev.get("probe-pod/probe.log"); ok {
+		t.Error("the probe's own container was written to probe-pod/; it belongs in probe.log")
+	}
+}
+
+func TestStartTimeoutWritesThePod(t *testing.T) {
+	status := corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
+		Name: "probe", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+	}}}
+	s := newProbe(t, &fakeLog{}, status, 100*time.Millisecond, 300*time.Millisecond)
+	var ev evidenceFiles
+	s.pod.o.Evidence = ev.open
+	if _, err := s.pod.Start(context.Background()); condition(err).Code != verdict.ProbeNotStarted {
+		t.Fatalf("Start = %v, want probe-not-started", err)
+	}
+	if got, _ := ev.get("probe-pod.json"); !strings.Contains(got, "ImagePullBackOff") {
+		t.Errorf("probe-pod.json = %q, want the pod's status with the waiting reason", got)
+	}
+}
+
+func TestPodEvidenceThatCannotBeRead(t *testing.T) {
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	withSidecars(s)
+	var ev evidenceFiles
+	s.pod.o.Evidence = ev.open
+	s.client.PrependReactor("get", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.GetSubresource() == "log" {
+			return true, nil, errors.New("the pod's log is gone")
+		}
+		return false, nil, nil
+	})
+	s.endsWhenDeleted(t, logLine(logAt(400), `{"ok":true}`))
+	s.clock.Set(logAt(700))
+	if _, err := s.pod.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pod.Stop(context.Background()); err != nil {
+		t.Errorf("Stop = %v; evidence that cannot be read is no error of the stop", err)
+	}
+	if got, _ := ev.get("probe-pod/istio-proxy.log"); !strings.HasPrefix(got, "rollproof: the log could not be read: ") ||
+		!strings.Contains(got, "the pod's log is gone") {
+		t.Errorf("probe-pod/istio-proxy.log = %q, want the reason", got)
+	}
+}
+
+func TestRefusedPodWritesNoEvidence(t *testing.T) {
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	refusedBy(s, apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "probe", errors.New("denied")))
+	var ev evidenceFiles
+	s.pod.o.Evidence = ev.open
+	s.pod.Start(context.Background())
+	s.pod.Stop(context.Background())
+	if len(ev.files) != 0 {
+		t.Errorf("evidence %v, want none for a pod that never existed", ev.files)
+	}
+}
+
+// The pod's own read failing is the reason in probe-pod.json, and no container log is read.
+func TestPodEvidenceWhenThePodCannotBeRead(t *testing.T) {
+	s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+	withSidecars(s)
+	var ev evidenceFiles
+	s.pod.o.Evidence = ev.open
+	s.endsWhenDeleted(t, logLine(logAt(400), `{"ok":true}`))
+	s.clock.Set(logAt(700))
+	if _, err := s.pod.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s.client.PrependReactor("get", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		if a.GetSubresource() == "log" {
+			return false, nil, nil
+		}
+		return true, nil, errors.New("the API server is not answering")
+	})
+	if _, err := s.pod.Stop(context.Background()); err != nil {
+		t.Errorf("Stop = %v; a pod that cannot be read is no error of the stop", err)
+	}
+	got, ok := ev.get("probe-pod.json")
+	if !ok || !strings.HasPrefix(got, "rollproof: the pod could not be read: ") ||
+		!strings.Contains(got, "the API server is not answering") {
+		t.Errorf("probe-pod.json = %q, %v; want the reason", got, ok)
+	}
+	for name := range ev.files {
+		if strings.HasPrefix(name, "probe-pod/") {
+			t.Errorf("%s was written although the pod could not be read", name)
+		}
+	}
+}
+
+// A container's log that fails after some text keeps what was read, and then says why it ended:
+// on a new line, with the error's line breaks as spaces.
+func TestContainerLogCutWhileCopied(t *testing.T) {
+	for _, c := range []struct {
+		name, text string
+		err        error
+		want       string
+	}{
+		{"no line break yet", "some text", errors.New("the stream broke"),
+			"some text\nrollproof: the log could not be read: the stream broke\n"},
+		{"after a line break", "some text\n", errors.New("the stream\nbroke"),
+			"some text\nrollproof: the log could not be read: the stream broke\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newProbe(t, &fakeLog{}, runningStatus(), 100*time.Millisecond, 5*time.Second)
+			withSidecars(s)
+			var ev evidenceFiles
+			s.pod.o.Evidence = ev.open
+			s.pod.o.Client = cutLogClient{Interface: s.client, container: "istio-proxy", text: c.text, err: c.err}
+			s.endsWhenDeleted(t, logLine(logAt(400), `{"ok":true}`))
+			s.clock.Set(logAt(700))
+			if _, err := s.pod.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.pod.Stop(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := ev.get("probe-pod/istio-proxy.log"); got != c.want {
+				t.Errorf("probe-pod/istio-proxy.log = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// cutLogClient is a client whose log of one container gives text and then fails, as a log cut
+// while it is copied does. The fake clientset serves a whole log or none.
+type cutLogClient struct {
+	kubernetes.Interface
+	container, text string
+	err             error
+}
+
+func (c cutLogClient) CoreV1() typedcorev1.CoreV1Interface {
+	return cutLogCore{c.Interface.CoreV1(), c.container, c.text, c.err}
+}
+
+type cutLogCore struct {
+	typedcorev1.CoreV1Interface
+	container, text string
+	err             error
+}
+
+func (c cutLogCore) Pods(namespace string) typedcorev1.PodInterface {
+	return cutLogPods{c.CoreV1Interface.Pods(namespace), c.container, c.text, c.err}
+}
+
+type cutLogPods struct {
+	typedcorev1.PodInterface
+	container, text string
+	err             error
+}
+
+func (p cutLogPods) GetLogs(name string, opts *corev1.PodLogOptions) *restclient.Request {
+	if opts.Container != p.container {
+		return p.PodInterface.GetLogs(name, opts)
+	}
+	client := &fakerest.RESTClient{
+		Client: fakerest.CreateHTTPClient(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(io.MultiReader(strings.NewReader(p.text), cutReader{p.err})),
+			}, nil
+		}),
+		NegotiatedSerializer: scheme.Codecs.WithoutConversion(),
+		GroupVersion:         corev1.SchemeGroupVersion,
+		VersionedAPIPath:     "/api/v1/namespaces/" + cluster.ProbeNamespace + "/pods/" + name + "/log",
+	}
+	return client.Request()
+}
+
+// cutReader is a stream's end that fails.
+type cutReader struct{ err error }
+
+func (r cutReader) Read([]byte) (int, error) { return 0, r.err }
 
 // closedWithin reads events until it is closed, and fails the test when that takes longer than d.
 func closedWithin(t *testing.T, events <-chan Event, d time.Duration) {

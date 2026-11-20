@@ -20,6 +20,15 @@
     "drainDeadline": { "type": "string" },
     "spread": { "type": "boolean" },
     "gracePeriod": { "type": "integer", "minimum": 0 },
-    "failWork": { "type": "boolean" }
+    "failWork": { "type": "boolean" },
+    "workload": { "enum": ["Deployment", "StatefulSet", "DaemonSet"] },
+    "denyIngress": { "type": "boolean" },
+    "allowProbe": { "type": "boolean" },
+    "second": { "type": "boolean" },
+    "secondRevision": { "type": "string" },
+    "hooks": { "type": "boolean" },
+    "hookSleep": { "type": "string" },
+    "failAfter": { "type": "string" },
+    "failFor": { "type": "string" }
   }
 }

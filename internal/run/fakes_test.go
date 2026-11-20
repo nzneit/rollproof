@@ -129,13 +129,34 @@ type world struct {
 	watcher                      *fakeWatcher
 	probe                        *fakeProbe
 	stdout, stderr               bytes.Buffer
+	// evidence is the opener of evidence files that the run gave Units.Create, which the real
+	// cluster unit hands to the watcher for its pod logs.
+	evidence func(string) (io.WriteCloser, error)
+	// onStdout, when set, is called after each write to the run's standard output, with what was
+	// written.
+	onStdout func(p []byte)
+}
+
+// hookedWriter writes to w and then calls after with what was written.
+type hookedWriter struct {
+	w     io.Writer
+	after func(p []byte)
+}
+
+func (h hookedWriter) Write(p []byte) (int, error) {
+	n, err := h.w.Write(p)
+	h.after(p)
+	return n, err
 }
 
 // fakeCluster is the Cluster that Units.Create returns.
 type fakeCluster struct {
 	w                                                       *world
 	storeErr, deployerErr, watcherErr, targetErr, deleteErr error
+	probeErr                                                error
 	images                                                  map[string]config.ImageRef
+	setup                                                   deploy.Result
+	setupIndex                                              int
 	target                                                  probe.Target
 	removed                                                 []string
 	kept                                                    string
@@ -159,6 +180,17 @@ func (c *fakeCluster) Deployer(cfg *config.Config) (deploy.Deployer, []string, e
 	return c.w.deployer, c.removed, nil
 }
 
+// Setup records "setup", runs its hook and gives the scripted result and
+// index, or a success and the index -1 when none was scripted.
+func (c *fakeCluster) Setup(ctx context.Context) (deploy.Result, int) {
+	c.w.calls.add("setup")
+	c.w.hook("setup")
+	if c.setup.Ending == "" {
+		return deploy.Result{Name: "setup", Ending: deploy.Succeeded}, -1
+	}
+	return c.setup, c.setupIndex
+}
+
 // Watcher records "watcher", runs its hook and gives the fake watcher.
 func (c *fakeCluster) Watcher(ctx context.Context, cfg *config.Config) (Watcher, error) {
 	c.w.calls.add("watcher")
@@ -176,11 +208,11 @@ func (c *fakeCluster) Target(ctx context.Context, cfg *config.Config) (probe.Tar
 	return c.target, c.targetErr
 }
 
-// Probe records "probe", runs its hook and gives the fake probe.
-func (c *fakeCluster) Probe(cfg *config.Config, probeImage string, raw io.Writer) probe.Probe {
+// Probe records "probe", runs its hook and gives the fake probe and the scripted error.
+func (c *fakeCluster) Probe(cfg *config.Config, probeImage string, raw io.Writer) (probe.Probe, error) {
 	c.w.calls.add("probe")
 	c.w.hook("probe")
-	return c.w.probe
+	return c.w.probe, c.probeErr
 }
 
 // Facts gives the cluster as the record states it, and records nothing.
@@ -219,7 +251,9 @@ type fakeDeployer struct {
 	// orCtx names the commands that wait on their block or their context, whichever comes first,
 	// as a real command ends when the tool stops it; the others wait on their block alone.
 	orCtx map[string]bool
-	busyN atomic.Int32 // command goroutines inside a command now
+	// transitions is what Transitions gives; nil gives a deploy and then a rollback.
+	transitions []verdict.WindowName
+	busyN       atomic.Int32 // command goroutines inside a command now
 
 	mu   sync.Mutex
 	ctxs map[string]context.Context // the context each command was given
@@ -286,9 +320,13 @@ func (d *fakeDeployer) Deploy(ctx context.Context) deploy.Result { return d.comm
 // Rollback records "rollback" and gives its result.
 func (d *fakeDeployer) Rollback(ctx context.Context) deploy.Result { return d.command(ctx, "rollback") }
 
-// Transitions gives the two windows of the fake driver.
+// Transitions gives the scripted transitions, or a deploy and then a rollback when none were
+// scripted.
 func (d *fakeDeployer) Transitions() []verdict.WindowName {
-	return []verdict.WindowName{verdict.Deploy, verdict.Rollback}
+	if d.transitions == nil {
+		return []verdict.WindowName{verdict.Deploy, verdict.Rollback}
+	}
+	return d.transitions
 }
 
 // Releases gives the scripted releases.
@@ -314,6 +352,69 @@ type fakeWatcher struct {
 	// late is how far the clock runs past the settling's end before InstallSettled returns, as
 	// when the tool looks at the cluster a moment after the install settled.
 	late time.Duration
+	// restart is what Restart gives, with its times at the clock's; restartPanics makes Restart
+	// panic instead; restartWaits makes it wait until its context ends and then give a restart cut
+	// short, in the form watch gives one.
+	restart       watch.Restart
+	restartPanics bool
+	restartWaits  bool
+	// finishes is what Finishes gives, and finishAt the moments, after the transition began, of
+	// each Finish that Transition sends on it before it waits for the command.
+	finishes chan watch.Finish
+	finishAt map[verdict.WindowName][]time.Duration
+	// podEvents is what PodEvents gives. events is what WriteEvents writes, and eventsErr what it
+	// returns; eventsWait makes it wait until its context ends and return the context's error
+	// instead; eventsCalls is the call log when WriteEvents was called.
+	podEvents   []watch.PodEvent
+	events      string
+	eventsErr   error
+	eventsWait  bool
+	eventsCalls []string
+	// eventsPanic makes WriteEvents panic with "the event list broke" once it kept the call log.
+	eventsPanic bool
+}
+
+// Finishes gives the scripted channel.
+func (f *fakeWatcher) Finishes() <-chan watch.Finish { return f.finishes }
+
+// PodEvents gives the scripted pod events.
+func (f *fakeWatcher) PodEvents() []watch.PodEvent { return f.podEvents }
+
+// WriteEvents keeps the call log, then, with eventsPanic, panics; with eventsWait, waits until
+// ctx ends and returns its error; otherwise it writes the scripted events and returns eventsErr.
+func (f *fakeWatcher) WriteEvents(ctx context.Context, w io.Writer) error {
+	f.eventsCalls = f.w.calls.list()
+	if f.eventsPanic {
+		panic("the event list broke")
+	}
+	if f.eventsWait {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if _, err := io.WriteString(w, f.events); err != nil {
+		return err
+	}
+	return f.eventsErr
+}
+
+// Restart records "restart", runs its hook, and panics with "the restart broke" when
+// restartPanics is set. With restartWaits it waits until ctx ends and gives Accepted false with
+// ctx's error as its Text and no Workload; otherwise it gives the scripted restart. Began and Ended
+// are at the clock's time.
+func (f *fakeWatcher) Restart(ctx context.Context) watch.Restart {
+	f.w.calls.add("restart")
+	f.w.hook("restart")
+	if f.restartPanics {
+		panic("the restart broke")
+	}
+	r := f.restart
+	if f.restartWaits {
+		<-ctx.Done()
+		r = watch.Restart{Accepted: false, Text: ctx.Err().Error()}
+	}
+	now := f.w.clock.Now()
+	r.Began, r.Ended = now, now
+	return r
 }
 
 // InstallSettled records "install-settled" and runs its hook. When ctx has ended it gives a
@@ -355,12 +456,16 @@ func (f *fakeWatcher) InstallReady(ctx context.Context, began time.Time, exited 
 	return f.install, nil
 }
 
-// Transition waits until the transition's command has exited or ctx ends, then
-// records "transition-" and the window's name and runs its hook. It gives the
-// scripted transition with its times filled.
+// Transition sends a Finish on finishes for each moment of finishAt[name], then
+// waits until the transition's command has exited or ctx ends, then records
+// "transition-" and the window's name and runs its hook. It gives the scripted
+// transition with its times filled.
 func (f *fakeWatcher) Transition(ctx context.Context, name verdict.WindowName, began time.Time, exited <-chan struct{}) watch.Transition {
 	if f.before != nil {
 		f.before(name)
+	}
+	for _, d := range f.finishAt[name] {
+		f.finishes <- watch.Finish{Name: name, At: began.Add(d)}
 	}
 	f.wait(ctx, exited)
 	f.w.calls.add("transition-" + string(name))
@@ -536,6 +641,7 @@ func (w *world) units() Units {
 		},
 		Create: func(ctx context.Context, cfg *config.Config, name string, evidence func(string) (io.WriteCloser, error)) (Cluster, error) {
 			w.calls.add("create")
+			w.evidence = evidence
 			w.hook("create")
 			if w.createErr != nil {
 				return nil, w.createErr
@@ -548,8 +654,12 @@ func (w *world) units() Units {
 
 // run calls Run with the world's options and units.
 func (w *world) run(ctx context.Context) int {
+	var stdout io.Writer = &w.stdout
+	if w.onStdout != nil {
+		stdout = hookedWriter{w: &w.stdout, after: w.onStdout}
+	}
 	return Run(ctx, Options{ConfigPath: filepath.Join(w.cfg.Dir, "rollproof.yaml"), Out: w.out,
-		KeepCluster: w.keep, Stdout: &w.stdout, Stderr: &w.stderr, Version: "test",
+		KeepCluster: w.keep, Stdout: stdout, Stderr: &w.stderr, Version: "test",
 		Getenv: func(string) string { return "" }}, w.units())
 }
 
@@ -602,7 +712,7 @@ func passes(from, to int) []probe.Event {
 	var events []probe.Event
 	for s := from; s <= to; s++ {
 		at := t0.Add(time.Duration(s) * time.Second)
-		events = append(events, probe.Event{Obs: &verdict.Observation{Written: at, T: at, OK: true, N: 200, Ms: 30, Lag: 2}})
+		events = append(events, probe.Event{Obs: &verdict.Observation{Written: at, T: at, OK: true, N: 200, Ms: 30, HasMs: true, Lag: 2, HasLag: true}})
 	}
 	return events
 }
@@ -611,5 +721,5 @@ func passes(from, to int) []probe.Event {
 // t0+written.
 func failureAt(at, written time.Duration) probe.Event {
 	return probe.Event{Obs: &verdict.Observation{Written: t0.Add(written), T: t0.Add(at), OK: false, N: 1,
-		Class: "refused", Ms: 1}}
+		Class: "refused", Ms: 1, HasMs: true}}
 }

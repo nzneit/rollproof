@@ -2,9 +2,11 @@ package probe
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,14 +54,33 @@ const ClockBound = 2 * time.Second
 var stopMargin = 5 * time.Second
 
 // PodOptions is what the probe's pod needs: its image by digest, its arguments, the drain,
-// limits.timeout for the start, and where every raw line goes with its timestamp.
+// limits.timeout for the start, and where every raw line goes with its timestamp. The command,
+// env and service-account token are a custom probe's; the built-in probe's pod has none of them.
 type PodOptions struct {
 	Client              kubernetes.Interface
 	Image               string
 	Args                []string
 	Drain, StartTimeout time.Duration
-	Raw                 io.Writer
-	Now                 func() time.Time
+	// Raw receives every line of the probe's pod log, as read, with the runtime's timestamp. It
+	// must not be nil: NewPod panics when it is.
+	Raw io.Writer
+	Now func() time.Time
+
+	// Command is the probe container's command, as a pod's container means it: it replaces
+	// the image's entrypoint. Nil keeps the entrypoint, as the built-in probe does.
+	Command []string
+	// Env is the probe container's environment, as a pod's container means it, entries
+	// with valueFrom included. Nil gives the container no variable of the tool's.
+	Env []corev1.EnvVar
+	// ServiceAccountToken says whether the probe's pod mounts the token of its namespace's default
+	// service account: true for a custom probe, false for the built-in probe.
+	ServiceAccountToken bool
+	// Evidence is where the probe writes its pod's evidence: probe-pod.json, the pod as the
+	// API last gave it, and probe-pod/<container>.log for each container other than probe.
+	// Written once, just before the probe's pod is deleted, after a start without a first
+	// observation or at the stop. A part that cannot be read holds the reason in its place;
+	// a file that cannot be opened is skipped. Nil writes nothing.
+	Evidence func(name string) (io.WriteCloser, error)
 }
 
 // Pod is a probe that runs as a pod on the control-plane node. It implements Probe. Start and
@@ -89,8 +110,13 @@ const (
 
 var _ Probe = (*Pod)(nil)
 
-// NewPod returns a probe that runs as a pod on the control-plane node. It implements Probe.
+// NewPod returns a probe that runs as a pod on the control-plane node. It implements Probe. A
+// PodOptions.Raw that is nil is refused at once, where the caller can act on it, rather than by a
+// panic in the follower on the probe's first line.
 func NewPod(o PodOptions) *Pod {
+	if o.Raw == nil {
+		panic("probe.NewPod: PodOptions.Raw must not be nil")
+	}
 	p := &Pod{o: o, events: make(chan Event, 1024)}
 	p.open = p.apiLog
 	return p
@@ -193,7 +219,8 @@ func (x exit) beforeStart() verdict.Condition {
 }
 
 // podStateText is the pod's state for the text of ProbeNotStarted. A pod that was never read is
-// in the phase Unknown.
+// in the phase Unknown. A waiting container named probe gives its reason, and its message when it
+// has one.
 func podStateText(pod *corev1.Pod) string {
 	if pod == nil {
 		return "the pod is " + string(corev1.PodUnknown)
@@ -207,6 +234,9 @@ func podStateText(pod *corev1.Pod) string {
 	for _, c := range pod.Status.ContainerStatuses {
 		if c.Name == "probe" && c.State.Waiting != nil {
 			s += "; container probe is waiting: " + c.State.Waiting.Reason
+			if c.State.Waiting.Message != "" {
+				s += ": " + c.State.Waiting.Message
+			}
 		}
 	}
 	return s
@@ -279,7 +309,10 @@ func (p *Pod) Counts() (lines, jsonText int) {
 //
 // A pod named probe that an earlier run left is deleted first. When the probe's pod was never
 // created, the error is the API's or ctx's, and the Facts kept say that the probe stopped when
-// asked, because nothing ran to stop.
+// asked, because nothing ran to stop. When the API server refuses the probe's pod as invalid,
+// forbidden or a bad request, the error is a Condition probe-not-started at once, whose text is
+// "the API server refused the probe's pod: " and the API server's text. When no observation came
+// in time, the text names a waiting container's reason and message.
 //
 // Start is called once, and before Stop: a Start after either gives an error and creates no
 // pod. Counts reads the log's lines while Start runs, and a Stop after a Start that panicked
@@ -295,7 +328,8 @@ func (p *Pod) Start(ctx context.Context) (Started, error) {
 
 	timeout := time.NewTimer(p.o.StartTimeout)
 	defer timeout.Stop()
-	if err := p.replace(ctx, timeout.C); err != nil {
+	asked, err := p.replace(ctx, timeout.C)
+	if err != nil {
 		p.end(Facts{StoppedWhenAsked: true}, nil)
 		p.closeEvents()
 		return Started{}, err
@@ -309,6 +343,7 @@ func (p *Pod) Start(ctx context.Context) (Started, error) {
 		firstCh: make(chan struct{}), exitCh: make(chan struct{}),
 	}
 	r.follower = newFollower(p.open, p.running, p.o.Raw, p.o.Now, func(e Event) { p.emit(r, e) })
+	r.follower.podAsked = asked
 	// The run is kept from the moment it exists, so that Counts reads it and a Stop after a Start
 	// that panicked stops the follower and the watcher started below.
 	p.mu.Lock()
@@ -324,7 +359,6 @@ func (p *Pod) Start(ctx context.Context) (Started, error) {
 	}()
 	afterRunStarted()
 
-	var err error
 	select {
 	case <-r.firstCh:
 	case <-r.exitCh:
@@ -359,12 +393,14 @@ func (p *Pod) Start(ctx context.Context) (Started, error) {
 }
 
 // replace deletes a pod named probe with a grace period of 0, waits until it is gone, and
-// creates the probe's pod. It gives up when timeout fires or ctx ends.
-func (p *Pod) replace(ctx context.Context, timeout <-chan time.Time) error {
+// creates the probe's pod. It gives up when timeout fires or ctx ends. It returns the moment it
+// asked for the pod, read just before the create, with its error; the moment is zero when no
+// create was made.
+func (p *Pod) replace(ctx context.Context, timeout <-chan time.Time) (time.Time, error) {
 	zero := int64(0)
 	err := p.pods().Delete(ctx, "probe", metav1.DeleteOptions{GracePeriodSeconds: &zero})
 	if err != nil && !apierrors.IsNotFound(err) {
-		return err
+		return time.Time{}, err
 	}
 	for {
 		_, err := p.pods().Get(ctx, "probe", metav1.GetOptions{})
@@ -373,14 +409,19 @@ func (p *Pod) replace(ctx context.Context, timeout <-chan time.Time) error {
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return time.Time{}, ctx.Err()
 		case <-timeout:
-			return errors.New("the probe pod of an earlier run is still there")
+			return time.Time{}, errors.New("the probe pod of an earlier run is still there")
 		case <-time.After(pollEvery):
 		}
 	}
+	asked := p.o.Now()
 	_, err = p.pods().Create(ctx, podSpec(p.o), metav1.CreateOptions{})
-	return err
+	if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsBadRequest(err) {
+		return asked, verdict.Condition{Code: verdict.ProbeNotStarted,
+			Text: "the API server refused the probe's pod: " + err.Error()}
+	}
+	return asked, err
 }
 
 // judgeStart decides Start once its wait has ended other than by its context: an exit before the
@@ -511,9 +552,10 @@ func (p *Pod) Stop(ctx context.Context) (Facts, error) {
 }
 
 // halt is the stop of a run whose follower and watcher were started: it ends the watcher,
-// deletes the pod with the drain as grace, reads the log until it ends or the drain and
-// stopMargin pass, closes Events, keeps the Facts and the error. Each call to the API waits at
-// most stopMargin.
+// writes the evidence, deletes the pod with the drain as grace, reads the log until it ends or
+// the drain and stopMargin pass, closes Events, keeps the Facts and the error. Each call to the
+// API waits at most stopMargin; the evidence's reads share one stopMargin between them, so a pod
+// with many containers does not lengthen the stop.
 //
 // It serves Stop, a Start that failed other than by its context, and a Stop after a Start that
 // panicked; ending the watcher again after Stop ended it is harmless. The probe stopped when
@@ -539,6 +581,8 @@ func (p *Pod) halt(ctx context.Context, r *probeRun) (Facts, error) {
 
 	r.stopWatcher()
 	<-r.watcherDone
+
+	p.writeEvidence(ctx)
 
 	r.follower.stopAsked()
 	asked := p.o.Now()
@@ -586,6 +630,87 @@ func (p *Pod) halt(ctx context.Context, r *probeRun) (Facts, error) {
 	return f, err
 }
 
+// writeEvidence writes the probe pod's evidence once, after the watcher has ended and before the
+// pod is deleted: the pod as the API gives it to probe-pod.json, and the log of every container
+// other than probe to probe-pod/<container>.log. A part that cannot be read holds the reason in
+// its place; a file that Evidence cannot open is skipped, as the probe has no warning for it.
+// Every read is made under one context of stopMargin, so the write does not grow with the number
+// of containers: a read that the bound cuts holds its reason, and the reads after it each hold
+// theirs. Nil writes nothing. A log cut while it is copied keeps what was read, and then says why
+// it ended.
+func (p *Pod) writeEvidence(ctx context.Context) {
+	open := p.o.Evidence
+	if open == nil {
+		return
+	}
+	readCtx, cancelRead := context.WithTimeout(ctx, stopMargin)
+	defer cancelRead()
+	pod, err := p.pods().Get(readCtx, "probe", metav1.GetOptions{})
+	if err != nil {
+		if w, openErr := open("probe-pod.json"); openErr == nil {
+			io.WriteString(w, "rollproof: the pod could not be read: "+err.Error())
+			w.Close()
+		}
+		return
+	}
+	// A Pod cannot fail to marshal, so no reason is written for that case; the file is skipped.
+	if b, err := json.MarshalIndent(pod, "", "  "); err == nil {
+		if w, openErr := open("probe-pod.json"); openErr == nil {
+			w.Write(b)
+			w.Close()
+		}
+	}
+	for _, containers := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
+		for _, c := range containers {
+			if c.Name != "probe" {
+				p.writeContainerLog(readCtx, open, c.Name)
+			}
+		}
+	}
+}
+
+// writeContainerLog writes the log of container to probe-pod/<container>.log, read once and not
+// followed, under ctx. A log that cannot be opened leaves the reason in its place; a copy that
+// fails keeps what was read, and then says on a line of its own why it ended, with the error's
+// line breaks as spaces. A file that cannot be opened is skipped.
+func (p *Pod) writeContainerLog(ctx context.Context, open func(string) (io.WriteCloser, error), container string) {
+	w, err := open("probe-pod/" + container + ".log")
+	if err != nil {
+		return
+	}
+	rc, err := p.pods().GetLogs("probe", &corev1.PodLogOptions{Container: container}).Stream(ctx)
+	if err != nil {
+		io.WriteString(w, "rollproof: the log could not be read: "+err.Error())
+		w.Close()
+		return
+	}
+	tail := &lastByteWriter{w: w, last: '\n'}
+	_, copyErr := io.Copy(tail, rc)
+	rc.Close()
+	if copyErr != nil {
+		if tail.last != '\n' {
+			io.WriteString(w, "\n")
+		}
+		io.WriteString(w, "rollproof: the log could not be read: "+
+			strings.ReplaceAll(copyErr.Error(), "\n", " ")+"\n")
+	}
+	w.Close()
+}
+
+// lastByteWriter passes what it is given to w and remembers the last byte that went in.
+type lastByteWriter struct {
+	w    io.Writer
+	last byte
+}
+
+func (l *lastByteWriter) Write(b []byte) (int, error) {
+	n, err := l.w.Write(b)
+	if n > 0 {
+		l.last = b[n-1]
+	}
+	return n, err
+}
+
 // lastExitCheck reads the pod once, after the watcher has ended, and puts the fault of an exit
 // into events when the watcher had not. The reading and the send each wait at most stopMargin,
 // or until ctx ends.
@@ -616,6 +741,7 @@ func podSpec(o PodOptions) *corev1.Pod {
 	no, yes := false, true
 	user := int64(65532)
 	grace := wholeSeconds(o.Drain)
+	token := o.ServiceAccountToken
 	return &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -624,11 +750,13 @@ func podSpec(o PodOptions) *corev1.Pod {
 			Labels:    map[string]string{"app.kubernetes.io/name": "rollproof-probe"},
 		},
 		Spec: corev1.PodSpec{
-			AutomountServiceAccountToken: &no,
+			AutomountServiceAccountToken: &token,
 			Containers: []corev1.Container{{
 				Name:            "probe",
 				Image:           o.Image,
+				Command:         o.Command,
 				Args:            o.Args,
+				Env:             o.Env,
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				SecurityContext: &corev1.SecurityContext{
 					RunAsNonRoot:             &yes,

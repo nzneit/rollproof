@@ -14,10 +14,13 @@ import (
 )
 
 // Event is one thing a running probe reported: an observation, or a fault of the probe with the
-// moment it happened. Exactly one is set.
+// moment it happened. Exactly one of Obs and Fault is set. FailedCheck says the event's Fault
+// comes from a line whose FailedCheck is set; it is false for an observation and for every other
+// fault.
 type Event struct {
-	Obs   *verdict.Observation
-	Fault *verdict.Condition
+	Obs         *verdict.Observation
+	Fault       *verdict.Condition
+	FailedCheck bool
 }
 
 // pollEvery is how often the probe's pod is read, and how long a failed
@@ -43,6 +46,10 @@ type follower struct {
 	raw     io.Writer
 	now     func() time.Time
 	emit    func(Event)
+
+	// podAsked is the moment the tool asked for the probe's pod, on the tool's clock; zero
+	// skips the floor of t. Start sets it before run starts.
+	podAsked time.Time
 
 	asked           atomic.Bool // stopAsked was called
 	lines, jsonText atomic.Int64
@@ -214,7 +221,8 @@ func (f *follower) follow(ctx context.Context, rc io.ReadCloser, s *stream) (pie
 // end. A line whose timestamp does not parse is written to raw and is a fault at now. In a
 // stream opened again a repeat (see repeat) is skipped, and the first line that is not one ends
 // the skipping, after the gap when fewer lines of the last timestamp came back than were read.
-// Every other line is written to raw, counted, and read by ParseLine with its timestamp.
+// Every other line is written to raw, counted, and read by ParseLine with its timestamp and the
+// moment the tool asked for the pod. A fault of a line that was a failed check's says so.
 func (f *follower) take(s *stream, line, asCame string) {
 	stamp, text, _ := strings.Cut(line, " ")
 	ts, err := time.Parse(time.RFC3339Nano, stamp)
@@ -240,13 +248,13 @@ func (f *follower) take(s *stream, line, asCame string) {
 	}
 	f.read = true
 	f.lines.Add(1)
-	l := ParseLine(text, ts)
+	l := ParseLine(text, ts, f.podAsked)
 	switch l.Kind {
 	case Observed:
 		obs := l.Obs
 		f.emit(Event{Obs: &obs})
 	case Invalid:
-		f.emit(Event{Fault: &verdict.Condition{Code: verdict.ProbeLineInvalid, At: ts, Text: l.Fault}})
+		f.emit(Event{Fault: &verdict.Condition{Code: verdict.ProbeLineInvalid, At: ts, Text: l.Fault}, FailedCheck: l.FailedCheck})
 	case JSONText:
 		f.jsonText.Add(1)
 	}

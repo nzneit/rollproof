@@ -106,6 +106,43 @@ func TestPullIfMissingGivesTheEnginesError(t *testing.T) {
 	}
 }
 
+// logs gives the container's output, standard error included, and found.
+func TestEngineLogsGivesTheOutput(t *testing.T) {
+	script, log := fakeEngine(t, "if [ \"$1\" = logs ]; then\n  echo 'registry says'\nfi\n")
+	got, found, err := (Engine{Binary: script}).logs(context.Background(), "rollproof-x-registry")
+	if err != nil || !found || got != "registry says" {
+		t.Errorf("logs = %q, %v, %v; want registry says, true, nil", got, found, err)
+	}
+	if calls := engineCalls(t, log); !hasCall(calls, "logs rollproof-x-registry") {
+		t.Errorf("the engine's calls %q, want them to hold logs rollproof-x-registry", calls)
+	}
+}
+
+// logs with no container to read is found false and no error, when ctx has not ended.
+func TestEngineLogsWithNoContainer(t *testing.T) {
+	script, log := fakeEngine(t, "if [ \"$1\" = logs ]; then\n  exit 1\nfi\n"+
+		"if [ \"$1\" = inspect ]; then\n  exit 1\nfi\n")
+	got, found, err := (Engine{Binary: script}).logs(context.Background(), "rollproof-x-registry")
+	if err != nil || found || got != "" {
+		t.Errorf("logs = %q, %v, %v; want no output, false, nil", got, found, err)
+	}
+	if calls := engineCalls(t, log); !hasCall(calls, "inspect rollproof-x-registry") {
+		t.Errorf("the engine's calls %q, want them to hold inspect rollproof-x-registry", calls)
+	}
+}
+
+// logs gives the engine's own error when the container is there but its log cannot be read.
+func TestEngineLogsGivesTheEnginesErrorWhenTheContainerExists(t *testing.T) {
+	script, _ := fakeEngine(t, "if [ \"$1\" = logs ]; then\n  echo 'no such log' >&2\n  exit 1\nfi\n")
+	got, found, err := (Engine{Binary: script}).logs(context.Background(), "rollproof-x-registry")
+	if err == nil || !found || got != "no such log" {
+		t.Fatalf("logs = %q, %v, %v; want no such log, true, an error", got, found, err)
+	}
+	if !strings.Contains(err.Error(), "logs rollproof-x-registry") {
+		t.Errorf("error %q, want it to name the failed call", err)
+	}
+}
+
 // hasCall reports whether calls holds want, a whole line.
 func hasCall(calls []string, want string) bool {
 	for _, call := range calls {

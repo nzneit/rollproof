@@ -58,11 +58,12 @@ type fetchedRelease struct {
 	release Release
 }
 
-// NewHelm returns the Helm driver for o. It panics when o.Helm has no previous release.
+// NewHelm returns the Helm driver for o. With no previous release in o.Helm, Fetch
+// fetches the candidate only, Install installs the candidate, Transitions is
+// restart alone, and Releases is the candidate alone; Deploy and Rollback
+// then panic, because run never calls them for a restart. With a previous
+// release it fetches both, installs the previous and gives deploy and rollback.
 func NewHelm(o HelmOptions) *HelmDriver {
-	if o.Helm.Previous == nil {
-		panic("deploy: the Helm driver without a previous release is not built yet")
-	}
 	return &HelmDriver{o: o}
 }
 
@@ -74,7 +75,8 @@ func (d *HelmDriver) run(ctx context.Context, name string, args ...string) Resul
 	return d.o.Runner.Run(ctx, Command{Name: name, Args: slices.Concat([]string{"helm"}, args), Timeout: d.o.Timeout})
 }
 
-// Fetch pulls and reads both charts and writes the inline values. It stops at the first error.
+// Fetch pulls and reads both charts and writes the inline values; with no
+// previous release it reads the candidate alone. It stops at the first error.
 func (d *HelmDriver) Fetch(ctx context.Context) error {
 	d.ready = false
 	if !filepath.IsAbs(d.o.RunDir) {
@@ -85,9 +87,13 @@ func (d *HelmDriver) Fetch(ctx context.Context) error {
 	if !strings.HasPrefix(filepath.Base(d.o.RunDir), "rollproof-") {
 		return verdict.Condition{Code: verdict.InternalError, Text: "the run folder's name must begin with rollproof-"}
 	}
-	prev, err := d.fetch(ctx, "previous", d.o.Helm.Previous)
-	if err != nil {
-		return err
+	var prev *fetchedRelease
+	if d.o.Helm.Previous != nil {
+		var err error
+		prev, err = d.fetch(ctx, "previous", d.o.Helm.Previous)
+		if err != nil {
+			return err
+		}
 	}
 	cand, err := d.fetch(ctx, "candidate", d.o.Helm.Candidate)
 	if err != nil {
@@ -197,13 +203,18 @@ func (d *HelmDriver) source(r *config.Release) string {
 // values and manifest, which can be large.
 const statusStdoutCap = 64 << 20
 
-// Install installs the previous release, then reads the revision it made.
+// Install installs the previous release, or the candidate when there is no
+// previous release, then reads the revision it made.
 func (d *HelmDriver) Install(ctx context.Context) Result {
 	if !d.ready {
 		panic("deploy: Install called before a successful Fetch")
 	}
-	args := slices.Concat([]string{"upgrade", "--install", d.o.Helm.Release, d.previous.ref}, d.cl(),
-		[]string{"--timeout", d.o.Timeout.String()}, d.previous.values)
+	release := d.previous
+	if release == nil {
+		release = d.candidate
+	}
+	args := slices.Concat([]string{"upgrade", "--install", d.o.Helm.Release, release.ref}, d.cl(),
+		[]string{"--timeout", d.o.Timeout.String()}, release.values)
 	res := d.run(ctx, "install", args...)
 	if res.Ending != Succeeded {
 		return res
@@ -228,6 +239,9 @@ func (d *HelmDriver) Install(ctx context.Context) Result {
 
 // Deploy upgrades the release to the candidate with the chart's own values reset.
 func (d *HelmDriver) Deploy(ctx context.Context) Result {
+	if d.o.Helm.Previous == nil {
+		panic("deploy: Deploy called on a Helm driver with no previous release")
+	}
 	if !d.installed {
 		panic("deploy: Deploy called before a successful Install")
 	}
@@ -238,6 +252,9 @@ func (d *HelmDriver) Deploy(ctx context.Context) Result {
 
 // Rollback rolls the release back to the revision that Install made.
 func (d *HelmDriver) Rollback(ctx context.Context) Result {
+	if d.o.Helm.Previous == nil {
+		panic("deploy: Rollback called on a Helm driver with no previous release")
+	}
 	if !d.installed {
 		panic("deploy: Rollback called before a successful Install")
 	}
@@ -246,15 +263,23 @@ func (d *HelmDriver) Rollback(ctx context.Context) Result {
 	return d.run(ctx, "rollback", args...)
 }
 
-// Transitions are the windows of this driver: deploy, then rollback.
+// Transitions are the windows of this driver: deploy, then rollback; restart
+// alone when there is no previous release.
 func (d *HelmDriver) Transitions() []verdict.WindowName {
+	if d.o.Helm.Previous == nil {
+		return []verdict.WindowName{verdict.Restart}
+	}
 	return []verdict.WindowName{verdict.Deploy, verdict.Rollback}
 }
 
-// Releases are the previous and then the candidate release, as Fetch kept them.
+// Releases are the previous and then the candidate release, as Fetch kept them,
+// or the candidate alone when there is no previous release; Program is empty.
 func (d *HelmDriver) Releases() []Release {
 	if !d.ready {
 		return nil
+	}
+	if d.previous == nil {
+		return []Release{d.candidate.release}
 	}
 	return []Release{d.previous.release, d.candidate.release}
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"k8s.io/apimachinery/pkg/labels"
 )
 
@@ -56,17 +59,53 @@ func exists(p string) bool {
 var (
 	imageNameRe   = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$`)
 	headerTokenRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+	imageRefRe    = regexp.MustCompile(`^\$\{images\.[^}]+\.ref\}$`)
+	// imageDigestRe is a reference that ends in @${images.NAME.digest}, whose part before the @ is
+	// a literal repository, with no $ and no @ of its own, or exactly ${images.NAME.repository}.
+	imageDigestRe = regexp.MustCompile(`^(?:[^$@]+|\$\{images\.[^}]+\.repository\})@\$\{images\.[^}]+\.digest\}$`)
 )
+
+// placeholderDigest and placeholderRepository stand in for the ${images.…} forms of
+// probe.custom.image when it is checked, before the images exist (section 8).
+const (
+	placeholderDigest     = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	placeholderRepository = "rollproof.test/placeholder"
+)
+
+// imageFormAnyRe is any one ${images.NAME.digest}, .repository or .ref form.
+var imageFormAnyRe = regexp.MustCompile(`\$\{images\.[^}]+\.(digest|repository|ref)\}`)
+
+// imageHasDigest reports whether probe.custom.image, as Load reads it before the images are
+// stored, names a digest: a reference with @ and a digest, the form ${images.NAME.ref} alone, or
+// a reference that ends in @${images.NAME.digest}. Before that @ stands a literal repository or
+// ${images.NAME.repository}; a part that holds an @ of its own is refused. Each form is then
+// replaced by a placeholder, a reference with a digest for .ref, a digest for .digest and a
+// repository for .repository, and the result must parse as a reference with a digest, so that a
+// literal part that no runtime could pull, such as one with a space, is refused at load.
+func imageHasDigest(image string) bool {
+	if strings.Contains(image, "${") && !imageRefRe.MatchString(image) && !imageDigestRe.MatchString(image) {
+		return false
+	}
+	filled := imageFormAnyRe.ReplaceAllStringFunc(image, func(form string) string {
+		switch imageFormAnyRe.FindStringSubmatch(form)[1] {
+		case "digest":
+			return placeholderDigest
+		case "repository":
+			return placeholderRepository
+		}
+		return placeholderRepository + "@" + placeholderDigest
+	})
+	_, err := name.NewDigest(filled)
+	return err == nil
+}
 
 var reservedNamespaces = map[string]bool{
 	"kube-system": true, "kube-public": true, "kube-node-lease": true,
 	"local-path-storage": true, "rollproof-probe": true,
 }
 
-// validate returns the first rejection of sections 7 and 8.
-//
-// An image archive that holds more than one image is rejected too (section 8). That check needs
-// the file, so the plan that builds `archive` reads it.
+// validate returns the first rejection of sections 7 and 8. An image archive is read when the
+// file is loaded, so that both of its rejections come before a cluster exists.
 func validate(c *Config, x *index) error {
 	d := c.Deploy
 	if (d.Helm != nil) == (d.Commands != nil) {
@@ -89,6 +128,11 @@ func validate(c *Config, x *index) error {
 		}
 		if (im.Local != "") == (im.Archive != "") {
 			return x.reject(path, "exactly one of local and archive")
+		}
+		if im.Archive != "" {
+			if problem := checkArchive(im.Archive); problem != "" {
+				return x.reject(path+".archive", problem)
+			}
 		}
 	}
 
@@ -162,6 +206,9 @@ func validate(c *Config, x *index) error {
 		if err := checkCommand("probe.custom.command", cu.Command, false, x); err != nil {
 			return err
 		}
+		if !imageHasDigest(cu.Image) {
+			return x.reject("probe.custom.image", "must name a digest: REPOSITORY@sha256:…, ${images.NAME.ref}, or a reference that ends in @${images.NAME.digest}")
+		}
 	}
 
 	seen := map[string]int{}
@@ -176,6 +223,37 @@ func validate(c *Config, x *index) error {
 		seen[r.Host] = i
 	}
 	return nil
+}
+
+// checkArchive returns the problem with the image archive at path, an absolute path, as a phrase
+// that quotes no value; it is empty when the file is a tar that holds a manifest.json naming
+// exactly one image the tool can read. A missing file gives "does not exist"; more than one image
+// "holds more than one image"; anything else "is not an image archive the tool can read". A path
+// that is not a regular file, such as a folder, a FIFO or a terminal, is never opened, so that it
+// cannot block the load.
+func checkArchive(path string) (problem string) {
+	const notAnArchive = "is not an image archive the tool can read"
+	fi, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "does not exist"
+		}
+		return notAnArchive
+	}
+	if !fi.Mode().IsRegular() {
+		return notAnArchive
+	}
+	m, err := tarball.LoadManifest(func() (io.ReadCloser, error) { return os.Open(path) })
+	if err != nil || len(m) == 0 {
+		return notAnArchive
+	}
+	if len(m) > 1 {
+		return "holds more than one image"
+	}
+	if _, err := tarball.ImageFromPath(path, nil); err != nil {
+		return notAnArchive
+	}
+	return ""
 }
 
 func validateRelease(path string, r *Release, x *index) error {

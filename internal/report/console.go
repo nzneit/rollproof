@@ -17,18 +17,30 @@ import (
 // lines; the install's checks line, at 99 characters, is written whole.
 const detailWidth = 92
 
+// The lines of what a pass did not exercise that state facts of the built-in probe (section 10),
+// and the one line that a custom probe gives in their place.
+const (
+	notHeldConnections = "connections held open, and requests in flight on a pod after new connections left it"
+	notIngress         = "the path through an ingress, a load balancer or a mesh"
+	notLatency         = "latency below the timeout"
+	notCustomChecks    = "whatever the custom probe does not check"
+)
+
 // notExercised is what a pass did not exercise, in the design's order.
 var notExercised = []string{
 	"the delay before a larger cluster stops routing to a stopping pod",
-	"connections held open, and requests in flight on a pod after new connections left it",
-	"the path through an ingress, a load balancer or a mesh",
+	notHeldConnections,
+	notIngress,
 	"routing that depends on where the client is",
 	"capacity while pods are down, and autoscaling",
 	"storage that attaches to one node at a time",
-	"latency below the timeout",
+	notLatency,
 	"data migrations",
 	"a node drain",
 }
+
+// builtInOnly are the lines of notExercised that only the built-in probe's list holds.
+var builtInOnly = []string{notHeldConnections, notIngress, notLatency}
 
 // Console returns the text a run prints at its end, as section 10 shows it:
 // the verdict line, the releases, images, probe and install, one row for each
@@ -153,11 +165,13 @@ func cleanRun(r Run) Run {
 	for _, x := range r.Probes {
 		x.Kind, x.Target = clean(x.Kind), clean(x.Target)
 		x.Settings, x.Notes = cleanSettings(x.Settings), cleanAll(x.Notes)
+		x.EnvNames = cleanAll(x.EnvNames)
 		c.Probes = append(c.Probes, x)
 	}
 	c.Releases = nil
 	for _, x := range r.Releases {
-		x.Role, x.Chart, x.Version, x.Source = clean(x.Role), clean(x.Chart), clean(x.Version), clean(x.Source)
+		x.Role, x.Program = clean(x.Role), clean(x.Program)
+		x.Chart, x.Version, x.Source = clean(x.Chart), clean(x.Version), clean(x.Source)
 		x.ValuesFiles, x.InlineKeys = cleanAll(x.ValuesFiles), cleanAll(x.InlineKeys)
 		c.Releases = append(c.Releases, x)
 	}
@@ -247,6 +261,11 @@ func setUp(r Run) []string {
 		if i == 0 {
 			word = "releases"
 		}
+		if rel.Program != "" {
+			// A command of the commands driver: its first word, and nothing else.
+			add(word, pad(rel.Role, roleWidth)+rel.Program)
+			continue
+		}
 		values := "chart defaults"
 		if len(rel.ValuesFiles) > 0 || len(rel.InlineKeys) > 0 {
 			parts := append([]string(nil), rel.ValuesFiles...)
@@ -279,10 +298,14 @@ func setUp(r Run) []string {
 		}
 		word := "probe"
 		for _, p := range r.Probes {
-			if p.Kind != "http" {
+			switch p.Kind {
+			case "http":
+				add(word, "built-in HTTP: "+p.Target)
+			case "custom":
+				add(word, "custom: "+p.Target)
+			default:
 				continue
 			}
-			add(word, "built-in HTTP: "+p.Target)
 			word = ""
 			lines = append(lines, probeLines(p)...)
 		}
@@ -330,11 +353,54 @@ func settingValue(s []Setting, key string) string {
 	return ""
 }
 
-// probeLines are the lines under the probe's target, each indented 12 spaces. The line that says
-// the probe did not stop when asked comes only when StoppedWhenAsked is false; when it is nil,
-// the tool did not judge the stop, and the probe's notes say why.
+// probeLines are the lines under the probe's target, each indented 12 spaces: the built-in probe's
+// settings, or a custom probe's sentence and the counts of its command and args with the names of
+// its env, and then the lines that both share. The certificate's line comes only when
+// CertificateChecked is false, never for a custom probe, whose checks the tool does not know. The
+// line that says the probe did not stop when asked comes only when StoppedWhenAsked is false; when
+// it is nil, the tool did not judge the stop, and the probe's notes say why.
 func probeLines(p Probe) []string {
 	const indent = "            "
+	var lines []string
+	if p.Kind == "custom" {
+		env := "none"
+		if len(p.EnvNames) > 0 {
+			env = strings.Join(p.EnvNames, ", ")
+		}
+		lines = []string{indent + "a custom probe judged this run; the tool does not know what it checks",
+			indent + "command: " + items(p.CommandCount) + "; args: " + items(p.ArgsCount) + "; env: " + env}
+	} else {
+		lines = []string{indent + httpSettingsLine(p)}
+	}
+	switch {
+	case p.JSONLinesWithoutOK == 1:
+		lines = append(lines, indent+"1 line was a JSON object with no ok field")
+	case p.JSONLinesWithoutOK != 0:
+		lines = append(lines, indent+strconv.Itoa(p.JSONLinesWithoutOK)+" lines were JSON objects with no ok field")
+	}
+	if p.CertificateChecked != nil && !*p.CertificateChecked {
+		lines = append(lines, indent+"the server's certificate was not verified")
+	}
+	for _, n := range p.Notes {
+		lines = append(lines, indent+clean(n))
+	}
+	if p.StoppedWhenAsked != nil && !*p.StoppedWhenAsked {
+		lines = append(lines, indent+"the probe did not stop when asked; checks still in flight were not reported")
+	}
+	return lines
+}
+
+// items writes a count of a list's items: 1 item, 3 items.
+func items(n int) string {
+	if n == 1 {
+		return "1 item"
+	}
+	return strconv.Itoa(n) + " items"
+}
+
+// httpSettingsLine is the built-in probe's settings: its rate, the time between checks, its
+// timeout and the statuses it expects.
+func httpSettingsLine(p Probe) string {
 	rate := settingValue(p.Settings, "probe.http.rate")
 	every := ""
 	if n, err := strconv.ParseFloat(rate, 64); err == nil && n > 0 {
@@ -345,25 +411,9 @@ func probeLines(p Probe) []string {
 			every = fmt.Sprintf(" (one check every %.1f ms)", ms)
 		}
 	}
-	lines := []string{indent + rate + " a second" + every + ", timeout " +
+	return rate + " a second" + every + ", timeout " +
 		spaced(settingValue(p.Settings, "probe.http.timeout")) + ", status " +
-		settingValue(p.Settings, "probe.http.expect-status")}
-	switch {
-	case p.JSONLinesWithoutOK == 1:
-		lines = append(lines, indent+"1 line was a JSON object with no ok field")
-	case p.JSONLinesWithoutOK != 0:
-		lines = append(lines, indent+strconv.Itoa(p.JSONLinesWithoutOK)+" lines were JSON objects with no ok field")
-	}
-	if !p.CertificateChecked {
-		lines = append(lines, indent+"the server's certificate was not verified")
-	}
-	for _, n := range p.Notes {
-		lines = append(lines, indent+clean(n))
-	}
-	if p.StoppedWhenAsked != nil && !*p.StoppedWhenAsked {
-		lines = append(lines, indent+"the probe did not stop when asked; checks still in flight were not reported")
-	}
-	return lines
+		settingValue(p.Settings, "probe.http.expect-status")
 }
 
 // installLines are the install's lines: the first has "install" in the first
@@ -408,8 +458,8 @@ func installLines(r Run) []string {
 	}
 	lines = append(lines, line)
 
-	lines = append(lines, indent+"slowest "+slowestCell(in.Checks, in.Failed, in.SlowestMs)+
-		", behind "+behindCell(in.Checks, in.LagMs))
+	lines = append(lines, indent+"slowest "+slowestCell(in.SlowestMs)+
+		", behind "+behindCell(in.LagMs))
 
 	for _, s := range in.SettleRestartedBy {
 		lines = append(lines, wrap(indent, "the settle time started again: "+s)...)
@@ -467,21 +517,22 @@ func thousands(n int) string {
 
 func millis(ms float64) string { return strconv.FormatFloat(math.Round(ms), 'f', 0, 64) + " ms" }
 
-// slowestCell writes a window's slowest pass as the console prints it, and "-" when every check
-// failed, so that no pass is claimed where none was.
-func slowestCell(checks, failed int, slowestMs float64) string {
-	if checks == failed {
+// slowestCell writes a window's slowest check that passed as the console prints it, and "-" when
+// the probe gave none, so that no pass is claimed where none was reported.
+func slowestCell(ms *float64) string {
+	if ms == nil {
 		return "-"
 	}
-	return millis(slowestMs)
+	return millis(*ms)
 }
 
-// behindCell writes a window's furthest lag as the console prints it, and "-" when it had no check.
-func behindCell(checks int, lagMs float64) string {
-	if checks == 0 {
+// behindCell writes a window's furthest lag as the console prints it, and "-" when the probe gave
+// none.
+func behindCell(ms *float64) string {
+	if ms == nil {
 		return "-"
 	}
-	return millis(lagMs)
+	return millis(*ms)
 }
 
 func resultWord(s string) string {
@@ -518,8 +569,8 @@ func windowsTable(r Run) []string {
 		if w.Name == "steady" {
 			after = "-"
 		}
-		slowest := slowestCell(w.Checks, w.Failed, w.SlowestMs)
-		behind := behindCell(w.Checks, w.LagMs)
+		slowest := slowestCell(w.SlowestMs)
+		behind := behindCell(w.LagMs)
 		rows = append(rows, []string{w.Name, length, thousands(w.Checks), thousands(w.Failed), after, slowest, behind, resultWord(w.Result)})
 	}
 	widths := make([]int, len(header))
@@ -614,7 +665,9 @@ func transitionsTable(r Run) []string {
 	return lines
 }
 
-// exercisedLists are what a pass exercised and did not.
+// exercisedLists are what a pass exercised and did not. A restart-only pass says first under "not
+// exercised" that no deploy and no rollback were tested, and a pass with a deploy and no rollback
+// what that leaves out.
 func exercisedLists(r Run) []string {
 	lines := []string{"exercised"}
 	for _, tr := range r.Transitions {
@@ -636,13 +689,40 @@ func exercisedLists(r Run) []string {
 		lines = append(lines, "  "+pad(tr.Name, 12)+text)
 	}
 	lines = append(lines, "not exercised")
+	if hasWindowThatRan(r, "restart") && !hasWindowThatRan(r, "deploy") {
+		lines = append(lines, "  a deploy to another release and a rollback, because only a restart was tested")
+	}
 	if hasWindowThatRan(r, "deploy") && !hasWindowThatRan(r, "rollback") {
 		lines = append(lines, "  the candidate's shutdown and the installed release's start-up, because the run has no rollback")
 	}
-	for _, n := range notExercised {
+	for _, n := range notExercisedBy(r) {
 		lines = append(lines, "  "+n)
 	}
 	return lines
+}
+
+// notExercisedBy is the fixed list of what a pass did not exercise. With a custom probe, the
+// lines that only the built-in probe's list holds are left out by their text, and
+// notCustomChecks stands where the first of them stood, so that a line that leaves the list does
+// not move the others.
+func notExercisedBy(r Run) []string {
+	custom := false
+	for _, p := range r.Probes {
+		custom = custom || p.Kind == "custom"
+	}
+	if !custom {
+		return notExercised
+	}
+	var out []string
+	for _, n := range notExercised {
+		switch {
+		case !slices.Contains(builtInOnly, n):
+			out = append(out, n)
+		case !slices.Contains(out, notCustomChecks):
+			out = append(out, notCustomChecks)
+		}
+	}
+	return out
 }
 
 // unreached reports whether every workload of tr has Probed yes or no and no

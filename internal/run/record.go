@@ -41,11 +41,13 @@ type facts struct {
 }
 
 // transitionFacts is one transition as the units reported it: what the
-// watcher saw, how the command ended, and the pods that were stopping or
-// starting at the window's first failure.
+// watcher saw, how the command ended or, for a restart, how the watcher's
+// restart went, and the pods that were stopping or starting at the window's
+// first failure. restart is nil for a deploy and a rollback.
 type transitionFacts struct {
 	tr                 watch.Transition
 	cmd                deploy.Result
+	restart            *watch.Restart
 	stopping, starting []watch.PodNote
 }
 
@@ -76,15 +78,19 @@ func record(f facts) report.Run {
 	}
 	r.Transitions = transitionRecords(f.transitions)
 	for _, x := range f.releases {
-		r.Releases = append(r.Releases, report.Release{Role: x.Role, Chart: x.Chart, Version: x.Version,
-			Source: x.Source, ValuesFiles: x.ValueFiles, InlineKeys: x.InlineKeys})
+		r.Releases = append(r.Releases, report.Release{Role: x.Role, Program: x.Program, Chart: x.Chart,
+			Version: x.Version, Source: x.Source, ValuesFiles: x.ValueFiles, InlineKeys: x.InlineKeys})
 	}
 	r.RemovedVariables = f.removed
 	if f.cfg == nil {
 		return r
 	}
-	if f.cfg.Deploy.Helm != nil {
+	switch {
+	case f.cfg.Deploy.Helm != nil:
 		r.Driver, r.Name = "helm", f.cfg.Deploy.Helm.Release
+	case f.cfg.Deploy.Commands != nil:
+		// The commands driver has no release name: the console's name is the namespace (section 10).
+		r.Driver, r.Name = "commands", f.cfg.Deploy.Namespace
 	}
 	var probeSettings []report.Setting
 	for _, s := range f.cfg.Settings() {
@@ -97,8 +103,13 @@ func record(f facts) report.Run {
 		}
 		r.Settings = append(r.Settings, x)
 	}
-	if h := f.cfg.Probe.HTTP; h != nil && f.probeBegun {
-		r.Probes = []report.Probe{probeRecord(f, h, probeSettings)}
+	if f.probeBegun {
+		switch {
+		case f.cfg.Probe.HTTP != nil:
+			r.Probes = []report.Probe{probeRecord(f, f.cfg.Probe.HTTP, probeSettings)}
+		case f.cfg.Probe.Custom != nil:
+			r.Probes = []report.Probe{customRecord(f, f.cfg.Probe.Custom)}
+		}
 	}
 	r.Images = imageRecords(f)
 	return r
@@ -117,7 +128,8 @@ func installRecord(f facts) *report.Install {
 			continue
 		}
 		in.FirstObservation, in.Checks, in.Failed = timePtr(w.Start), w.Checks, w.Failed
-		in.LastFailure, in.SlowestMs, in.LagMs = timePtr(w.LastFailure), w.SlowestMs, w.LagMs
+		in.LastFailure = timePtr(w.LastFailure)
+		in.SlowestMs, in.LagMs = floatPtr(w.SlowestMs, w.HasSlowest), floatPtr(w.LagMs, w.HasLag)
 		in.FailedByClass = classCopy(w.ByClass)
 		break
 	}
@@ -138,6 +150,9 @@ func reasonRecord(reason verdict.Reason, trs []transitionFacts) report.Reason {
 			out.Detail = append(out.Detail, podLines(t)...)
 		case verdict.TransitionStalled:
 			out.Detail = append(out.Detail, t.tr.Incomplete...)
+			if t.tr.LastEvent != "" {
+				out.Detail = append(out.Detail, "the last event: "+t.tr.LastEvent)
+			}
 		}
 	}
 	return out
@@ -179,7 +194,8 @@ func podText(w verdict.WindowName, p watch.PodNote, what string) string {
 func windowRecord(w verdict.WindowResult) report.Window {
 	out := report.Window{Name: string(w.Name), Start: timePtr(w.Start), End: timePtr(w.End),
 		Result: string(w.Result), Checks: w.Checks, Failed: w.Failed, FailedAfterFinish: w.AfterFinish,
-		CrossedStart: w.Crossed, FirstFailure: timePtr(w.FirstFailure), SlowestMs: w.SlowestMs, LagMs: w.LagMs,
+		CrossedStart: w.Crossed, FirstFailure: timePtr(w.FirstFailure),
+		SlowestMs: floatPtr(w.SlowestMs, w.HasSlowest), LagMs: floatPtr(w.LagMs, w.HasLag),
 		FailedByClass: classCopy(w.ByClass)}
 	return out
 }
@@ -204,11 +220,27 @@ func timePtr(t time.Time) *time.Time {
 	return &t
 }
 
+// floatPtr returns v as a pointer when has is true, so that the record tells a figure of 0 from one
+// the probe did not give, and nil otherwise.
+func floatPtr(v float64, has bool) *float64 {
+	if !has {
+		return nil
+	}
+	return new(v)
+}
+
+// transitionRecords returns the transitions' records. A restart has no command: its record says
+// whether the API server took the change instead (restartAnswer). A deploy and a rollback give
+// their command's ending and no restart.
 func transitionRecords(trs []transitionFacts) []report.Transition {
 	var out []report.Transition
 	for _, t := range trs {
-		x := report.Transition{Name: string(t.tr.Name), Stalled: t.tr.Stalled,
-			Command: string(t.cmd.Ending), SettleRestartedBy: t.tr.SettleRestarts}
+		x := report.Transition{Name: string(t.tr.Name), Stalled: t.tr.Stalled, SettleRestartedBy: t.tr.SettleRestarts}
+		if t.tr.Name == verdict.Restart {
+			x.Restart = restartAnswer(t.restart)
+		} else {
+			x.Command = new(string(t.cmd.Ending))
+		}
 		for _, c := range t.tr.Workloads {
 			w := report.Workload{Workload: c.Workload.String(), PodsAtStart: c.AtStart, PodsReplaced: c.Replaced,
 				PodsCreated: c.Created, Added: c.Added, Removed: c.Removed, Probed: c.Probed}
@@ -223,22 +255,56 @@ func transitionRecords(trs []transitionFacts) []report.Transition {
 	return out
 }
 
-// probeRecord returns the probe's entry. When the tool asked the probe to stop and Stop returned
-// no error, the counts and stopped_when_asked are those of its Facts. Otherwise
-// stopped_when_asked is null, the counts are those that Counts gave, and a note after the
-// target's says why (section 10).
+// restartAnswer is a restart's answer in result.json: "accepted" when the API server took every
+// change, "refused" when it refused one, which the Restart names, and nil when there is no Restart
+// yet, or the run's context cut it short or limits.timeout stopped it, so that the server refused
+// nothing.
+func restartAnswer(rs *watch.Restart) *string {
+	switch {
+	case rs == nil:
+		return nil
+	case rs.Accepted:
+		return new("accepted")
+	case rs.Workload != "":
+		return new("refused")
+	}
+	return nil
+}
+
+// probeRecord returns the built-in probe's entry, with its counts, its stop and its notes as
+// withStop gives them.
 func probeRecord(f facts, h *config.HTTP, settings []report.Setting) report.Probe {
 	var names []string
 	for k := range h.Headers { // names only: a header's value is never read
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	p := report.Probe{
+	return withStop(f, report.Probe{
 		Kind: "http", Target: "GET " + h.URL, Settings: settings, Headers: names,
 		// On http there is no certificate to check, so none is left unchecked.
-		CertificateChecked: certificateChecked(h.URL),
+		CertificateChecked: new(certificateChecked(h.URL)),
 		Notes:              f.target.Notes,
+	})
+}
+
+// customRecord returns a custom probe's entry: its image as resolved, the names of its env
+// entries in the configuration's order, and the counts of its command and args, never their
+// values (section 8, "Secrets"). It has no settings and no certificate check, which the tool does
+// not know (decision 9); its counts, its stop and its notes are as withStop gives them.
+func customRecord(f facts, cu *config.Custom) report.Probe {
+	var names []string
+	for _, e := range cu.Env {
+		names = append(names, e.Name)
 	}
+	return withStop(f, report.Probe{Kind: "custom", Target: cu.Image, EnvNames: names,
+		CommandCount: len(cu.Command), ArgsCount: len(cu.Args), Notes: f.target.Notes})
+}
+
+// withStop gives p the probe's counts and stop. When the tool asked the probe to stop and Stop
+// returned no error, the counts and stopped_when_asked are those of its Facts. Otherwise
+// stopped_when_asked is null, the counts are those that Counts gave, and a note after p's own
+// says why (section 10).
+func withStop(f facts, p report.Probe) report.Probe {
 	if f.probeStop == asked {
 		p.Lines, p.JSONLinesWithoutOK = f.probe.Lines, f.probe.JSONTextLines
 		p.StoppedWhenAsked = new(f.probe.StoppedWhenAsked)
@@ -246,7 +312,7 @@ func probeRecord(f facts, h *config.HTTP, settings []report.Setting) report.Prob
 	}
 	p.Lines, p.JSONLinesWithoutOK = f.probeLines, f.probeJSONText
 	// A new slice, so that the target's own notes are not written into.
-	p.Notes = append(append([]string(nil), f.target.Notes...), f.probeStop.note())
+	p.Notes = append(append([]string(nil), p.Notes...), f.probeStop.note())
 	return p
 }
 

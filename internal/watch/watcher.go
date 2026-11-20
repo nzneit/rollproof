@@ -3,6 +3,7 @@ package watch
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,17 @@ type Options struct {
 	Workers             int
 	Service             *types.NamespacedName
 	Now                 func() time.Time
+	// Evidence opens an evidence file by its full name; nil writes nothing. The
+	// Watcher writes through it the pod lists and each watched pod's container
+	// logs until the pod is gone, with a restarted container's previous run; a
+	// log not read to its end ends with a "rollproof:" line saying why, unless
+	// Stop ended it. The errors of Evidence and its writers are ignored. It may
+	// be called from several goroutines at once.
+	Evidence func(name string) (io.WriteCloser, error)
+	// ProbeNamespace is the probe's namespace, whose events WriteEvents writes
+	// beside those of Namespace; the tool passes rollproof-probe. Empty writes
+	// Namespace's alone.
+	ProbeNamespace string
 }
 
 // Watcher follows the Deployments, StatefulSets, DaemonSets, ReplicaSets and Pods of one
@@ -42,16 +54,27 @@ type Watcher struct {
 	client  kubernetes.Interface
 	factory informers.SharedInformerFactory
 
-	// mu guards tr, last and service. Every call into tr is made under it, with o.Now read while
-	// it is held, so that tr is told its times in order. Nothing that waits is done under it.
+	// mu guards tr, last, service and queued. Every call into tr is made under it, with o.Now read
+	// while it is held, so that tr is told its times in order. Nothing that waits is done under it.
 	mu sync.Mutex
 	tr *Tracker
+	// queued is how many Finishes of the open transition have been queued on finishes.
+	queued int
+	// finishes is the queue behind Finishes. Its goroutine runs from Start until Stop.
+	finishes *finishQueue
 	// service is the Service whose endpoints Transition reads: Options.Service unless UseService
 	// named another.
 	service *types.NamespacedName
 	// last holds, by informer and key, the last object tr was told under that key and not yet told
 	// gone, so that a deletion whose final state the informer does not know is still told.
 	last map[objectKey]runtime.Object
+
+	// followed holds, under mu, the pods whose logs are followed. logCtx is the followers'
+	// context, which Stop ends with endLogs; logs counts the followers that run.
+	followed map[types.UID]bool
+	logCtx   context.Context
+	endLogs  context.CancelFunc
+	logs     sync.WaitGroup
 
 	// conns holds each informer's connection, by kind; Start waits until each is up once.
 	conns map[string]*connection
@@ -87,13 +110,18 @@ func Start(ctx context.Context, client kubernetes.Interface, o Options) (*Watche
 		factory: informers.NewSharedInformerFactoryWithOptions(client, 0),
 		tr: NewTracker(TrackerOptions{Namespace: o.Namespace, Selector: selector,
 			Settle: o.Settle, Timeout: o.Timeout, Workers: o.Workers}),
-		service: o.Service,
-		last:    map[objectKey]runtime.Object{},
-		conns:   map[string]*connection{},
-		wake:    make(chan struct{}, 1),
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
+		service:  o.Service,
+		last:     map[objectKey]runtime.Object{},
+		conns:    map[string]*connection{},
+		wake:     make(chan struct{}, 1),
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
+		finishes: newFinishQueue(),
+		followed: map[types.UID]bool{},
 	}
+	// The followers outlive Start's ctx, which bounds the start alone; Stop ends them.
+	w.logCtx, w.endLogs = context.WithCancel(context.WithoutCancel(ctx))
+	go w.finishes.run(w.stop)
 	var synced []cache.InformerSynced
 	for _, c := range w.connections() {
 		w.conns[c.kind] = c
@@ -132,12 +160,20 @@ func Start(ctx context.Context, client kubernetes.Interface, o Options) (*Watche
 	return w, nil
 }
 
-// Stop stops following. It is safe to call twice.
+// Stop stops following, ends every pod log's follower and returns when each
+// has closed its file, every other goroutine of the Watcher has ended and the
+// channel of Finishes is closed; a Finish not received by then is dropped. It
+// is safe to call twice.
 func (w *Watcher) Stop() {
 	w.stopOnce.Do(func() {
 		close(w.stop)
-		// Shutdown returns when every informer has ended, its handlers included.
+		// Shutdown returns when every informer has ended, its handlers included, so that no
+		// Finish is queued and no follower started after it.
 		w.factory.Shutdown()
+		w.endLogs()
+		w.logs.Wait()
+		<-w.finishes.ended
+		close(w.finishes.out)
 		close(w.done)
 	})
 }
@@ -203,10 +239,25 @@ func (w *Watcher) InstallSettled(ctx context.Context, first time.Time) Settling 
 // closed when the transition's command has exited. When ctx ends first it returns what it has,
 // with Ended set to that moment. Finished is then zero, whatever the transition did before, so
 // that its window is never judged as one that finished.
+//
+// When the window stalled and ctx has not ended, it also lists the namespace's events once,
+// bounded by the settle time, and sets LastEvent to the last about what the stall names; a list
+// that fails, finds none, or does not return in the settle time leaves it empty.
+//
+// It writes the pod list pods/NAME-before.json when it has begun the transition and
+// pods/NAME-after.json when the window has ended or ctx ended: each a PodList, in JSON, of every
+// pod of the namespace that the watch holds and that is not gone, by name. Each is written beside
+// the watch, so that a slow write delays neither the command's exit nor the last reading, and
+// Transition returns when both are written.
 func (w *Watcher) Transition(ctx context.Context, name verdict.WindowName, began time.Time, exited <-chan struct{}) Transition {
 	w.mu.Lock()
 	w.tr.Begin(name, began)
+	w.queued = 0
+	before := w.tr.podList()
 	w.mu.Unlock()
+	var writes sync.WaitGroup
+	defer writes.Wait()
+	writes.Go(func() { w.writePods("pods/"+string(name)+"-before.json", before) })
 
 	// The readings of the Service's endpoints stay off the path that tells the Tracker anything,
 	// so that a slow one cannot delay the command's exit. The first runs beside follow until the
@@ -224,16 +275,28 @@ func (w *Watcher) Transition(ctx context.Context, name verdict.WindowName, began
 		firstRead <- r
 	}()
 	s, ended := w.follow(ctx, exited)
+	w.mu.Lock()
+	after := w.tr.podList()
+	w.mu.Unlock()
+	writes.Go(func() { w.writePods("pods/"+string(name)+"-after.json", after) })
 	endFirst()
 	first := <-firstRead
 	if !ended || ctx.Err() != nil {
 		return withProbed(s, first)
 	}
-	// The last reading is bounded by the settle time; one that has not returned by then counts as
-	// not made.
+	// The last reading and, for a stall, the namespace's last event are bounded by the settle
+	// time; one that has not returned by then counts as not made.
 	lastCtx, endLast := context.WithTimeout(ctx, w.o.Settle)
 	defer endLast()
-	return withProbed(s, first, w.reading(lastCtx))
+	lastRead := make(chan map[Workload]bool, 1)
+	go func() { lastRead <- w.reading(lastCtx) }()
+	if s.Stalled {
+		w.mu.Lock()
+		named := w.tr.stallObjects()
+		w.mu.Unlock()
+		s.LastEvent = w.lastEvent(lastCtx, named)
+	}
+	return withProbed(s, first, <-lastRead)
 }
 
 // follow waits until the open transition's window has ended, and tells the Tracker when the
@@ -260,6 +323,7 @@ func (w *Watcher) follow(ctx context.Context, exited <-chan struct{}) (Transitio
 			exited = nil // told once; a nil channel is never ready
 			w.mu.Lock()
 			w.tr.CommandExited(w.o.Now())
+			w.noteFinish()
 			w.mu.Unlock()
 		case <-tick.C:
 		case <-w.wake:
@@ -284,6 +348,27 @@ func (w *Watcher) follow(ctx context.Context, exited <-chan struct{}) (Transitio
 func (t *Tracker) windowEnded(now time.Time) bool {
 	t.endIfDue(now)
 	return !t.windowOpen()
+}
+
+// PodEvent is one moment in a pod's life as the watch saw it. Kind is created
+// (the watch's first sight of the pod), ready (first ready), deleted (the
+// first sight of its deletion; for a pod seen alive, then gone with no
+// deletion seen, the moment it was gone) or gone. Workload is the pod's
+// workload, as deployment/orders, empty when the watch knows none.
+type PodEvent struct {
+	At            time.Time
+	Pod, Workload string
+	Kind          string
+}
+
+// PodEvents gives every PodEvent of every pod of the namespace so far, in
+// order of time, then of pod name, then of kind in the order created, ready,
+// deleted, gone. A pod known only from its disappearance has a gone alone.
+// The slice is a copy; safe to call at any time, also after Stop.
+func (w *Watcher) PodEvents() []PodEvent {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.tr.podEvents()
 }
 
 // PodsAt answers as the Tracker's PodsAt does.
@@ -324,9 +409,12 @@ func (w *Watcher) set(kind string, old, obj runtime.Object) {
 		}
 		if was.GetUID() != is.GetUID() {
 			w.tr.Gone(old, now)
+			w.noteFinish()
 		}
 	}
 	w.tr.Set(obj, now)
+	w.noteFinish()
+	w.followPods(obj)
 	w.last[key] = obj
 	w.mu.Unlock()
 	w.signal()
@@ -360,6 +448,7 @@ func (w *Watcher) gone(kind string, obj any) {
 	if o != nil {
 		w.tr.Gone(o, now)
 	}
+	w.noteFinish()
 	w.mu.Unlock()
 	w.signal()
 }

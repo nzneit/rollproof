@@ -41,8 +41,8 @@ func (w Window) MarshalJSON() ([]byte, error) {
 		CrossedStart      int            `json:"crossed_start"`
 		FailedByClass     map[string]int `json:"failed_by_class"`
 		FirstFailure      *string        `json:"first_failure"`
-		SlowestMs         float64        `json:"slowest_ms"`
-		LagMs             float64        `json:"lag_ms"`
+		SlowestMs         *float64       `json:"slowest_ms"`
+		LagMs             *float64       `json:"lag_ms"`
 	}{
 		w.Name, stamp(w.Start), stamp(w.End), w.Result, w.Checks, w.Failed,
 		w.FailedAfterFinish, w.CrossedStart, byClass, stamp(w.FirstFailure),
@@ -67,8 +67,8 @@ func (i Install) MarshalJSON() ([]byte, error) {
 		Failed            int            `json:"failed"`
 		FailedByClass     map[string]int `json:"failed_by_class"`
 		LastFailure       *string        `json:"last_failure"`
-		SlowestMs         float64        `json:"slowest_ms"`
-		LagMs             float64        `json:"lag_ms"`
+		SlowestMs         *float64       `json:"slowest_ms"`
+		LagMs             *float64       `json:"lag_ms"`
 	}{
 		i.Ready.UTC().Format(timeLayout), stamp(i.FirstObservation), stamp(i.Settled),
 		list(i.SettleRestartedBy), i.Checks, i.Failed, byClass, stamp(i.LastFailure),

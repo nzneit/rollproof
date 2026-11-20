@@ -6,6 +6,7 @@ package run
 
 import (
 	"fmt"
+	"strings"
 
 	"rollproof/internal/deploy"
 	"rollproof/internal/verdict"
@@ -51,18 +52,65 @@ func classify(r deploy.Result) (string, kind) {
 // stopped by a signal gives none (the run reports a signal as interrupted). A
 // command that follows the install, such as the reading of the revision, is
 // named in the text, so that its failure is not blamed on the install.
-func installCondition(r deploy.Result) (verdict.Condition, bool) {
+// restartOnly says that the deployer's transitions are a restart alone: the
+// install then installed the candidate, and the text names it (section 4, "A
+// run with no previous release").
+func installCondition(r deploy.Result, restartOnly bool) (verdict.Condition, bool) {
 	end, k := classify(r)
 	if k == noFailure {
 		return verdict.Condition{}, false
 	}
 	subject := "the install command"
+	if restartOnly {
+		subject = "the install of the candidate"
+	}
 	if r.Name != "" && r.Name != "install" {
 		subject = "the command " + r.Name + ", which follows the install,"
 	}
 	code := verdict.InstallFailed
 	if k == unknown {
 		code = verdict.InternalError
+	}
+	return verdict.Condition{Code: code, Text: subject + " " + end}, true
+}
+
+// ofTheCandidate returns c with "of the candidate" after the leading "the install" of its text,
+// when restartOnly is true and c is an install-failed condition whose text begins "the install
+// was " or "the install stopped ": the texts that watch gives of an install that was not ready or
+// stopped being ready, which in a restart-only run is the candidate's (section 4). Every other
+// condition is returned as it is.
+func ofTheCandidate(c verdict.Condition, restartOnly bool) verdict.Condition {
+	const lead = "the install "
+	if !restartOnly || c.Code != verdict.InstallFailed {
+		return c
+	}
+	if strings.HasPrefix(c.Text, lead+"was ") || strings.HasPrefix(c.Text, lead+"stopped ") {
+		c.Text = lead + "of the candidate " + strings.TrimPrefix(c.Text, lead)
+	}
+	return c
+}
+
+// setupCondition returns the condition the Result r of setup[i] gives, if any:
+// setup-failed when the command exited non-zero, could not be started or was
+// stopped at limits.timeout; internal-error when it gave an answer the tool
+// could not read or ended in a way this build does not know. A success and a
+// stop by a signal give none: run reports the signal as interrupted. The text
+// names the command by its configuration path, setup[i], and its first word
+// from words, the configuration's SetupWords: as the file writes it, so that no
+// value a ${…} form gives reaches the text. Without a word for i, the text
+// names the path alone.
+func setupCondition(r deploy.Result, i int, words []string) (verdict.Condition, bool) {
+	end, k := classify(r)
+	if k == noFailure {
+		return verdict.Condition{}, false
+	}
+	code := verdict.SetupFailed
+	if k == unreadable || k == unknown {
+		code = verdict.InternalError
+	}
+	subject := fmt.Sprintf("setup[%d]", i)
+	if i >= 0 && i < len(words) && words[i] != "" {
+		subject += " (" + words[i] + ")"
 	}
 	return verdict.Condition{Code: code, Text: subject + " " + end}, true
 }

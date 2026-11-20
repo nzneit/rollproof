@@ -136,3 +136,80 @@ func TestFetchReplacesAChangedBinary(t *testing.T) {
 		t.Errorf("%s holds %q after the second fetch, want the archive's content", p, got)
 	}
 }
+
+// kubectlServer serves kubectl 1.37.0 for amd64 with the bytes "kubectl\n", as dl.k8s.io names
+// it, and counts requests. It returns the base URL, the binary's SHA-256 and the counter.
+func kubectlServer(t *testing.T) (string, string, *atomic.Int32) {
+	t.Helper()
+	body := []byte("kubectl\n")
+	hits := &atomic.Int32{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Path != "/release/v1.37.0/bin/linux/amd64/kubectl" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	sum := sha256.Sum256(body)
+	return srv.URL, hex.EncodeToString(sum[:]), hits
+}
+
+func TestFetchKubectl(t *testing.T) {
+	base, sum, _ := kubectlServer(t)
+	dir := t.TempDir()
+	if err := fetchKubectl(base, "amd64", sum, dir); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "kubectl")
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o755 {
+		t.Errorf("%s: mode %v, want 0755", p, fi.Mode().Perm())
+	}
+	if got, _ := os.ReadFile(p); string(got) != "kubectl\n" {
+		t.Errorf("%s holds %q, want %q", p, got, "kubectl\n")
+	}
+}
+
+func TestFetchKubectlRejectsAWrongChecksum(t *testing.T) {
+	base, _, _ := kubectlServer(t)
+	dir := t.TempDir()
+	err := fetchKubectl(base, "amd64", strings.Repeat("0", 64), dir)
+	if err == nil || !strings.Contains(err.Error(), "kubectl 1.37.0") || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("fetchKubectl = %v, want an error that names kubectl 1.37.0 and a checksum mismatch", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("%s holds %v after a mismatch, want nothing", dir, entries)
+	}
+}
+
+func TestFetchKubectlSkipsAPresentBinary(t *testing.T) {
+	base, sum, hits := kubectlServer(t)
+	dir := t.TempDir()
+	if err := fetchKubectl(base, "amd64", sum, dir); err != nil {
+		t.Fatal(err)
+	}
+	before := hits.Load()
+	if err := fetchKubectl(base, "amd64", sum, dir); err != nil {
+		t.Fatal(err)
+	}
+	if n := hits.Load() - before; n != 0 {
+		t.Errorf("the second fetch made %d requests, want none", n)
+	}
+}
+
+func TestFetchKubectlRefusesAnotherArchitecture(t *testing.T) {
+	base, sum, hits := kubectlServer(t)
+	err := fetchKubectl(base, "arm64", sum, t.TempDir())
+	const want = "kubectl 1.37.0: no checksum for architecture arm64"
+	if err == nil || err.Error() != want {
+		t.Fatalf("fetchKubectl = %v, want %q", err, want)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("fetchKubectl made %d requests, want none", n)
+	}
+}

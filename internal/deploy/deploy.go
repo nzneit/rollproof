@@ -22,11 +22,14 @@ type Deployer interface {
 	Releases() []Release
 }
 
-// Release is what the report says of one release: Role is previous or candidate; Chart
-// and Version are the chart's own name and version; Source is where it came
-// from; ValueFiles are file names and InlineKeys the top-level keys of
-// inline maps. Never a value.
+// Release is what the report says of one release. For the Helm driver Role is
+// previous or candidate, Chart and Version are the chart's own name and
+// version, Source is where it came from, ValueFiles are file names and
+// InlineKeys the top-level keys of inline maps, and Program is empty. For the
+// commands driver Role is install, deploy or rollback, Program is the first
+// word of that command as written, and the rest is empty. Never a value.
 type Release struct {
 	Role, Chart, Version, Source string
 	ValueFiles, InlineKeys       []string
+	Program                      string
 }

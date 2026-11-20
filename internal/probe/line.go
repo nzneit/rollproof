@@ -6,6 +6,7 @@ package probe
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"regexp"
 	"strings"
@@ -28,22 +29,32 @@ const (
 )
 
 // Line is one line as the contract reads it. Obs is set for Observed. Fault says, for Invalid,
-// which rule the line broke; it names the field and never quotes the line.
+// which rule the line broke; it names the field and never quotes the line. FailedCheck says the
+// line is one JSON object, on a line of its own, with a top-level ok that is false, or with ok
+// twice and one of them false. It is set whatever the Kind, so an Invalid line says whether it
+// was a failed check's.
 type Line struct {
-	Kind  Kind
-	Obs   verdict.Observation
-	Fault string
+	Kind        Kind
+	Obs         verdict.Observation
+	Fault       string
+	FailedCheck bool
 }
 
 var okBehindPrefix = regexp.MustCompile(`"ok"\s*:`)
 
 func invalid(fault string) Line { return Line{Kind: Invalid, Fault: fault} }
 
-// ParseLine reads one whole line of a probe's output. raw has no line end. written is the
+// ParseLine reads one whole line of a probe's output. text has no line end. written is the
 // runtime's timestamp of the line; it becomes the observation's Written and, when the line has no
 // t, its T. A t later than written is Invalid.
-func ParseLine(raw string, written time.Time) Line {
-	s := strings.TrimLeftFunc(raw, unicode.IsSpace)
+//
+// asked is the moment the tool asked for the probe's pod, on the tool's clock. A line whose t is
+// earlier than asked by more than ClockBound is Invalid, because no check can have begun before
+// the probe existed (section 14, point 29); a t exactly ClockBound before asked is not. A zero
+// asked skips this check. It is made here, not in the follower, because ParseLine is the one
+// reader of a line.
+func ParseLine(text string, written, asked time.Time) Line {
+	s := strings.TrimLeftFunc(text, unicode.IsSpace)
 	if !strings.HasPrefix(s, "{") {
 		if okBehindPrefix.MatchString(s) {
 			return invalid(`an observation behind a prefix: "ok" and a colon in log text`)
@@ -59,67 +70,74 @@ func ParseLine(raw string, written time.Time) Line {
 	if _, err := dec.Token(); err != io.EOF {
 		return invalid("the line is not one JSON object")
 	}
+	failed := failedCheck(s)
+	bad := func(fault string) Line { return Line{Kind: Invalid, Fault: fault, FailedCheck: failed} }
 	if hasDuplicateName(s) {
-		return invalid("a top-level name is there twice")
+		return bad("a top-level name is there twice")
 	}
 
 	okRaw, has := fields["ok"]
 	if !has {
-		return Line{Kind: JSONText}
+		return Line{Kind: JSONText, FailedCheck: failed}
 	}
 	obs := verdict.Observation{Written: written, T: written, N: 1}
 	if !unmarshalStrict(okRaw, &obs.OK) {
-		return invalid("ok is not true or false")
+		return bad("ok is not true or false")
 	}
 
 	if r, ok := fields["t"]; ok {
 		var ts string
 		if !unmarshalStrict(r, &ts) {
-			return invalid("t is not a string")
+			return bad("t is not a string")
 		}
 		t, err := time.Parse(time.RFC3339, ts)
 		if err != nil {
-			return invalid("t is not RFC 3339 with a zone")
+			return bad("t is not RFC 3339 with a zone")
 		}
 		if t.After(written) {
-			return invalid("t is later than the line")
+			return bad("t is later than the line")
+		}
+		if !asked.IsZero() && t.Before(asked.Add(-ClockBound)) {
+			return bad(fmt.Sprintf("t is more than %v earlier than the moment the tool asked for the probe's pod", ClockBound))
 		}
 		obs.T = t
 	}
 
 	if r, ok := fields["n"]; ok {
 		if !obs.OK {
-			return invalid("n is not allowed beside ok false")
+			return bad("n is not allowed beside ok false")
 		}
 		var n int
 		if !isNumber(r) || !unmarshalStrict(r, &n) || n < 1 {
-			return invalid("n is not an integer of 1 or more")
+			return bad("n is not an integer of 1 or more")
 		}
 		obs.N = n
 	}
 
 	if r, ok := fields["class"]; ok {
 		if !unmarshalStrict(r, &obs.Class) {
-			return invalid("class is not a string")
+			return bad("class is not a string")
 		}
 	}
 	if r, ok := fields["ms"]; ok {
 		if !isNumber(r) || !unmarshalStrict(r, &obs.Ms) || obs.Ms < 0 {
-			return invalid("ms is not a number of 0 or more")
+			return bad("ms is not a number of 0 or more")
 		}
+		obs.HasMs = true
 	}
 	if r, ok := fields["lag"]; ok {
 		if !isNumber(r) || !unmarshalStrict(r, &obs.Lag) || obs.Lag < 0 {
-			return invalid("lag is not a number of 0 or more")
+			return bad("lag is not a number of 0 or more")
 		}
+		obs.HasLag = true
 	}
 	if r, ok := fields["v"]; ok {
 		var v int
 		if !isNumber(r) || !unmarshalStrict(r, &v) || v != 1 {
-			return invalid("v is not 1, the one version of the contract this tool reads")
+			return bad("v is not 1, the one version of the contract this tool reads")
 		}
 	}
-	return Line{Kind: Observed, Obs: obs}
+	return Line{Kind: Observed, Obs: obs, FailedCheck: failed}
 }
 
 // unmarshalStrict decodes raw into v and reports whether it fit. A JSON null never fits: the
@@ -163,4 +181,30 @@ func hasDuplicateName(s string) bool {
 		}
 	}
 	return false
+}
+
+// failedCheck reports whether a top-level ok of the JSON object s is the JSON literal false. s is
+// already known to be one valid object, with nothing after it. The names are walked as
+// hasDuplicateName walks them, so that a repeated ok is read, not just the last of them.
+func failedCheck(s string) bool {
+	dec := json.NewDecoder(strings.NewReader(s))
+	if _, err := dec.Token(); err != nil { // the opening brace
+		return false
+	}
+	failed := false
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return failed
+		}
+		name, _ := tok.(string)
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return failed
+		}
+		if name == "ok" && bytes.Equal(bytes.TrimSpace(value), []byte("false")) {
+			failed = true
+		}
+	}
+	return failed
 }

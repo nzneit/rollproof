@@ -21,12 +21,12 @@ func failRun() Run {
 	r := passRun()
 	r.Verdict = "fail"
 	r.Windows = []Window{
-		{Name: "steady", Start: at(0), End: at(10_000), Result: "pass", Checks: 2000, SlowestMs: 39, LagMs: 5},
+		{Name: "steady", Start: at(0), End: at(10_000), Result: "pass", Checks: 2000, SlowestMs: new(39.0), LagMs: new(5.0)},
 		{Name: "deploy", Start: at(10_000), End: at(39_100), Result: "fail", Checks: 5820, Failed: 243, FailedAfterFinish: 31,
-			FailedByClass: map[string]int{"refused": 198, "timeout": 45}, FirstFailure: at(15_310), SlowestMs: 198, LagMs: 12},
+			FailedByClass: map[string]int{"refused": 198, "timeout": 45}, FirstFailure: at(15_310), SlowestMs: new(198.0), LagMs: new(12.0)},
 		{Name: "rollback", Result: "not-run"},
 	}
-	r.Transitions = []Transition{{Name: "deploy", Command: "ok", Workloads: []Workload{ordersReplaced(800)}}}
+	r.Transitions = []Transition{{Name: "deploy", Command: new("ok"), Workloads: []Workload{ordersReplaced(800)}}}
 	r.Reasons = []Reason{{
 		Code: "probe-failures", Verdict: "fail", Window: "deploy",
 		Text: "243 checks failed (refused 198, timeout 45), first at 10:00:07.31",
@@ -75,7 +75,7 @@ func beforeFirstRun() Run {
 func inInstallRun() Run {
 	r := beforeFirstRun()
 	r.Install = &Install{Ready: *at(-21_000), FirstObservation: at(-15_000), Checks: 1200, Failed: 6,
-		FailedByClass: map[string]int{"refused": 5, "timeout": 1}, LastFailure: at(-14_900), SlowestMs: 44, LagMs: 9}
+		FailedByClass: map[string]int{"refused": 5, "timeout": 1}, LastFailure: at(-14_900), SlowestMs: new(44.0), LagMs: new(9.0)}
 	r.Reasons = []Reason{{Code: "interrupted", Verdict: "not-verified", Window: "install", Text: "a signal stopped the run", Decided: true}}
 	return r
 }
@@ -83,7 +83,7 @@ func inInstallRun() Run {
 // installDecidedRun is a run whose install window decided the verdict: the probe was silent in it.
 func installDecidedRun() Run {
 	r := beforeFirstRun()
-	r.Install = &Install{Ready: *at(-21_000), FirstObservation: at(-15_000), Settled: at(0), Checks: 1800, SlowestMs: 44, LagMs: 9}
+	r.Install = &Install{Ready: *at(-21_000), FirstObservation: at(-15_000), Settled: at(0), Checks: 1800, SlowestMs: new(44.0), LagMs: new(9.0)}
 	r.Reasons = []Reason{{Code: "probe-silent", Verdict: "not-verified", Window: "install", Decided: true,
 		Text: "no observation for 6.0 s, from 09:59:42.00"}}
 	return r
@@ -99,10 +99,10 @@ func stallRun() Run {
 	r.Verdict = "fail"
 	r.Windows = []Window{
 		r.Windows[0],
-		{Name: "deploy", Start: at(10_000), End: at(310_000), Result: "fail", Checks: 60000, SlowestMs: 35, LagMs: 4},
+		{Name: "deploy", Start: at(10_000), End: at(310_000), Result: "fail", Checks: 60000, SlowestMs: new(35.0), LagMs: new(4.0)},
 		{Name: "rollback", Result: "not-run"},
 	}
-	r.Transitions = []Transition{{Name: "deploy", Stalled: true, Command: "ok",
+	r.Transitions = []Transition{{Name: "deploy", Stalled: true, Command: new("ok"),
 		Workloads: []Workload{{Workload: "deployment/orders", PodsAtStart: 3, PodsCreated: 1, Probed: "yes"}}}}
 	r.Images[0].RunBy = nil
 	r.Reasons = []Reason{
@@ -141,6 +141,44 @@ func changedRun() Run {
 	return r
 }
 
+// restartRun is a pass of a run with no previous release: the candidate is installed and then
+// restarted under the probe.
+func restartRun() Run {
+	r := passRun()
+	r.Releases = r.Releases[1:]
+	r.Windows = []Window{
+		r.Windows[0],
+		{Name: "restart", Start: at(10_000), End: at(43_400), Result: "pass", Checks: 6680, SlowestMs: new(212.0), LagMs: new(38.0)},
+	}
+	r.Transitions = []Transition{{Name: "restart", Restart: new("accepted"), Workloads: []Workload{ordersReplaced(5300)}}}
+	r.Images[0].RunBy = []RunBy{{Workload: "deployment/orders", Transition: "restart"}}
+	return r
+}
+
+// commandsRun is a pass of the commands driver with an install and a deploy command and no
+// rollback.
+func commandsRun() Run {
+	r := passRun()
+	r.Driver, r.Name = "commands", "orders"
+	r.Releases = []Release{{Role: "install", Program: "kubectl"}, {Role: "deploy", Program: "kubectl"}}
+	r.Windows = r.Windows[:2]
+	r.Transitions = r.Transitions[:1]
+	return r
+}
+
+// customRun is a pass judged by a custom probe, whose reach the tool does not know.
+func customRun() Run {
+	r := passRun()
+	r.Probes = []Probe{{Kind: "custom", Target: "registry.example/tools/busybox@sha256:" + strings.Repeat("0", 64),
+		EnvNames: []string{"TOKEN", "TARGET"}, CommandCount: 3, Lines: 86, StoppedWhenAsked: new(true)}}
+	for i := range r.Transitions {
+		for j := range r.Transitions[i].Workloads {
+			r.Transitions[i].Workloads[j].Probed = "not known"
+		}
+	}
+	return r
+}
+
 func TestConsoleExamples(t *testing.T) {
 	// The three examples of section 10 are copied from the design and are never rewritten.
 	for _, c := range []struct {
@@ -162,6 +200,10 @@ func TestConsoleExamples(t *testing.T) {
 		{"testdata/console-before-first-observation.golden.txt", beforeFirstRun()},
 		{"testdata/console-in-install-window.golden.txt", inInstallRun()},
 		{"testdata/console-install-decided.golden.txt", installDecidedRun()},
+		{"testdata/console-custom-no-ms-or-lag.golden.txt", customNoMsOrLagRun()},
+		{"testdata/console-restart.golden.txt", restartRun()},
+		{"testdata/console-commands.golden.txt", commandsRun()},
+		{"testdata/console-custom.golden.txt", customRun()},
 	} {
 		t.Run(c.path, func(t *testing.T) { golden(t, c.path, []byte(Console(c.run))) })
 	}
@@ -184,8 +226,13 @@ func TestConsoleLines(t *testing.T) {
 			"status 200-299\n            12 lines were JSON objects with no ok field\n"},
 		{"one JSON line with no ok", passRun, func(r *Run) { r.Probes[0].JSONLinesWithoutOK = 1 },
 			"status 200-299\n            1 line was a JSON object with no ok field\n"},
-		{"https", passRun, func(r *Run) { r.Probes[0].CertificateChecked = false },
+		{"https", passRun, func(r *Run) { r.Probes[0].CertificateChecked = new(false) },
 			"status 200-299\n            the server's certificate was not verified\n"},
+		{"a custom probe with one item and no env", customRun, func(r *Run) {
+			r.Probes[0].CommandCount, r.Probes[0].ArgsCount, r.Probes[0].EnvNames = 1, 1, nil
+		}, "            command: 1 item; args: 1 item; env: none\n"},
+		{"an env name with a control character", customRun, func(r *Run) { r.Probes[0].EnvNames = []string{"TO\x1bKEN", "TARGET"} },
+			"; env: TO KEN, TARGET\n"},
 		{"a note of the target", passRun, func(r *Run) { r.Probes[0].Notes = []string{affinity} },
 			"status 200-299\n            " + affinity + "\n"},
 		{"a probe that did not stop", passRun, func(r *Run) { r.Probes[0].StoppedWhenAsked = new(false) },
@@ -213,14 +260,18 @@ func TestConsoleLines(t *testing.T) {
 		{"a reason with no window decided, and the install window did not", installDecidedRun, func(r *Run) {
 			r.Reasons = []Reason{{Code: "workload-unsupported", Verdict: "not-verified", Text: "daemonset/agent updates with OnDelete", Decided: true}}
 		}, "install     settled after 15.0 s under the probe; failures not judged\n"},
+		{"no ms or lag", passRun, func(r *Run) { r.Windows[1].SlowestMs, r.Windows[1].LagMs = nil, nil },
+			"deploy     33.4 s    6,680        0              0         -        -   pass\n"},
 		{"no check in the install window", inInstallRun, func(r *Run) {
 			r.Install.Checks, r.Install.Failed, r.Install.FailedByClass, r.Install.LastFailure = 0, 0, nil, nil
+			r.Install.SlowestMs, r.Install.LagMs = nil, nil
 		}, "            0 checks, 0 failed\n            slowest -, behind -\n"},
 		{"one check in the install window", inInstallRun, func(r *Run) {
 			r.Install.Checks, r.Install.Failed, r.Install.FailedByClass, r.Install.LastFailure = 1, 0, nil, nil
 		}, "            1 check, 0 failed\n            slowest 44 ms, behind 9 ms\n"},
 		{"every check failed in the install window", passRun, func(r *Run) {
 			r.Install.Failed, r.Install.FailedByClass, r.Install.LastFailure = 3000, map[string]int{"503": 3000}, at(-100)
+			r.Install.SlowestMs = nil
 		}, "            3,000 checks, 3,000 failed (503 3,000), the last 0.1 s before the steady window\n            slowest -, behind 9 ms\n"},
 		{"a warning after a pass", passRun, func(r *Run) { r.Warnings = []string{warning} },
 			"  a node drain\n\nwarning: " + warning + "\nresults: /tmp/rollproof-results-7f3a\n"},
@@ -240,7 +291,7 @@ func TestConsoleLines(t *testing.T) {
 		}, "images      orders     run by deployment/orders, in pods the install created\n" +
 			"                       run by deployment/orders, in pods the deploy created\n"},
 		{"a window that ran and was not judged", failRun, func(r *Run) {
-			r.Windows[2] = Window{Name: "rollback", Start: at(39_100), End: at(72_000), Result: "not-judged", Checks: 6580, SlowestMs: 180, LagMs: 30}
+			r.Windows[2] = Window{Name: "rollback", Start: at(39_100), End: at(72_000), Result: "not-judged", Checks: 6580, SlowestMs: new(180.0), LagMs: new(30.0)}
 		}, "\nrollback   32.9 s    6,580        0              0    180 ms    30 ms   not judged\n"},
 		{"a workload removed and one added", passRun, func(r *Run) {
 			r.Transitions[0].Workloads = []Workload{
@@ -423,8 +474,8 @@ func TestConsoleVerdictLine(t *testing.T) {
 func TestConsoleDropsNoRow(t *testing.T) {
 	r := passRun()
 	r.Verdict = "fail"
-	r.Windows = append(r.Windows, Window{Name: "restart", Start: at(80_000), End: at(90_000), Result: "pass", Checks: 10, SlowestMs: 1, LagMs: 1})
-	r.Transitions = append(r.Transitions, Transition{Name: "restart", Command: "ok", Workloads: []Workload{
+	r.Windows = append(r.Windows, Window{Name: "restart", Start: at(80_000), End: at(90_000), Result: "pass", Checks: 10, SlowestMs: new(1.0), LagMs: new(1.0)})
+	r.Transitions = append(r.Transitions, Transition{Name: "restart", Restart: new("accepted"), Workloads: []Workload{
 		{Workload: "deployment/a", PodsAtStart: 1, PodsReplaced: 1, Probed: "yes"},
 		{Workload: "statefulset/b", PodsAtStart: 1, PodsReplaced: 1, Probed: "no"},
 		{Workload: "daemonset/c", PodsAtStart: 1, Probed: "not known"},
@@ -487,6 +538,24 @@ func TestConsoleDeployWithoutRollback(t *testing.T) {
 		f.Verdict = n
 		if strings.Contains(Console(f), line) {
 			t.Errorf("a %s run holds %q", n, line)
+		}
+	}
+}
+
+// Only a pass says that only a restart was tested, and a pass with a deploy does not say it.
+func TestConsoleRestartOnlyLineOnlyOnAPass(t *testing.T) {
+	const line = "a deploy to another release and a rollback, because only a restart was tested"
+	if got := Console(passRun()); strings.Contains(got, line) {
+		t.Errorf("a pass with a deploy holds %q:\n%s", line, got)
+	}
+	if got := Console(restartRun()); !strings.Contains(got, "not exercised\n  "+line+"\n  "+notExercised[0]+"\n") {
+		t.Errorf("a restart-only pass does not hold %q first under not exercised:\n%s", line, got)
+	}
+	for _, v := range []string{"fail", "not-verified"} {
+		r := restartRun()
+		r.Verdict = v
+		if got := Console(r); strings.Contains(got, line) {
+			t.Errorf("a %s run holds %q:\n%s", v, line, got)
 		}
 	}
 }

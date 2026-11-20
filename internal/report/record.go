@@ -44,7 +44,9 @@ type Reason struct {
 
 // Window is one window with its result and its counts. A nil time is one
 // that never came: the start of a window that did not run, or the first
-// failure of a window with none.
+// failure of a window with none. A nil SlowestMs or LagMs is a figure that
+// the probe did not give: result.json writes it as null and the console as
+// "-".
 type Window struct {
 	Name              string         `json:"name"`
 	Start             *time.Time     `json:"start"`
@@ -56,13 +58,15 @@ type Window struct {
 	CrossedStart      int            `json:"crossed_start"`
 	FailedByClass     map[string]int `json:"failed_by_class"`
 	FirstFailure      *time.Time     `json:"first_failure"`
-	SlowestMs         float64        `json:"slowest_ms"`
-	LagMs             float64        `json:"lag_ms"`
+	SlowestMs         *float64       `json:"slowest_ms"`
+	LagMs             *float64       `json:"lag_ms"`
 }
 
 // Install is the install as the report states it, apart from the windows. A
 // nil time is one that never came. The counts are the install window's, all
-// zero when the probe gave no observation.
+// zero when the probe gave no observation. A nil SlowestMs or LagMs is a
+// figure that the probe did not give: result.json writes it as null and the
+// console as "-".
 type Install struct {
 	Ready             time.Time      `json:"ready"`
 	FirstObservation  *time.Time     `json:"first_observation"`
@@ -72,16 +76,23 @@ type Install struct {
 	Failed            int            `json:"failed"`
 	FailedByClass     map[string]int `json:"failed_by_class"`
 	LastFailure       *time.Time     `json:"last_failure"`
-	SlowestMs         float64        `json:"slowest_ms"`
-	LagMs             float64        `json:"lag_ms"`
+	SlowestMs         *float64       `json:"slowest_ms"`
+	LagMs             *float64       `json:"lag_ms"`
 }
 
-// Transition is one transition that ran. Command is how its command ended:
-// ok, exit-nonzero, not-started, stopped-at-limit or stopped-by-signal.
+// Transition is one transition that ran.
 type Transition struct {
-	Name              string     `json:"name"`
-	Stalled           bool       `json:"stalled"`
-	Command           string     `json:"command"`
+	Name    string `json:"name"`
+	Stalled bool   `json:"stalled"`
+	// Command is how the transition's command ended: ok, exit-nonzero,
+	// not-started, stopped-at-limit or stopped-by-signal. Nil, null in
+	// result.json, for a restart, which has no command.
+	Command *string `json:"command"`
+	// Restart is whether the API server took the restart's change:
+	// "accepted" or "refused". Nil, null in result.json, for a deploy and
+	// a rollback, and for a restart that the run's context cut short or
+	// that limits.timeout stopped, in which the server refused nothing.
+	Restart           *string    `json:"restart"`
 	SettleRestartedBy []string   `json:"settle_restarted_by"`
 	Workloads         []Workload `json:"workloads"`
 }
@@ -113,7 +124,10 @@ type Probe struct {
 	ArgsCount          int       `json:"args_count"`
 	Lines              int       `json:"lines"`
 	JSONLinesWithoutOK int       `json:"json_lines_without_ok"`
-	CertificateChecked bool      `json:"certificate_checked"`
+	// CertificateChecked is whether the probe checked the server's certificate: false for the
+	// built-in probe on https, true on http. Nil, null in result.json, for a custom probe, whose
+	// checks the tool does not know.
+	CertificateChecked *bool `json:"certificate_checked"`
 	// StoppedWhenAsked is true when the probe stopped within the drain after the tool asked it;
 	// false when it did not. Null when the tool did not ask it, stopped waiting for it because a
 	// signal came, or failed while it stopped it; Notes then says which.
@@ -123,9 +137,15 @@ type Probe struct {
 
 // Release is one release of the Helm driver: the chart's name and the
 // version Helm resolved, where it came from, and the names of the values
-// files and the top-level keys of the inline maps. Never a value.
+// files and the top-level keys of the inline maps. Never a value. For the
+// commands driver it is one command: its role, install, deploy or rollback,
+// and its Program.
 type Release struct {
-	Role        string   `json:"role"`
+	Role string `json:"role"`
+	// Program is the first word of the commands driver's command for this
+	// role; empty for the Helm driver, whose chart fields are empty for the
+	// commands driver.
+	Program     string   `json:"program"`
 	Chart       string   `json:"chart"`
 	Version     string   `json:"version"`
 	Source      string   `json:"source"`
@@ -149,7 +169,7 @@ type Image struct {
 }
 
 // RunBy is one watched workload whose pods ran an image, and the transition
-// that created those pods: install, deploy or rollback.
+// that created those pods: install, deploy, rollback or restart.
 type RunBy struct {
 	Workload   string `json:"workload"`
 	Transition string `json:"transition"`

@@ -159,11 +159,15 @@ func AsCondition(err error) Condition {
 // Observation is one line of a probe that carries ok. Written is when the node's runtime stamped
 // the line, T when the check began (equal to Written when the line gave none). N is how many
 // passed checks the line stands for, 1 or more, and always 1 on a failure. Class, Ms and Lag are
-// as section 6 defines.
+// as section 6 defines; a line may give neither Ms nor Lag, and HasMs and HasLag say which it gave.
 type Observation struct {
 	Written, T time.Time
 	OK         bool
 	N          int
 	Class      string
 	Ms, Lag    float64
+	// HasMs says the line gave ms. Ms is then its value; without it Ms is 0 and means nothing.
+	HasMs bool
+	// HasLag says the line gave lag. Lag is then its value; without it Lag is 0 and means nothing.
+	HasLag bool
 }

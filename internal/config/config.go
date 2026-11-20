@@ -6,14 +6,16 @@ package config
 import "time"
 
 // Config is one run description, valid. Path is the file's real absolute path and Dir the
-// folder that holds it. Every other field is one top-level key of the file, as section 8 gives
-// it.
+// folder that holds it. SetupWords[i] is the first word of setup[i] as the file writes it, before
+// any ${…} form is filled, so that a text can name the command without quoting a value. Every
+// other field is one top-level key of the file, as section 8 gives it.
 type Config struct {
 	Path, Dir  string
 	Cluster    Cluster
 	Registries []Registry
 	Images     map[string]Image
 	Setup      [][]string
+	SetupWords []string
 	Deploy     Deploy
 	Probe      Probe
 	Limits     Limits

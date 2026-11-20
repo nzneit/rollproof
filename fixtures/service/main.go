@@ -4,12 +4,19 @@
 //
 //	GET /work?ms=N  sleeps N ms, answers 200 "<pod> <version>"
 //	GET /readyz     answers 200 (the server only listens once it can serve)
+//	GET /version    answers 200 "<version>", whatever FAIL_WORK or FAIL_AFTER say
 //
 // START_DELAY       time after process start before it listens (warm-up)
 // SHUTDOWN          exit | drain-now | helper
 // SERVE_AFTER_TERM  helper: keep serving this long after SIGTERM
 // DRAIN_DEADLINE    drain-now, helper: deadline given to http.Server.Shutdown
 // FAIL_WORK         true: GET /work answers 500 with "failing" and does nothing else
+// FAIL_AFTER        time after it listens before GET /work begins to fail; empty never fails
+// FAIL_FOR          how long GET /work fails from FAIL_AFTER on; a set FAIL_AFTER needs it
+// JOB_SLEEP         set, 0s included: sleep that long and exit 0 without listening, as a Job does
+//
+// A negative FAIL_AFTER, FAIL_FOR or JOB_SLEEP is an error, and so is a set FAIL_AFTER with no
+// FAIL_FOR: the service fails loud rather than never failing or never ending.
 // version is built in: -ldflags "-X main.version=…" (default dev), so that two builds are two images.
 package main
 
@@ -41,12 +48,34 @@ func durEnv(env func(string) string, name string, def time.Duration) (time.Durat
 	return d, nil
 }
 
+// nonNegative is the error for a duration below zero: as bad as one that does not parse.
+func nonNegative(name string, d time.Duration) error {
+	if d < 0 {
+		return fmt.Errorf("bad %s: negative duration", name)
+	}
+	return nil
+}
+
 func handlesTerm(mode string) bool {
 	return mode == "drain-now" || mode == "helper"
 }
 
 func serve(ctx context.Context, env func(string) string, ready chan<- string) error {
 	pod, _ := os.Hostname()
+	// JOB_SLEEP is read before anything listens: a Job sleeps and ends 0. Its
+	// presence makes a Job, so 0s sleeps no time and still never listens.
+	jobSleep, err := durEnv(env, "JOB_SLEEP", 0)
+	if err != nil {
+		return err
+	}
+	if err := nonNegative("JOB_SLEEP", jobSleep); err != nil {
+		return err
+	}
+	if env("JOB_SLEEP") != "" {
+		log.Printf("job_sleep=%s", jobSleep)
+		time.Sleep(jobSleep)
+		return nil
+	}
 	mode := env("SHUTDOWN")
 	if mode == "" {
 		mode = "exit"
@@ -66,18 +95,44 @@ func serve(ctx context.Context, env func(string) string, ready chan<- string) er
 	if err != nil {
 		return err
 	}
+	failAfter, err := durEnv(env, "FAIL_AFTER", 0)
+	if err != nil {
+		return err
+	}
+	if err := nonNegative("FAIL_AFTER", failAfter); err != nil {
+		return err
+	}
+	failFor, err := durEnv(env, "FAIL_FOR", 0)
+	if err != nil {
+		return err
+	}
+	if err := nonNegative("FAIL_FOR", failFor); err != nil {
+		return err
+	}
+	if env("FAIL_AFTER") != "" && env("FAIL_FOR") == "" {
+		// No row asks for a window of no length: a set FAIL_AFTER needs FAIL_FOR.
+		return fmt.Errorf("bad FAIL_FOR: empty while FAIL_AFTER is set")
+	}
 	addr := env("ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
 	failWork := env("FAIL_WORK") == "true"
 
-	log.Printf("pod=%s version=%s shutdown=%s start_delay=%s serve_after_term=%s drain_deadline=%s fail_work=%t",
-		pod, version, mode, startDelay, serveAfter, drain, failWork)
+	log.Printf("pod=%s version=%s shutdown=%s start_delay=%s serve_after_term=%s drain_deadline=%s fail_work=%t fail_after=%s fail_for=%s",
+		pod, version, mode, startDelay, serveAfter, drain, failWork, failAfter, failFor)
+
+	// failFrom and failUntil are written once, after listening and before the
+	// server's goroutine starts, so the handlers read them without a race.
+	var failFrom, failUntil time.Time
+	failing := func() bool {
+		now := time.Now()
+		return failWork || (!failFrom.IsZero() && !now.Before(failFrom) && now.Before(failUntil))
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /work", func(w http.ResponseWriter, r *http.Request) {
-		if failWork {
+		if failing() {
 			w.WriteHeader(http.StatusInternalServerError)
 			fmt.Fprint(w, "failing")
 			return
@@ -92,6 +147,9 @@ func serve(ctx context.Context, env func(string) string, ready chan<- string) er
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, version)
+	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 
 	// Warm-up: nothing listens until START_DELAY has passed.
@@ -103,6 +161,10 @@ func serve(ctx context.Context, env func(string) string, ready chan<- string) er
 	}
 	if ready != nil {
 		ready <- ln.Addr().String()
+	}
+	if env("FAIL_AFTER") != "" {
+		failFrom = time.Now().Add(failAfter)
+		failUntil = failFrom.Add(failFor)
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()

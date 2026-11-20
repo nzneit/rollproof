@@ -69,6 +69,7 @@
       "name": "deploy",
       "stalled": false,
       "command": "ok",
+      "restart": null,
       "settle_restarted_by": [],
       "workloads": [
         {
@@ -87,6 +88,7 @@
       "name": "rollback",
       "stalled": false,
       "command": "ok",
+      "restart": null,
       "settle_restarted_by": [],
       "workloads": [
         {
@@ -137,6 +139,7 @@
   "releases": [
     {
       "role": "previous",
+      "program": "",
       "chart": "orders",
       "version": "1.4.2",
       "source": "oci://registry.example/charts/orders",
@@ -145,6 +148,7 @@
     },
     {
       "role": "candidate",
+      "program": "",
       "chart": "orders",
       "version": "1.5.0",
       "source": "./chart",

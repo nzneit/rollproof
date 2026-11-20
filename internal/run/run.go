@@ -2,7 +2,6 @@ package run
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -45,9 +44,24 @@ type Watcher interface {
 	// arrived.
 	InstallSettled(ctx context.Context, first time.Time) watch.Settling
 	Transition(ctx context.Context, name verdict.WindowName, began time.Time, exited <-chan struct{}) watch.Transition
+	// Restart restarts every watched workload as decision 3 says and returns when the
+	// last change was taken, the first was refused or ctx ended. run calls it once for a
+	// restart's window, beside Transition, and hands its return to Transition as
+	// the end of the transition's command.
+	Restart(ctx context.Context) watch.Restart
 	// UseService names the Service whose endpoints Transition reads.
 	UseService(service *types.NamespacedName)
 	PodsAt(at time.Time) (stopping, starting []watch.PodNote)
+	// Finishes gives a value each time the open transition comes to be finished, again after its
+	// settle time started again, in order; the channel is closed when Stop returns. run follows it
+	// into windows.json from the moment the watcher exists.
+	Finishes() <-chan watch.Finish
+	// PodEvents gives every pod event of the namespace so far, in order of time, for the
+	// timeline.
+	PodEvents() []watch.PodEvent
+	// WriteEvents lists the events of the workload's namespace and of the probe's once and writes
+	// them, oldest first. The caller bounds ctx.
+	WriteEvents(ctx context.Context, w io.Writer) error
 	Stop()
 }
 
@@ -58,9 +72,19 @@ type Watcher interface {
 type Cluster interface {
 	Store(ctx context.Context) (probeImage string, images map[string]config.ImageRef, err error)
 	Deployer(cfg *config.Config) (deploy.Deployer, []string, error)
+	// Setup runs the configuration's setup commands in order on the run's command runner, each
+	// bounded by limits.timeout, and returns the Result of the first that did not succeed with its
+	// index in setup, or a Result named setup with Ending Succeeded and the index -1 when all did
+	// or there were none. run calls it once, after Deployer and Fetch and before Watcher; a context
+	// that ends stops the command that runs.
+	Setup(ctx context.Context) (deploy.Result, int)
 	Watcher(ctx context.Context, cfg *config.Config) (Watcher, error)
 	Target(ctx context.Context, cfg *config.Config) (probe.Target, error)
-	Probe(cfg *config.Config, probeImage string, raw io.Writer) probe.Probe
+	// Probe returns the probe that the configuration names, not yet started: the built-in
+	// probe on probeImage, or the custom probe on its own image. raw receives the
+	// probe's lines. An error is a configuration that the probe's pod cannot be
+	// written from; run places it before the install window and starts no probe.
+	Probe(cfg *config.Config, probeImage string, raw io.Writer) (probe.Probe, error)
 	Facts() report.Cluster
 	Kept() string
 	// EndCommands ends every command of the run that is still being stopped and closes its
@@ -115,6 +139,10 @@ func Run(ctx context.Context, o Options, u Units) int {
 	}
 	s.w = w
 	s.ev = &evidence{files: w.Evidence, warn: s.warnings.add}
+	s.marks = newMarks(w.ReplaceEvidence, s.warnings.add)
+	// The follower of the finishes never outlives the run, whichever way it ended; after
+	// completeEvidence this does nothing.
+	defer s.marks.end()
 
 	caught := s.sequence(s.ctx)
 	if caught == nil {
@@ -146,11 +174,13 @@ func Run(ctx context.Context, o Options, u Units) int {
 	return s.finish()
 }
 
-// writer is what a run asks of the results folder: the final result.json, an evidence file, and
-// the folder's path. report.Writer is the real one, and a test replaces it.
+// writer is what a run asks of the results folder: the final result.json, an evidence file, an
+// evidence file replaced whole, and the folder's path. report.Writer is the real one, and a test
+// replaces it.
 type writer interface {
 	Final(report.Run) error
 	Evidence(name string) (io.WriteCloser, error)
+	ReplaceEvidence(name string, b []byte) error
 	Dir() string
 }
 
@@ -166,6 +196,7 @@ type runState struct {
 	cancel   context.CancelFunc
 	w        writer
 	ev       *evidence
+	marks    *marks // windows.json: set at each change of a window's start or end
 	warnings *warnings
 
 	cfg        *config.Config
@@ -186,8 +217,9 @@ type runState struct {
 	countsSeen *[2]int        // the probe's lines and JSON text lines from Counts, read once
 	names      []verdict.WindowName
 
-	mu          sync.Mutex // guards the timeline, which the event reader extends
+	mu          sync.Mutex // guards the timeline and failedCheck, which the event reader extends
 	tl          verdict.Timeline
+	failedCheck []bool // beside tl.Timed, index for index: the condition is a failed check's line's fault
 	transitions []transitionFacts
 	podsKept    []bool
 	reader      *reader
@@ -195,6 +227,12 @@ type runState struct {
 	signalSeen  bool // a signal was already reported as the interrupted reason
 	commands    []*command
 	clusterSeen *report.Cluster
+	// finalWritten says that the final result.json is in place, so that a warning raised after it
+	// is printed and written again (lateWarnings).
+	finalWritten bool
+	// warningsWritten is how many of the run's warnings the last result.json written holds; the
+	// console prints that same record, so these are the warnings already told.
+	warningsWritten int
 }
 
 // sequence performs steps 1 to 13 and returns the value of a panic, if one
@@ -269,6 +307,16 @@ func (s *runState) setUp(ctx context.Context) bool {
 		return false
 	}
 	s.releases = d.Releases()
+	// The setup commands run after the charts are fetched and before the watch
+	// starts (section 7, "Setup commands").
+	res, i := c.Setup(ctx)
+	if s.interrupted(ctx) {
+		return false
+	}
+	if cond, failed := setupCondition(res, i, cfg.SetupWords); failed {
+		s.tl.Before = append(s.tl.Before, cond)
+		return false
+	}
 	// Step 6: the watcher, before the install. It needs the probe's target, and
 	// so the target's Service, only in a transition.
 	wt, err := c.Watcher(ctx, cfg)
@@ -276,23 +324,28 @@ func (s *runState) setUp(ctx context.Context) bool {
 		return s.beforeFail(ctx, err)
 	}
 	s.watcher = wt
+	s.marks.follow(wt.Finishes())
 	if s.interrupted(ctx) {
 		return false
 	}
 	if !s.installStep(ctx) || s.interrupted(ctx) {
 		return false
 	}
-	// Step 8: the probe's target, checked after the install, because the chart's
-	// Service exists only once the previous release is installed.
-	t, err := c.Target(ctx, cfg)
-	if err != nil {
-		return s.beforeFail(ctx, err)
+	// Step 8: the built-in probe's target, checked after the install, because the
+	// chart's Service exists only once the previous release is installed. A custom
+	// probe has none: watch is told of no Service, and whether a workload is
+	// probed is not known (decision 8).
+	if cfg.Probe.HTTP != nil {
+		t, err := c.Target(ctx, cfg)
+		if err != nil {
+			return s.beforeFail(ctx, err)
+		}
+		s.target = t
+		if s.interrupted(ctx) {
+			return false
+		}
 	}
-	s.target = t
-	if s.interrupted(ctx) {
-		return false
-	}
-	s.watcher.UseService(t.Service)
+	s.watcher.UseService(s.target.Service)
 	if s.interrupted(ctx) {
 		return false
 	}
@@ -304,8 +357,9 @@ func (s *runState) installStep(ctx context.Context) bool {
 	began := s.u.Clock.Now()
 	installCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	restartOnly := s.restartOnly()
 	c := s.command(installCtx, s.deployer.Install, func(res deploy.Result) {
-		if _, ok := installCondition(res); ok {
+		if _, ok := installCondition(res, restartOnly); ok {
 			// A failed install has nothing left to wait for.
 			cancel()
 		}
@@ -318,9 +372,9 @@ func (s *runState) installStep(ctx context.Context) bool {
 	if o.panicked != nil {
 		panic(o.panicked)
 	}
-	cond, gives := installCondition(o.result)
+	cond, gives := installCondition(o.result, restartOnly)
 	if !gives && err != nil {
-		cond, gives = verdict.AsCondition(err), true
+		cond, gives = ofTheCandidate(verdict.AsCondition(err), restartOnly), true
 	}
 	if !gives {
 		s.install = inst
@@ -330,14 +384,26 @@ func (s *runState) installStep(ctx context.Context) bool {
 	return false
 }
 
-// startProbe performs step 9: the probe and its first observation. The goroutine that reads the
-// probe's events starts before the probe does, so that no event waits for a reader; it is the
-// only reader of them until the probe is stopped. A start that failed other than by its
-// context has ended the probe itself, and Stop gives the Facts and the error that it kept, also
-// after a signal; a start that gave its context's error left the pod as it is (section 6), and
-// Stop is not asked.
+// restartOnly reports whether the deployer's transitions are a restart alone: a run with no
+// previous release, whose install installs the candidate (section 4).
+func (s *runState) restartOnly() bool {
+	return slices.Equal(s.deployer.Transitions(), []verdict.WindowName{verdict.Restart})
+}
+
+// startProbe performs step 9: the probe and its first observation. A probe that Cluster.Probe
+// cannot make is placed before the install window, and nothing is created or started. The
+// goroutine that reads the probe's events starts before the probe does, so that no event waits
+// for a reader; it is the only reader of them until the probe is stopped. A start that failed
+// other than by its context has ended the probe itself, and Stop gives the Facts and the error
+// that it kept, also after a signal; a start that gave its context's error left the pod as it is
+// (section 6), and Stop is not asked.
 func (s *runState) startProbe(ctx context.Context) bool {
-	p := s.cluster.Probe(s.cfg, s.probeImage, s.ev.file("probe.log"))
+	raw := s.ev.file("probe.log")
+	p, err := s.cluster.Probe(s.cfg, s.probeImage, raw)
+	if err != nil {
+		_ = raw.Close() // the evidence file warns when it cannot be closed
+		return s.beforeFail(ctx, err)
+	}
 	s.probe = p
 	s.readEvents(p.Events())
 	st, err := p.Start(ctx)
@@ -366,6 +432,7 @@ func (s *runState) windows(ctx context.Context) bool {
 	for _, name := range s.names {
 		s.tl.Windows = append(s.tl.Windows, verdict.Window{Name: name})
 	}
+	s.marks.set(s.tl.Windows)
 	// Step 10: the windows are fixed. The goroutine that reads the probe's events has run since
 	// the probe started, and the events it took before are judged against these windows.
 
@@ -377,9 +444,15 @@ func (s *runState) windows(ctx context.Context) bool {
 	if s.interrupted(ctx) {
 		return false
 	}
-	s.tl.Before = append(s.tl.Before, st.Before...)
-	s.tl.Windows[0].Conditions = append(s.tl.Windows[0].Conditions, st.InWindow...)
+	restartOnly := s.restartOnly()
+	for _, c := range st.Before {
+		s.tl.Before = append(s.tl.Before, ofTheCandidate(c, restartOnly))
+	}
+	for _, c := range st.InWindow {
+		s.tl.Windows[0].Conditions = append(s.tl.Windows[0].Conditions, ofTheCandidate(c, restartOnly))
+	}
 	s.tl.Windows[0].End = st.Ended
+	s.marks.set(s.tl.Windows)
 	if st.Settled.IsZero() && len(st.Before) == 0 && len(st.InWindow) == 0 {
 		panic("the install neither settled nor failed")
 	}
@@ -391,6 +464,7 @@ func (s *runState) windows(ctx context.Context) bool {
 	// to its end, whatever happened in it, unless a signal comes first: a signal stops the run at
 	// once (section 10), and limits.steady has no upper bound.
 	s.tl.Windows[1].Start = st.Settled
+	s.marks.set(s.tl.Windows)
 	end := st.Settled.Add(s.cfg.Limits.Steady)
 	select {
 	case <-s.u.Clock.After(end.Sub(s.u.Clock.Now())):
@@ -400,6 +474,7 @@ func (s *runState) windows(ctx context.Context) bool {
 		return false
 	}
 	s.tl.Windows[1].End = end
+	s.marks.set(s.tl.Windows)
 	if !s.decide(false).GoOn {
 		return true
 	}
@@ -407,34 +482,55 @@ func (s *runState) windows(ctx context.Context) bool {
 }
 
 // transitionsStep performs step 12: each transition of the deployer, in order,
-// until one of them does not pass.
+// until one of them does not pass. A deploy runs the deployer's Deploy, a
+// rollback its Rollback, and a restart the watcher's Restart, which stands in
+// for the command; a name that is none of the three is the tool's failure.
 func (s *runState) transitionsStep(ctx context.Context) bool {
 	for i, name := range s.names {
 		// Transition i's window follows the install window, the steady window and the
 		// transitions before it.
 		w := i + windowsBeforeTransitions
 		began := s.tl.Windows[w-1].End // no gap between windows (section 4)
-		if name != verdict.Deploy && name != verdict.Rollback {
-			// This build has no way to start any other transition: the config
-			// rejects the runs that would have one (carry-in T31-2).
+		var rs *watch.Restart          // the restart's outcome, for a restart's window
+		var fn func(ctx context.Context) deploy.Result
+		switch name {
+		case verdict.Deploy:
+			fn = s.deployer.Deploy
+		case verdict.Rollback:
+			fn = s.deployer.Rollback
+		case verdict.Restart:
+			// The restart runs as a command does, so that a panic in it is caught as a command's
+			// is; its end is the end of the transition's command (decision 4). Like a command, it is
+			// bounded by limits.timeout from its start (section 7, "When a command runs too long").
+			rs = &watch.Restart{}
+			fn = func(ctx context.Context) deploy.Result {
+				bounded, cancel := context.WithTimeout(ctx, s.cfg.Limits.Timeout)
+				defer cancel()
+				*rs = s.watcher.Restart(bounded)
+				return deploy.Result{Name: "restart", Ending: deploy.Succeeded, Began: rs.Began, Ended: rs.Ended}
+			}
+		default:
+			// A name this build cannot start never falls through to another transition.
 			s.tl.Before = append(s.tl.Before, verdict.Condition{Code: verdict.InternalError,
 				Text: "the tool cannot start a " + string(name) + " transition"})
 			return true
 		}
 		s.tl.Windows[w].Start = began
+		s.marks.set(s.tl.Windows)
 		s.transitions = append(s.transitions, transitionFacts{tr: watch.Transition{Name: name}})
 		s.podsKept = append(s.podsKept, false)
-		fn := func(ctx context.Context) deploy.Result { return s.deployer.Deploy(ctx) }
-		if name == verdict.Rollback {
-			fn = func(ctx context.Context) deploy.Result { return s.deployer.Rollback(ctx) }
-		}
 		c := s.command(ctx, fn, nil)
 		tr := s.watcher.Transition(ctx, name, began, c.exited)
 		o := s.await(c)
-		// The command ended before the interrupted check below, so its record carries its ending
-		// even when a signal cut the transition (report.Transition's command set).
-		s.transitions[len(s.transitions)-1].cmd = o.result
-		s.transitions[len(s.transitions)-1].tr = tr
+		// The command ended before the interrupted check below, so its record carries its ending,
+		// or the restart's answer, even when a signal cut the transition (report.Transition).
+		last := &s.transitions[len(s.transitions)-1]
+		last.tr = tr
+		if rs != nil {
+			last.restart = rs
+		} else {
+			last.cmd = o.result
+		}
 		if s.interrupted(ctx) {
 			// The transition that a signal cut has none of its own conditions.
 			return false
@@ -442,7 +538,12 @@ func (s *runState) transitionsStep(ctx context.Context) bool {
 		if o.panicked != nil {
 			panic(o.panicked)
 		}
-		s.placeTransition(w, tr, o.result)
+		if rs != nil {
+			s.placeRestart(w, tr, *rs)
+		} else {
+			s.placeTransition(w, tr, o.result)
+		}
+		s.marks.set(s.tl.Windows)
 		if !s.decide(false).GoOn {
 			return true
 		}
@@ -466,6 +567,36 @@ func (s *runState) placeTransition(i int, tr watch.Transition, res deploy.Result
 	}
 	if cmdGives {
 		w.Conditions = append(w.Conditions, cmd)
+	}
+}
+
+// placeRestart fills a restart's window: its finish and end, and the watcher's
+// conditions. The change counts as the command's success only when it was
+// accepted, so that a restart that was not is never judged as a transition
+// that replaced no pod. A refusal, which names its workload, adds
+// restart-failed. A restart cut short with no workload named was stopped by
+// limits.timeout, since a signal's never reaches here: it is a stall, told
+// once with the watcher's own as placeTransition tells a command's, and never
+// a refusal.
+func (s *runState) placeRestart(i int, tr watch.Transition, rs watch.Restart) {
+	const atLimit = "the restart was still running at limits.timeout and the tool stopped it"
+	w := &s.tl.Windows[i]
+	w.Finished, w.End = tr.Finished, tr.Ended
+	stalled := !rs.Accepted && rs.Workload == ""
+	for _, c := range tr.Conditions(rs.Accepted) {
+		if stalled && c.Code == verdict.TransitionStalled {
+			// One stall, told once: the watcher's text and then the restart's.
+			c.Text += "; " + atLimit
+			stalled = false
+		}
+		w.Conditions = append(w.Conditions, c)
+	}
+	switch {
+	case stalled:
+		w.Conditions = append(w.Conditions, verdict.Condition{Code: verdict.TransitionStalled, Text: atLimit})
+	case !rs.Accepted && rs.Workload != "":
+		w.Conditions = append(w.Conditions, verdict.Condition{Code: verdict.RestartFailed,
+			Text: "the API server refused the restart of " + rs.Workload + ": " + rs.Text})
 	}
 }
 
@@ -636,8 +767,9 @@ func (s *runState) interrupted(ctx context.Context) bool {
 }
 
 // place puts a condition of the tool's own where section 10 rule 3 puts it: in
-// the window in progress, whose end is then the moment of judging; or in Before
-// when no window has begun; or in the last window that began.
+// the window in progress, whose end is then the moment of judging and goes into
+// the window marks; or in Before when no window has begun; or in the last
+// window that began.
 func (s *runState) place(c verdict.Condition) {
 	last := -1
 	for i, w := range s.tl.Windows {
@@ -651,26 +783,28 @@ func (s *runState) place(c verdict.Condition) {
 	}
 	if s.tl.Windows[last].End.IsZero() {
 		s.tl.Windows[last].End = s.u.Clock.Now()
+		s.marks.set(s.tl.Windows)
 	}
 	s.tl.Windows[last].Conditions = append(s.tl.Windows[last].Conditions, c)
 }
 
 // decide judges everything the run knows, after asking the event reader for
 // what waits, and keeps the pods of each window's first failure. final says
-// that this is the run's last call, which places the tool's own faults and
-// checks that no window was left open.
+// that this is the run's last call, which places in the last window the tool's
+// own faults and the faults of failed checks' lines that came after it ended,
+// and checks that no window was left open.
 func (s *runState) decide(final bool) verdict.Decision {
 	if h := decideHook; h != nil {
 		h()
 	}
 	s.ask()
-	t := s.timeline()
+	t, failedCheck := s.timeline()
 	t.Now = s.u.Clock.Now()
 	if s.cfg != nil {
 		t.Silence = s.cfg.Limits.Silence
 	}
 	if final {
-		s.moveToolFaults(&t)
+		s.moveToolFaults(&t, failedCheck)
 	}
 	d := verdict.Decide(t)
 	if final {
@@ -683,12 +817,19 @@ func (s *runState) decide(final bool) verdict.Decision {
 	return d
 }
 
-// moveToolFaults places a failure of the tool that came after the last window
-// ended in that window: one that arrives while the probe is being stopped
-// belongs to the last window (section 10 rule 3, carry-in T29-1). Only the
-// tool's own faults move; any other condition after the last window stays
-// where Decide puts it, and is reported as a warning.
-func (s *runState) moveToolFaults(t *verdict.Timeline) {
+// moveToolFaults places in the last window that began each condition of
+// t.Timed at or after that window's end that is a failure of the tool, or the
+// fault of a failed check's line (failedCheck[i] true for t.Timed[i]), so that
+// a failure does not vanish because of the way it was printed (design section
+// 6, section 14 point 29); verdict.Condition carries no such flag. Every
+// other condition after the last window stays where Decide puts it, and the
+// report shows it as a warning. With no begun window, or one still open, it
+// does nothing. It panics unless failedCheck is exactly as long as t.Timed.
+func (s *runState) moveToolFaults(t *verdict.Timeline, failedCheck []bool) {
+	if len(failedCheck) != len(t.Timed) {
+		panic(fmt.Sprintf("moveToolFaults: %d failed-check flags for %d timed conditions; they must run index for index",
+			len(failedCheck), len(t.Timed)))
+	}
 	last := -1
 	for i, w := range t.Windows {
 		if !w.Start.IsZero() {
@@ -700,8 +841,8 @@ func (s *runState) moveToolFaults(t *verdict.Timeline) {
 	}
 	end := t.Windows[last].End
 	var kept []verdict.Condition
-	for _, c := range t.Timed {
-		if c.Code == verdict.InternalError && !c.At.Before(end) {
+	for i, c := range t.Timed {
+		if (c.Code == verdict.InternalError || failedCheck[i]) && !c.At.Before(end) {
 			t.Windows[last].Conditions = append(t.Windows[last].Conditions, c)
 			continue
 		}
@@ -768,8 +909,9 @@ func (s *runState) toolFailed(caught any) {
 	s.decide(true)
 }
 
-// finish performs steps 14 to 16: the final result.json, the window marks, the
-// console text, the clean-up and the exit code. A panic here after the final
+// finish performs steps 14 to 16: the final result.json, the evidence completed
+// (and result.json written again when that added a warning), the console text,
+// the clean-up and the exit code. A panic here after the final
 // file was written is a warning: the verdict was decided already. A panic
 // before it is the refused write. The clean-up runs on every path, so that a
 // report that cannot be written does not leave a cluster behind.
@@ -801,7 +943,8 @@ func (s *runState) finish() (code int) {
 			code = 2
 		}
 	}()
-	if err := s.w.Final(s.record()); err != nil {
+	rec, n := s.recordAndWarnings()
+	if err := s.writeFinal(rec, n); err != nil {
 		// The decided verdict keeps its exit code (section 8): a window that had
 		// already failed is a fail, and everything else is not verified, because a
 		// pass whose result.json could not be written cannot be vouched for. The
@@ -814,18 +957,36 @@ func (s *runState) finish() (code int) {
 		return 2
 	}
 	written = true
-	if err := s.writeMarks(); err != nil {
-		s.warnings.add("the window marks were not written: " + err.Error())
-		if err := s.w.Final(s.record()); err != nil {
+	s.finalWritten = true
+	s.completeEvidence()
+	if len(s.warnings.all()) != s.warningsWritten {
+		next, n := s.recordAndWarnings()
+		if err := s.writeFinal(next, n); err != nil {
 			fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
+		} else {
+			rec = next
 		}
 	}
-	fmt.Fprint(s.o.Stdout, report.Console(s.record()))
+	// The console prints the record last written, so that lateWarnings tells every warning that
+	// came after it.
+	fmt.Fprint(s.o.Stdout, report.Console(rec))
 	return s.decision.Verdict.ExitCode()
 }
 
-// record returns the report's record of the run so far.
-func (s *runState) record() report.Run {
+// writeFinal writes rec, which holds the first n of the run's warnings, as the final result.json,
+// and when that worked keeps n as the warnings told.
+func (s *runState) writeFinal(rec report.Run, n int) error {
+	if err := s.w.Final(rec); err != nil {
+		return err
+	}
+	s.warningsWritten = n
+	return nil
+}
+
+// recordAndWarnings returns the report's record of the run so far, and how many of the run's
+// warnings it holds.
+func (s *runState) recordAndWarnings() (report.Run, int) {
+	warnings := s.warnings.all()
 	lines, jsonText := s.probeCounts()
 	return record(facts{
 		cfg:           s.cfg,
@@ -842,11 +1003,11 @@ func (s *runState) record() report.Run {
 		target:        s.target,
 		images:        s.images,
 		removed:       s.removed,
-		warnings:      s.warnings.all(),
+		warnings:      warnings,
 		cluster:       s.clusterFacts(),
 		version:       s.o.Version,
 		out:           s.w.Dir(),
-	})
+	}), len(warnings)
 }
 
 // clusterFacts is what the cluster says of itself, read once.
@@ -873,36 +1034,6 @@ func (s *runState) probeCounts() (lines, jsonText int) {
 	return s.countsSeen[0], s.countsSeen[1]
 }
 
-// mark is one window's boundaries in windows.json.
-type mark struct {
-	Name     string     `json:"name"`
-	Start    *time.Time `json:"start"`
-	Finished *time.Time `json:"finished"`
-	End      *time.Time `json:"end"`
-}
-
-// writeMarks writes the windows' boundaries to the evidence folder.
-func (s *runState) writeMarks() error {
-	marks := make([]mark, 0, len(s.tl.Windows))
-	for _, w := range s.tl.Windows {
-		marks = append(marks, mark{Name: string(w.Name), Start: timePtr(w.Start),
-			Finished: timePtr(w.Finished), End: timePtr(w.End)})
-	}
-	b, err := json.MarshalIndent(marks, "", "  ")
-	if err != nil {
-		return err
-	}
-	f, err := s.w.Evidence("windows.json")
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
-}
-
 // cleanUpQuietly performs the clean-up and turns a panic of a unit into the
 // warning that a failure after the verdict was decided gives.
 func (s *runState) cleanUpQuietly() {
@@ -914,13 +1045,14 @@ func (s *runState) cleanUpQuietly() {
 	s.cleanUp()
 }
 
-// cleanUp performs step 15: the watcher is stopped, the cluster is deleted
-// unless it was asked for or a signal ended the run, and an error is a
-// warning.
+// cleanUp performs step 15: the watcher is stopped, the warnings raised since
+// the last result.json are told, the cluster is deleted unless it was asked
+// for or a signal ended the run, and an error is a warning.
 func (s *runState) cleanUp() {
 	if s.watcher != nil {
 		s.watcher.Stop()
 	}
+	s.lateWarnings()
 	switch {
 	case s.o.KeepCluster:
 		if s.cluster != nil {
@@ -970,12 +1102,33 @@ func (s *runState) signalAfterTheVerdict() {
 func (s *runState) warnAfterConsole(text string) {
 	s.warnings.add(text)
 	fmt.Fprintln(s.o.Stdout, "warning: "+text)
-	func() {
-		defer func() { _ = recover() }()
-		if err := s.w.Final(s.record()); err != nil {
-			fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
-		}
-	}()
+	s.rewriteFinal()
+}
+
+// lateWarnings prints the warnings that came after the last result.json written, whose record the
+// console printed, and replaces result.json with them, as warnAfterConsole does. The watcher's
+// pod-log followers write and close their evidence files until its Stop, which comes after the
+// console was printed, and a failed write or close is a warning then (rule 10). It does nothing
+// when no warning came, or when the final result.json was never written: that write was refused,
+// the console was not printed, and the exit code says so.
+func (s *runState) lateWarnings() {
+	all := s.warnings.all()
+	if !s.finalWritten || len(all) <= s.warningsWritten {
+		return
+	}
+	for _, text := range all[s.warningsWritten:] {
+		fmt.Fprintln(s.o.Stdout, "warning: "+text)
+	}
+	s.rewriteFinal()
+}
+
+// rewriteFinal writes result.json again with the run's record. A failure is printed and is not
+// allowed to escape: it would panic inside a deferred function.
+func (s *runState) rewriteFinal() {
+	defer func() { _ = recover() }()
+	if err := s.writeFinal(s.recordAndWarnings()); err != nil {
+		fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
+	}
 }
 
 // readerPanic gives the value of a panic that stopped the event reader, once.
@@ -997,9 +1150,10 @@ func panicText(caught any) string {
 	return fmt.Sprint(caught)
 }
 
-// timeline is a copy of the run's timeline, taken under the lock that the
-// event reader holds.
-func (s *runState) timeline() verdict.Timeline {
+// timeline is a copy of the run's timeline, and of which of its timed
+// conditions are a failed check's line's fault (index for index with Timed),
+// taken under the lock that the event reader holds.
+func (s *runState) timeline() (verdict.Timeline, []bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t := s.tl
@@ -1010,7 +1164,7 @@ func (s *runState) timeline() verdict.Timeline {
 	for i := range t.Windows {
 		t.Windows[i].Conditions = slices.Clone(s.tl.Windows[i].Conditions)
 	}
-	return t
+	return t, slices.Clone(s.failedCheck)
 }
 
 // warnings holds what went wrong once the verdict could still change, safe for
@@ -1293,6 +1447,7 @@ func (s *runState) addEvent(ev probe.Event) {
 	}
 	if ev.Fault != nil {
 		s.tl.Timed = append(s.tl.Timed, *ev.Fault)
+		s.failedCheck = append(s.failedCheck, ev.FailedCheck)
 	}
 }
 

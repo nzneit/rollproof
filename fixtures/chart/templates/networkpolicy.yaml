@@ -1,0 +1,34 @@
+{{- if .Values.denyIngress }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orders-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+{{- end }}
+{{- if .Values.allowProbe }}
+{{- if .Values.denyIngress }}
+---
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orders-allow-probe
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: orders
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: rollproof-probe
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: rollproof-probe
+      ports:
+        - port: 8080
+          protocol: TCP
+{{- end }}

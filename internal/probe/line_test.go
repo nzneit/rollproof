@@ -20,16 +20,17 @@ func TestParseLine(t *testing.T) {
 	}{
 		{raw: `{"ok":true}`, kind: Observed, obs: pass},
 		{raw: `{"ok":false,"class":"refused","ms":12.5,"lag":3}`, kind: Observed,
-			obs: verdict.Observation{Written: written, T: written, N: 1, Class: "refused", Ms: 12.5, Lag: 3}},
+			obs: verdict.Observation{Written: written, T: written, N: 1, Class: "refused", Ms: 12.5, Lag: 3, HasMs: true, HasLag: true}},
 		{raw: `   {"ok":true}`, kind: Observed, obs: pass},
 		{raw: "\t{\"ok\":true}   ", kind: Observed, obs: pass},
 		{raw: "{\"ok\":true}\r", kind: Observed, obs: pass},
 		{raw: `{"ok":true,"n":200,"t":"2026-11-13T10:00:07.120Z","ms":41,"lag":6}`, kind: Observed,
-			obs: verdict.Observation{Written: written, T: given, OK: true, N: 200, Ms: 41, Lag: 6}},
+			obs: verdict.Observation{Written: written, T: given, OK: true, N: 200, Ms: 41, Lag: 6, HasMs: true, HasLag: true}},
 		{raw: `{"ok":true,"t":"2026-11-13T11:00:07.12+01:00"}`, kind: Observed,
 			obs: verdict.Observation{Written: written, T: given, OK: true, N: 1}},
 		{raw: `{"ok":true,"t":"2026-11-13T10:00:07.5Z"}`, kind: Observed, obs: pass},
-		{raw: `{"ok":true,"ms":0,"lag":0}`, kind: Observed, obs: pass},
+		{raw: `{"ok":true,"ms":0,"lag":0}`, kind: Observed,
+			obs: verdict.Observation{Written: written, T: written, OK: true, N: 1, HasMs: true, HasLag: true}},
 
 		// Log text.
 		{raw: `starting`, kind: Text},
@@ -109,7 +110,7 @@ func TestParseLine(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.raw, func(t *testing.T) {
-			got := ParseLine(tc.raw, written)
+			got := ParseLine(tc.raw, written, time.Time{})
 			if got.Kind != tc.kind {
 				t.Fatalf("Kind = %v, want %v (fault %q)", got.Kind, tc.kind, got.Fault)
 			}
@@ -117,7 +118,8 @@ func TestParseLine(t *testing.T) {
 			case Observed:
 				o := got.Obs
 				if !o.Written.Equal(tc.obs.Written) || !o.T.Equal(tc.obs.T) || o.OK != tc.obs.OK ||
-					o.N != tc.obs.N || o.Class != tc.obs.Class || o.Ms != tc.obs.Ms || o.Lag != tc.obs.Lag {
+					o.N != tc.obs.N || o.Class != tc.obs.Class || o.Ms != tc.obs.Ms || o.Lag != tc.obs.Lag ||
+					o.HasMs != tc.obs.HasMs || o.HasLag != tc.obs.HasLag {
 					t.Errorf("Obs = %+v, want %+v", o, tc.obs)
 				}
 			case Invalid:
@@ -131,6 +133,98 @@ func TestParseLine(t *testing.T) {
 				if got.Fault != "" || got.Obs != (verdict.Observation{}) {
 					t.Errorf("a %v line carries %+v", got.Kind, got)
 				}
+			}
+		})
+	}
+}
+
+func TestParseLineFloorOfT(t *testing.T) {
+	asked := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	written := asked.Add(30 * time.Second)
+	line := func(tt time.Time) string { return `{"ok":false,"t":"` + tt.Format(time.RFC3339Nano) + `"}` }
+	for _, c := range []struct {
+		name  string
+		t     time.Time
+		asked time.Time
+		kind  Kind
+	}{
+		{"after the ask", asked.Add(time.Second), asked, Observed},
+		{"less than the bound before the ask", asked.Add(-time.Second), asked, Observed},
+		{"the bound before the ask", asked.Add(-ClockBound), asked, Observed},
+		{"more than the bound before the ask", asked.Add(-ClockBound - time.Nanosecond), asked, Invalid},
+		{"an hour before the ask", asked.Add(-time.Hour), asked, Invalid},
+		{"no ask known", asked.Add(-time.Hour), time.Time{}, Observed},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := ParseLine(line(c.t), written, c.asked)
+			if got.Kind != c.kind {
+				t.Fatalf("Kind = %v, want %v (fault %q)", got.Kind, c.kind, got.Fault)
+			}
+			if c.kind == Invalid && got.Fault != "t is more than 2s earlier than the moment the tool asked for the probe's pod" {
+				t.Errorf("Fault = %q", got.Fault)
+			}
+			if !got.FailedCheck {
+				t.Error("FailedCheck = false for a line whose ok is false")
+			}
+		})
+	}
+}
+
+func TestParseLineHasMsAndLag(t *testing.T) {
+	written := time.Date(2026, 11, 13, 10, 0, 7, 500_000_000, time.UTC)
+	for _, c := range []struct {
+		raw           string
+		hasMs, hasLag bool
+		ms, lag       float64
+	}{
+		{`{"ok":true}`, false, false, 0, 0},
+		{`{"ok":true,"ms":0,"lag":0}`, true, true, 0, 0},
+		{`{"ok":false,"ms":12.5}`, true, false, 12.5, 0},
+		{`{"ok":true,"n":200,"lag":6}`, false, true, 0, 6},
+	} {
+		t.Run(c.raw, func(t *testing.T) {
+			got := ParseLine(c.raw, written, time.Time{})
+			if got.Kind != Observed {
+				t.Fatalf("Kind = %v, want Observed (fault %q)", got.Kind, got.Fault)
+			}
+			o := got.Obs
+			if o.HasMs != c.hasMs || o.HasLag != c.hasLag || o.Ms != c.ms || o.Lag != c.lag {
+				t.Errorf("HasMs %v, HasLag %v, Ms %v, Lag %v; want %v, %v, %v, %v",
+					o.HasMs, o.HasLag, o.Ms, o.Lag, c.hasMs, c.hasLag, c.ms, c.lag)
+			}
+		})
+	}
+}
+
+func TestParseLineFailedCheck(t *testing.T) {
+	written := time.Date(2026, 11, 13, 10, 0, 7, 500_000_000, time.UTC)
+	for _, c := range []struct {
+		raw    string
+		kind   Kind
+		failed bool
+	}{
+		{`{"ok":false}`, Observed, true},
+		{`{"ok":true}`, Observed, false},
+		{`{"ok":false,"n":2}`, Invalid, true},
+		{`{"ok":false,"t":"2026-11-14T10:00:00Z"}`, Invalid, true},
+		{`{"ok":false,"ms":-1}`, Invalid, true},
+		{`{"ok":false,"v":2}`, Invalid, true},
+		{`{"ok":false,"ok":true}`, Invalid, true},
+		{`{"ok":true,"ok":false}`, Invalid, true},
+		{`{"ok":true,"ok":true}`, Invalid, false},
+		{`{"ok":true,"n":0}`, Invalid, false},
+		{`{"ok":"false"}`, Invalid, false},
+		{`{"ok":null,"ok":false}`, Invalid, true},
+		{`{"ok":false} trailing`, Invalid, false},
+		{`{"ok":fals`, Invalid, false},
+		{`2026-11-13 10:00:07 {"ok":false}`, Invalid, false},
+		{`{"detail":{"ok":false}}`, JSONText, false},
+		{`starting`, Text, false},
+	} {
+		t.Run(c.raw, func(t *testing.T) {
+			got := ParseLine(c.raw, written, time.Time{})
+			if got.Kind != c.kind || got.FailedCheck != c.failed {
+				t.Errorf("Kind %v, FailedCheck %v; want %v, %v", got.Kind, got.FailedCheck, c.kind, c.failed)
 			}
 		})
 	}

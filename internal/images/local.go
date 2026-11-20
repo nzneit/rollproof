@@ -4,12 +4,9 @@ package images
 
 import (
 	"context"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-
-	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
 	"rollproof/internal/cluster"
 	"rollproof/internal/config"
@@ -39,21 +36,5 @@ func storeLocal(ctx context.Context, c *cluster.Cluster, entry, local string) (c
 		return fail("the engine could not save " + local + ": " + lastLine(out, err))
 	}
 
-	m, err := tarball.LoadManifest(func() (io.ReadCloser, error) { return os.Open(file) })
-	if err != nil {
-		return fail("the engine's archive of " + local + " cannot be read: " + err.Error())
-	}
-	if len(m) > 1 {
-		return fail("the engine's archive of " + local + " holds more than one image")
-	}
-	img, err := tarball.ImageFromPath(file, nil)
-	if err != nil {
-		return fail("the engine's archive of " + local + " cannot be read: " + err.Error())
-	}
-
-	digest, err := pushImage(ctx, c.PushRegistry, entry, img)
-	if err != nil {
-		return fail("push to the run's registry failed: " + err.Error())
-	}
-	return config.ImageRef{Repository: cluster.TestHost + "/" + entry, Digest: digest}, nil
+	return storeArchive(ctx, c, entry, file, "the engine's archive of "+local)
 }

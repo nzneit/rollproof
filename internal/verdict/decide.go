@@ -43,6 +43,8 @@ type Reason struct {
 // were written in or after it; only a transition's window counts them, because the transition may
 // be what cut them (plan ruling 10). FirstFailure is zero when nothing failed. LastFailure is the
 // latest time at which a check that failed in this window began, zero when nothing failed.
+// SlowestMs and LagMs are the slowest check that passed and the furthest lag the probe reported;
+// each is zero and means nothing when HasSlowest or HasLag is false.
 type WindowResult struct {
 	Name         WindowName
 	Start, End   time.Time
@@ -56,6 +58,12 @@ type WindowResult struct {
 	LastFailure  time.Time
 	SlowestMs    float64
 	LagMs        float64
+	// HasSlowest says a passed line counted in the window gave ms, so SlowestMs is a slowest check
+	// that passed. It is false when every check failed or no passed line gave it.
+	HasSlowest bool
+	// HasLag says a line counted in the window gave lag, passed or failed, so LagMs is the furthest
+	// lag reported. It is false when no line gave it.
+	HasLag bool
 }
 
 // Decision is the verdict so far. GoOn says whether the run starts its next transition. Uncounted

@@ -448,11 +448,28 @@ func Load(path string, env func(name string) (string, bool)) (*Config, error) {
 		return nil, err
 	}
 	c.Path, c.Dir = real, filepath.Dir(real)
+	c.SetupWords = firstWords(f.Setup)
 	absolutePaths(c)
 	if err := validate(c, x); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// firstWords returns the first word of each command, or "" for a command with none; Load gives it
+// the commands as the file writes them, before any ${…} form is filled. It returns nil for no
+// commands.
+func firstWords(commands [][]string) []string {
+	if len(commands) == 0 {
+		return nil
+	}
+	words := make([]string, len(commands))
+	for i, cmd := range commands {
+		if len(cmd) > 0 {
+			words[i] = cmd[0]
+		}
+	}
+	return words
 }
 
 // passwordForm is the one form that a registry's password may take in the file.

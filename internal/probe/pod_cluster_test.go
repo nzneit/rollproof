@@ -9,14 +9,17 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"rollproof/internal/cluster"
 	"rollproof/internal/images"
+	"rollproof/internal/verdict"
 )
 
 // TestMain lets this test binary be the probe's image: started as
@@ -154,4 +157,143 @@ read:
 		t.Errorf("clock difference %v, more than %v", facts.ClockDifference, ClockBound)
 	}
 	t.Logf("clock check: the first observation was read %v after the runtime stamped it", facts.ClockDifference)
+}
+
+// TestCustomPodOnACluster runs a custom probe in a namespace that enforces the restricted Pod
+// Security level, one whose env the API server refuses, and one whose env names a Secret that does
+// not exist. The first shows the pod's settings, its token's mount and its evidence; the second is
+// a refused pod at once; the third names the kubelet's message for the missing Secret.
+func TestCustomPodOnACluster(t *testing.T) {
+	ctx := context.Background()
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := elf.Open(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range f.Progs {
+		if p.Type == elf.PT_INTERP {
+			t.Fatal("the test binary is not static: run this test with env CGO_ENABLED=0")
+		}
+	}
+	f.Close()
+
+	engine, err := cluster.CheckRunner(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const name = "rollproof-test-custom-probe"
+	c, err := cluster.Create(ctx, cluster.Spec{Name: name, RunDir: cluster.RunDir(name), Workers: 1, Namespace: "custom-probe-test", Timeout: 5 * time.Minute}, engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := c.Delete(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+	stored, err := images.Store(ctx, c, bin, nil, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := c.Client()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The namespace enforces the restricted Pod Security level (section 6): a pod the tool writes
+	// with the built-in probe's settings is admitted there.
+	ns, err := client.CoreV1().Namespaces().Get(ctx, cluster.ProbeNamespace, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns.Labels["pod-security.kubernetes.io/enforce"] = "restricted"
+	if _, err := client.CoreV1().Namespaces().Update(ctx, ns, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	o := HTTPOptions{URL: "http://" + c.NodeRegistry + "/v2/", Rate: 20, Timeout: 2 * time.Second, ExpectMin: 200, ExpectMax: 299}
+	custom := func() PodOptions {
+		return PodOptions{
+			Client: client, Image: stored.Probe.Ref(), Command: []string{"/rollproof"}, Args: HTTPArgs(o),
+			ServiceAccountToken: true, Drain: 10 * time.Second, StartTimeout: 30 * time.Second,
+			Raw: &bytes.Buffer{}, Now: time.Now,
+		}
+	}
+
+	// 1. A pod that meets the restricted level starts, mounts the default service account's
+	// token, and its evidence holds the pod as the API wrote it.
+	var ev evidenceFiles
+	o1 := custom()
+	o1.StartTimeout = 60 * time.Second
+	o1.Evidence = ev.open
+	p := NewPod(o1)
+	if _, err := p.Start(ctx); err != nil {
+		t.Fatalf("Start = %v; the pod does not meet the restricted Pod Security level", err)
+	}
+	t.Cleanup(func() { p.Stop(context.Background()) })
+	pod, err := client.CoreV1().Pods(cluster.ProbeNamespace).Get(ctx, "probe", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounted := false
+	for _, c := range pod.Spec.Containers {
+		if c.Name != "probe" {
+			continue
+		}
+		for _, m := range c.VolumeMounts {
+			if m.MountPath == "/var/run/secrets/kubernetes.io/serviceaccount" {
+				mounted = true
+			}
+		}
+	}
+	if !mounted {
+		t.Errorf("the probe's container mounts %+v, want the default service account's token", pod.Spec.Containers)
+	}
+	facts, err := p.Stop(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !facts.StoppedWhenAsked {
+		t.Error("the probe did not stop when asked")
+	}
+	if got, _ := ev.get("probe-pod.json"); !strings.Contains(got, `"automountServiceAccountToken": true`) {
+		t.Errorf("probe-pod.json = %q, want the pod with the token mounted", got)
+	}
+
+	// 2. A valueFrom with two sources is a pod the API server refuses.
+	o2 := custom()
+	o2.Env = []corev1.EnvVar{{Name: "TOKEN", ValueFrom: &corev1.EnvVarSource{
+		SecretKeyRef:    &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "probe-token"}, Key: "token"},
+		ConfigMapKeyRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "probe"}, Key: "token"},
+	}}}
+	p2 := NewPod(o2)
+	t.Cleanup(func() { p2.Stop(context.Background()) })
+	// Start's own context bounds it, and the test waits for it before the cleanup's Stop.
+	startCtx, cancelStart := context.WithTimeout(ctx, 10*time.Second)
+	_, err = p2.Start(startCtx)
+	cancelStart()
+	got := condition(err)
+	if got.Code != verdict.ProbeNotStarted || !strings.HasPrefix(got.Text, "the API server refused the probe's pod: ") ||
+		!strings.Contains(got.Text, "may not have more than one field specified at a time") {
+		t.Errorf("Start = %v, want probe-not-started with the API server's text", err)
+	}
+
+	// 3. A Secret that does not exist keeps the container waiting; the text names its reason and
+	// the kubelet's message (Review Focus 2).
+	o3 := custom()
+	o3.Env = []corev1.EnvVar{{Name: "TOKEN", ValueFrom: &corev1.EnvVarSource{
+		SecretKeyRef: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "probe-token"}, Key: "token"},
+	}}}
+	p3 := NewPod(o3)
+	t.Cleanup(func() { p3.Stop(context.Background()) })
+	_, err = p3.Start(ctx)
+	got = condition(err)
+	if got.Code != verdict.ProbeNotStarted || !strings.Contains(got.Text, "CreateContainerConfigError") ||
+		!strings.Contains(got.Text, `secret "probe-token" not found`) {
+		t.Fatalf("Start = %v, want probe-not-started that names the missing Secret", err)
+	}
+	t.Logf("case 3: %s", got.Text)
 }

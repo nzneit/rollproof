@@ -332,8 +332,30 @@ func TestDeleteTwice(t *testing.T) {
 	}
 }
 
+// wantLogs fails the test unless dir holds kind's own log files and the logs of the cluster's
+// control-plane node, and no registry.log.
+func wantLogs(t *testing.T, dir, name string) {
+	t.Helper()
+	version := filepath.Join(dir, "kind", "kind-version.txt")
+	if _, err := os.Stat(version); err != nil {
+		t.Errorf("the evidence has no kind/kind-version.txt: %v; it holds %v", err, filesUnder(t, dir))
+	}
+	prefix := "kind/" + name + "-control-plane/"
+	found := false
+	for _, f := range filesUnder(t, dir) {
+		found = found || strings.HasPrefix(f, prefix)
+	}
+	if !found {
+		t.Errorf("the evidence holds no file under %s: %v", prefix, filesUnder(t, dir))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "registry.log")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the evidence holds registry.log for a registry that never started: %v", err)
+	}
+}
+
 // Keep: a step that fails after kind has made the cluster (a registry image that exists nowhere)
-// leaves nothing without Keep, and leaves the nodes and the run's folder with it.
+// leaves nothing without Keep, and leaves the nodes and the run's folder with it. Neither failure
+// leaves a registry.log: the registry never started, so both take kind's logs only.
 func TestKeepAfterFailure(t *testing.T) {
 	ctx := context.Background()
 	e := testEngine(t)
@@ -355,6 +377,8 @@ func TestKeepAfterFailure(t *testing.T) {
 
 	s := testSpec("nokeep", 1)
 	s.RegistryImage = missing
+	evidence := t.TempDir()
+	s.Evidence = evidenceDir(evidence)
 	_, err := Create(ctx, s, e)
 	if err == nil {
 		t.Fatal("Create gave no error, want cluster-failed in start the registry")
@@ -362,6 +386,7 @@ func TestKeepAfterFailure(t *testing.T) {
 	if c := verdict.AsCondition(err); c.Code != verdict.ClusterFailed || !strings.HasPrefix(c.Text, "start the registry") {
 		t.Fatalf("Create = %v, want cluster-failed in start the registry", err)
 	}
+	wantLogs(t, evidence, s.Name)
 	if left := containers(s.Name); len(left) != 0 {
 		t.Errorf("containers left without Keep: %v", left)
 	}
@@ -372,6 +397,8 @@ func TestKeepAfterFailure(t *testing.T) {
 	kept := testSpec("keep", 1)
 	kept.RegistryImage = missing
 	kept.Keep = true
+	keptEvidence := t.TempDir()
+	kept.Evidence = evidenceDir(keptEvidence)
 	t.Cleanup(func() { remove(ctx, e, kept.Name, kept.RunDir) })
 	_, err = Create(ctx, kept, e)
 	if err == nil {
@@ -380,6 +407,7 @@ func TestKeepAfterFailure(t *testing.T) {
 	if c := verdict.AsCondition(err); c.Code != verdict.ClusterFailed || !strings.HasPrefix(c.Text, "start the registry") {
 		t.Fatalf("Create with Keep = %v, want cluster-failed in start the registry", err)
 	}
+	wantLogs(t, keptEvidence, kept.Name)
 	if got, want := containers(kept.Name), []string{kept.Name + "-control-plane", kept.Name + "-worker"}; !slices.Equal(got, want) {
 		t.Errorf("containers with Keep: %v, want %v", got, want)
 	}

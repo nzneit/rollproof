@@ -1,12 +1,14 @@
 // Package watch tells what happens to the watched workloads of one namespace: when an install is
 // ready, when a transition has finished or stalled, and which pods were replaced. It hides the
-// rollout rules of each kind, pod ownership and the settle time. It changes nothing in the
-// cluster. A workload that matches the selector at any moment of a transition is watched in it
-// for the rest of that transition.
+// rollout rules of each kind, pod ownership and the settle time. The only change it makes in the
+// cluster is the restart of the watched workloads. A workload that matches the selector at any
+// moment of a transition is watched in it for the rest of that transition.
 package watch
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -43,7 +45,7 @@ type TrackerOptions struct {
 // zero for a stall. Ended is when its window ended. Missed is when the watch of the cluster first
 // missed changes in the window, zero when it missed none. The string lists are sentences for the
 // report: what started the settle time again, what is not complete, which pods could not be
-// scheduled.
+// scheduled. LastEvent is the last event of the namespace about what a stall names.
 type Transition struct {
 	Name                                      verdict.WindowName
 	Began, Finished, Ended, Missed            time.Time
@@ -52,6 +54,12 @@ type Transition struct {
 	Unsupported                               []Workload
 	Workloads                                 []Count
 	Replaced                                  bool
+	// LastEvent is the last event of the namespace about what a stall names, when the window
+	// stalled: a watched workload that is not complete, a ReplicaSet of such a Deployment, or a
+	// pod of one that is not ready or is stopping, written KIND/NAME: REASON: MESSAGE with kind
+	// in lower case and line breaks as spaces. Empty when it did not stall, no such event
+	// exists, or the events could not be listed in the settle time.
+	LastEvent string
 }
 
 // Count is one workload in one transition: its pods at the start, how many of those are gone, how
@@ -133,6 +141,9 @@ type podRecord struct {
 type transition struct {
 	t      Transition
 	exited time.Time // when its command exited; zero until then
+	// finishes counts the times it came to be finished, also when a settle restart and a new
+	// finish fall at one moment and leave Finished as it was.
+	finishes int
 	// atStart holds the pods that the transition may replace: those recorded at Begin whose
 	// first sight is at or before its start and that were not gone by then.
 	atStart map[types.UID]bool
@@ -147,6 +158,11 @@ type transition struct {
 	// unsupported holds the workloads watched at some moment of the transition whose object at
 	// that moment did not update by rolling.
 	unsupported map[Workload]bool
+	// named holds, for a transition whose window ended as a stall, the objects its Incomplete
+	// lines name and the ReplicaSets the Tracker maps to each named Deployment, each as kind/name
+	// with the kind in lower case. It is taken when the window ends, so it names exactly what the
+	// details name. Nil while the window is open and for a window that did not stall.
+	named map[string]bool
 }
 
 // NewTracker returns a Tracker with nothing in it. It does no I/O and reads no clock: it is told
@@ -337,6 +353,17 @@ func (t *Tracker) windowOpen() bool {
 	return tr != nil && tr.t.Ended.IsZero()
 }
 
+// openFinish gives the open transition's name and Finished, and how many times it has come to be
+// finished. At is zero and the count is 0 when no window is open; At is zero when the open
+// transition is not finished now.
+func (t *Tracker) openFinish() (Finish, int) {
+	if !t.windowOpen() {
+		return Finish{}, 0
+	}
+	tr := t.current()
+	return Finish{Name: tr.t.Name, At: tr.t.Finished}, tr.finishes
+}
+
 // State returns the transition so far, and whether its window has ended: it finished and the
 // settle time then passed with no change, or it stalled. The Transition also has its counts for
 // every watched workload, whether it replaced pods, what is not complete at a stall, which pods
@@ -355,6 +382,17 @@ func (t *Tracker) State(now time.Time) (Transition, bool) {
 		t.details(&s, now)
 	}
 	return s.copied(), !s.Ended.IsZero()
+}
+
+// stallObjects returns the objects that the last transition's stall names, each as kind/name with
+// the kind in lower case, as the stall's details took them: the workloads, ReplicaSets and pods
+// its Incomplete lines name. It is empty when the last transition did not stall.
+func (t *Tracker) stallObjects() map[string]bool {
+	tr := t.current()
+	if tr == nil || !tr.t.Stalled {
+		return nil
+	}
+	return tr.named
 }
 
 // endIfDue ends the open transition's window when its time has come by at: Settle after it
@@ -378,20 +416,20 @@ func (t *Tracker) endIfDue(at time.Time) {
 }
 
 // endWindow ends the open transition's window at end, as a stall when stalled holds. It keeps the
-// transition's counts and, for a stall, the details of what is not complete, from the records as
-// they are now; later changes of the records cannot alter them. When endIfDue ends the window,
-// the records hold every change told before end and none told at end, because the window is half
-// open. A pod created or gone exactly at end is then left out, although "at or before the bound"
-// would count it. That fails closed: it can only lower the counts, so no-pod-replaced is given
-// more often, not less. When a change in the settle time stalls the window, the records include
-// that change.
+// transition's counts and, for a stall, the details of what is not complete and the objects those
+// details name, from the records as they are now; later changes of the records cannot alter them.
+// When endIfDue ends the window, the records hold every change told before end and none told at
+// end, because the window is half open. A pod created or gone exactly at end is then left out,
+// although "at or before the bound" would count it. That fails closed: it can only lower the
+// counts, so no-pod-replaced is given more often, not less. When a change in the settle time
+// stalls the window, the records include that change.
 func (t *Tracker) endWindow(end time.Time, stalled bool) {
 	tr := t.current()
 	tr.t.Ended = end
 	tr.t.Stalled = stalled
 	tr.t = t.summary(tr, end)
 	if stalled {
-		t.details(&tr.t, end)
+		tr.named = t.details(&tr.t, end)
 	}
 }
 
@@ -456,6 +494,7 @@ func (t *Tracker) afterChange(c change, at time.Time) {
 	}
 	if t.finished() {
 		tr.t.Finished = at
+		tr.finishes++
 	}
 }
 
@@ -695,4 +734,39 @@ func podReady(p *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// podEvents gives a PodEvent for each moment of each pod record: created at its first Set, ready
+// at its first ready Set, deleted at the first Set that showed a deletion timestamp, or at its
+// Gone when none did, and gone. A pod known only from its Gone has no Set, so it has a gone alone.
+// The order is that of PodEvents.
+func (t *Tracker) podEvents() []PodEvent {
+	var events []PodEvent
+	for _, p := range t.pods {
+		var workload string
+		if w, ok := t.podWorkload(p); ok {
+			workload = w.String()
+		}
+		add := func(at time.Time, kind string) {
+			if !at.IsZero() {
+				events = append(events, PodEvent{At: at, Pod: p.name, Workload: workload, Kind: kind})
+			}
+		}
+		if p.shown {
+			add(p.firstSeen, "created")
+			add(p.firstReady, "ready")
+			if p.deleting.IsZero() {
+				add(p.gone, "deleted")
+			} else {
+				add(p.deleting, "deleted")
+			}
+		}
+		add(p.gone, "gone")
+	}
+	order := []string{"created", "ready", "deleted", "gone"}
+	slices.SortFunc(events, func(a, b PodEvent) int {
+		return cmp.Or(a.At.Compare(b.At), cmp.Compare(a.Pod, b.Pod),
+			cmp.Compare(slices.Index(order, a.Kind), slices.Index(order, b.Kind)))
+	})
+	return events
 }

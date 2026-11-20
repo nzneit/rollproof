@@ -118,8 +118,8 @@ func checkGap(t *testing.T, events []Event, before int, want []time.Time, after 
 	for i, e := range events {
 		if gap := i >= before && i < before+len(want); gap {
 			if f := e.Fault; f == nil || f.Code != verdict.InternalError || !f.At.Equal(want[i-before]) ||
-				f.Text != "the probe's log could not be followed without a gap" {
-				t.Errorf("event %d = %+v, want internal-error for the gap at %v", i, e, want[i-before])
+				f.Text != "the probe's log could not be followed without a gap" || e.FailedCheck {
+				t.Errorf("event %d = %+v, want internal-error for the gap at %v, not a failed check", i, e, want[i-before])
 			}
 		} else if e.Obs == nil {
 			t.Errorf("event %d = %+v, want an observation", i, e)
@@ -151,6 +151,40 @@ func TestFollowLineKinds(t *testing.T) {
 	}
 	if lines, jsonText := f.counts(); lines != 5 || jsonText != 1 {
 		t.Errorf("counts = %d, %d; want 5 lines, 1 JSON text", lines, jsonText)
+	}
+}
+
+func TestFollowFailedCheckAndFloor(t *testing.T) {
+	early := logAt(-2500).Format(time.RFC3339Nano)
+	l := newFakeLog(logLine(logAt(100), `{"ok":true}`) +
+		logLine(logAt(200), `{"ok":false,"t":"`+early+`"}`) +
+		logLine(logAt(250), `{"ok":true,"t":"`+early+`"}`) +
+		logLine(logAt(300), `{"ok":true,"n":0}`) +
+		logAt(400).Format(time.RFC3339Nano) + ` {"ok":false,"n":2}`) // a final piece with no line end
+	quickPolling(t)
+	var events []Event
+	f := newFollower(l.open, l.running, io.Discard, func() time.Time { return logAt(60_000) }, func(e Event) { events = append(events, e) })
+	f.podAsked = logAt(0)
+	f.stopAsked()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	f.run(ctx)
+	if len(events) != 4 {
+		t.Fatalf("events = %+v, want an observation and three faults; the final piece is not judged", events)
+	}
+	if e := events[1]; e.Fault == nil || e.Fault.Code != verdict.ProbeLineInvalid || !e.Fault.At.Equal(logAt(200)) ||
+		!strings.Contains(e.Fault.Text, "earlier than the moment the tool asked") || !e.FailedCheck {
+		t.Errorf("event 1 = %+v, want a failed check's fault for the early t, at the line's stamp", e)
+	}
+	if e := events[2]; e.Fault == nil || e.Fault.Code != verdict.ProbeLineInvalid || !e.Fault.At.Equal(logAt(250)) ||
+		!strings.Contains(e.Fault.Text, "earlier than the moment the tool asked") || e.FailedCheck {
+		t.Errorf("event 2 = %+v, want the early t of a passed check as a fault that is not a failed check's", e)
+	}
+	if e := events[3]; e.Fault == nil || e.FailedCheck {
+		t.Errorf("event 3 = %+v, want a fault that is not a failed check's", e)
+	}
+	if events[0].FailedCheck {
+		t.Error("an observation carries FailedCheck")
 	}
 }
 

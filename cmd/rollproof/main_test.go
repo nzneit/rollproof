@@ -20,6 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"k8s.io/client-go/kubernetes/fake"
+
 	"rollproof/internal/cluster"
 	"rollproof/internal/config"
 	"rollproof/internal/deploy"
@@ -185,10 +188,10 @@ deploy:
     release: orders
     previous: { chart: ./chart }
     candidate: { chart: ./chart }
+registries: [{ host: registry.example }]
 probe:
-  custom:
-    image: registry.example/tools/busybox@sha256:` + strings.Repeat("0", 64) + `
-    command: [sh, -c, "sleep 3600"]
+  http:
+    url: http://orders.orders.svc/
 `
 	if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
@@ -200,7 +203,7 @@ probe:
 			t.Fatalf("%s: exit %d, want 2\n%s", flag, code, stderr.String())
 		}
 		final, codes, texts := readResult(t, out)
-		if !final || len(codes) != 1 || codes[0] != "config-rejected" || texts[0] != "not built yet: probe.custom" {
+		if !final || len(codes) != 1 || codes[0] != "config-rejected" || texts[0] != "not built yet: registries" {
 			t.Errorf("%s: final %v, reasons %q %q", flag, final, codes, texts)
 		}
 	}
@@ -212,20 +215,32 @@ func TestFailedClientError(t *testing.T) {
 	kept := "the cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x"
 	left := reached + ". Parts of the run may be left behind; the next run with this name removes them."
 	cleanUp := errors.New("the engine is gone")
+	noLogs := "; the cluster's logs were not all collected: no nodes"
 	for _, tc := range []struct {
-		name       string
-		keep       bool
-		cancelled  bool
-		deleteErr  error
-		wantCalls  int
-		wantText   string
-		wantJoined string
+		name        string
+		keep        bool
+		cancelled   bool
+		collectErr  error
+		deleteErr   error
+		wantCollect int
+		wantCalls   int
+		wantOrder   []string
+		wantText    string
+		wantJoined  string
 	}{
-		{"kept", true, false, cleanUp, 0, reached + ". The cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x", ""},
-		{"the run's context has ended", false, true, cleanUp, 0, reached, ""},
-		{"the delete succeeds", false, false, nil, 1, reached, ""},
-		{"the delete fails", false, false, cleanUp, 1, left,
+		{"kept", true, false, nil, cleanUp, 1, 0, []string{"collect"},
+			reached + ". The cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x", ""},
+		{"the run's context has ended", false, true, nil, cleanUp, 0, 0, nil, reached, ""},
+		{"the run's context has ended, and the cluster is kept", true, true, nil, cleanUp, 0, 0, nil,
+			reached + ". The cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x", ""},
+		{"the delete succeeds", false, false, nil, nil, 1, 1, []string{"collect", "delete"}, reached, ""},
+		{"the delete fails", false, false, nil, cleanUp, 1, 1, []string{"collect", "delete"}, left,
 			"the clean-up after it failed: the engine is gone"},
+		{"the logs cannot be collected", false, false, errors.New("no nodes"), nil, 1, 1,
+			[]string{"collect", "delete"}, reached + noLogs, ""},
+		{"the logs cannot be collected, and the cluster is kept", true, false, errors.New("no nodes"), nil, 1, 0,
+			[]string{"collect"},
+			reached + noLogs + ". The cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -234,14 +249,28 @@ func TestFailedClientError(t *testing.T) {
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
+			var order []string
+			collectCalls := 0
+			collect := func(context.Context) error {
+				order = append(order, "collect")
+				collectCalls++
+				return tc.collectErr
+			}
 			calls := 0
 			del := func(context.Context) error {
+				order = append(order, "delete")
 				calls++
 				return tc.deleteErr
 			}
-			err := failedClientError(ctx, tc.keep, kept, del, clientErr)
+			err := failedClientError(ctx, tc.keep, kept, collect, del, clientErr)
+			if collectCalls != tc.wantCollect {
+				t.Errorf("the collection was called %d times, want %d", collectCalls, tc.wantCollect)
+			}
 			if calls != tc.wantCalls {
 				t.Errorf("the delete was called %d times, want %d", calls, tc.wantCalls)
+			}
+			if diff := cmp.Diff(tc.wantOrder, order); diff != "" {
+				t.Errorf("the calls (-want +got):\n%s", diff)
 			}
 			if err == nil {
 				t.Fatal("no error")
@@ -252,6 +281,57 @@ func TestFailedClientError(t *testing.T) {
 			}
 			if tc.wantJoined != "" && !strings.Contains(err.Error(), tc.wantJoined) {
 				t.Errorf("the error is %q, want it to hold %q", err.Error(), tc.wantJoined)
+			}
+		})
+	}
+}
+
+// TestStoreFailedTakesTheLogs pins that images.Store's error takes the cluster's logs for a
+// cluster-failed error while the run's context has not ended, and only then; a collection's error
+// adds its sentence to the condition's text.
+func TestStoreFailedTakesTheLogs(t *testing.T) {
+	failed := verdict.Condition{Code: verdict.ClusterFailed, Text: "the probe's image: boom"}
+	internal := verdict.Condition{Code: verdict.InternalError, Text: "boom"}
+	noLogs := "; the cluster's logs were not all collected: no nodes"
+	for _, tc := range []struct {
+		name       string
+		err        error
+		cancelled  bool
+		collectErr error
+		wantCalls  int
+		wantErr    error  // the error that must come back unchanged
+		wantText   string // the condition's text, when the error is replaced
+	}{
+		{"a cluster-failed error", failed, false, nil, 1, failed, ""},
+		{"the logs cannot be collected", failed, false, errors.New("no nodes"), 1, nil, failed.Text + noLogs},
+		{"an internal-error error", internal, false, nil, 0, internal, ""},
+		{"the run's context has ended", failed, true, nil, 0, failed, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.cancelled {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			calls := 0
+			collect := func(context.Context) error {
+				calls++
+				return tc.collectErr
+			}
+			got := storeFailed(ctx, tc.err, collect)
+			if calls != tc.wantCalls {
+				t.Errorf("the collection was called %d times, want %d", calls, tc.wantCalls)
+			}
+			if tc.wantErr != nil {
+				if got != tc.wantErr {
+					t.Errorf("storeFailed = %v, want the error unchanged", got)
+				}
+				return
+			}
+			c := verdict.AsCondition(got)
+			if c.Code != verdict.ClusterFailed || c.Text != tc.wantText {
+				t.Errorf("condition %s %q, want cluster-failed %q", c.Code, c.Text, tc.wantText)
 			}
 		})
 	}
@@ -328,6 +408,195 @@ func TestEndCommands(t *testing.T) {
 	})
 }
 
+// TestDeployerChoosesTheDriver pins that Deployer gives the driver that the configuration names:
+// the commands driver for deploy.commands, and the Helm driver for deploy.helm, also with no
+// previous release.
+func TestDeployerChoosesTheDriver(t *testing.T) {
+	restart := []verdict.WindowName{verdict.Restart}
+	for _, row := range []struct {
+		name   string
+		deploy config.Deploy
+		want   string
+	}{
+		{"commands", config.Deploy{Namespace: "orders",
+			Commands: &config.Commands{Install: []string{"kubectl", "apply", "-k", "x"}}}, "*deploy.CommandsDriver"},
+		{"helm with no previous", config.Deploy{Namespace: "orders",
+			Helm: &config.Helm{Release: "orders", Candidate: &config.Release{Chart: "./chart", IsPath: true}}}, "*deploy.HelmDriver"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := &config.Config{Dir: dir, Deploy: row.deploy, Limits: config.Limits{Timeout: time.Minute}}
+			s := &session{
+				c:        &cluster.Cluster{Kubeconfig: filepath.Join(dir, "kubeconfig")},
+				cfg:      cfg,
+				evidence: func(string) (io.WriteCloser, error) { return &recordingEvidence{}, nil },
+			}
+			d, _, err := s.Deployer(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.EndCommands()
+			if got := fmt.Sprintf("%T", d); got != row.want {
+				t.Errorf("Deployer gave %s, want %s", got, row.want)
+			}
+			if diff := cmp.Diff(restart, d.Transitions()); diff != "" {
+				t.Errorf("transitions (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestSessionSetup pins the evidence names the setup commands run under and that
+// the first command that fails ends the set-up, with its index.
+func TestSessionSetup(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Dir:    dir,
+		Setup:  [][]string{{"sh", "-c", "exit 0"}, {"sh", "-c", "exit 3"}, {"sh", "-c", "exit 0"}},
+		Deploy: config.Deploy{Helm: &config.Helm{Previous: &config.Release{}}},
+		Limits: config.Limits{Timeout: time.Minute},
+	}
+	var names []string
+	s := &session{
+		c:   &cluster.Cluster{Kubeconfig: filepath.Join(dir, "kubeconfig")},
+		cfg: cfg,
+		evidence: func(name string) (io.WriteCloser, error) {
+			names = append(names, name)
+			return &recordingEvidence{}, nil
+		},
+	}
+	if _, _, err := s.Deployer(cfg); err != nil {
+		t.Fatal(err)
+	}
+	res, i := s.Setup(context.Background())
+	if res.Ending != deploy.ExitedNonZero || res.ExitCode != 3 || i != 1 {
+		t.Errorf("setup ended %s with code %d at index %d, want exit-nonzero with code 3 at index 1", res.Ending, res.ExitCode, i)
+	}
+	if diff := cmp.Diff([]string{"commands/setup", "commands/setup-2"}, names); diff != "" {
+		t.Errorf("evidence names (-want +got):\n%s", diff)
+	}
+}
+
+// customConfig is a configuration whose probe is a custom one, with a command, an argument and an
+// env entry that takes its value from a Secret.
+func customConfig() *config.Config {
+	return &config.Config{Limits: config.Limits{Timeout: time.Minute}, Probe: config.Probe{Custom: &config.Custom{
+		Image:   "registry.example/tools/busybox@sha256:" + strings.Repeat("0", 64),
+		Command: []string{"sh", "-c", "loop"}, Args: []string{"a"},
+		Env: []config.EnvVar{{Name: "TOKEN", ValueFrom: map[string]any{"secretKeyRef": map[string]any{"name": "probe-token", "key": "token"}}}}}}}
+}
+
+// httpConfig is a configuration whose probe is the built-in one, with a request timeout of 2 s.
+func httpConfig() *config.Config {
+	return &config.Config{Limits: config.Limits{Timeout: time.Minute}, Probe: config.Probe{HTTP: &config.HTTP{
+		URL: "http://orders.orders.svc/", Rate: 200, Timeout: 2 * time.Second, ExpectMin: 200, ExpectMax: 299}}}
+}
+
+// badEnvConfig is a custom probe's configuration whose env entry a pod cannot hold.
+func badEnvConfig() *config.Config {
+	cfg := customConfig()
+	cfg.Probe.Custom.Env = []config.EnvVar{{Name: "TOKEN", ValueFrom: map[string]any{"secretKeyRef": "S3CRET-VALUE"}}}
+	return cfg
+}
+
+// envRejected fails the test unless err is a config-rejected condition about probe.custom.env
+// that does not quote the planted value.
+func envRejected(t *testing.T, err error) {
+	t.Helper()
+	var c verdict.Condition
+	if !errors.As(err, &c) {
+		t.Fatalf("error %v, want a verdict.Condition", err)
+	}
+	if c.Code != verdict.ConfigRejected || !strings.HasPrefix(c.Text, "probe.custom.env") || strings.Contains(c.Text, "S3CRET-VALUE") {
+		t.Errorf("condition %s %q, want config-rejected about probe.custom.env with no value", c.Code, c.Text)
+	}
+}
+
+func TestPodOptions(t *testing.T) {
+	const probeImage = "rollproof.test/rollproof@sha256:fff"
+	custom := customConfig()
+	o, err := podOptions(custom, probeImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Image != custom.Probe.Custom.Image {
+		t.Errorf("image %q, want the custom image", o.Image)
+	}
+	if diff := cmp.Diff([]string{"sh", "-c", "loop"}, o.Command); diff != "" {
+		t.Errorf("command (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"a"}, o.Args); diff != "" {
+		t.Errorf("args (-want +got):\n%s", diff)
+	}
+	if len(o.Env) != 1 || o.Env[0].ValueFrom == nil || o.Env[0].ValueFrom.SecretKeyRef == nil ||
+		o.Env[0].ValueFrom.SecretKeyRef.Name != "probe-token" {
+		t.Errorf("env %+v, want TOKEN from the Secret probe-token", o.Env)
+	}
+	if !o.ServiceAccountToken || o.Drain != 10*time.Second {
+		t.Errorf("token %v, drain %s; want the default token and 10s", o.ServiceAccountToken, o.Drain)
+	}
+
+	builtIn := httpConfig()
+	o, err = podOptions(builtIn, probeImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Image != probeImage || o.Command != nil || o.Env != nil {
+		t.Errorf("image %q, command %q, env %v; want the probe image and no command or env", o.Image, o.Command, o.Env)
+	}
+	if diff := cmp.Diff(probe.HTTPArgs(httpOptions(builtIn.Probe.HTTP)), o.Args); diff != "" {
+		t.Errorf("args (-want +got):\n%s", diff)
+	}
+	if o.ServiceAccountToken || o.Drain != 7*time.Second {
+		t.Errorf("token %v, drain %s; want no token and 7s", o.ServiceAccountToken, o.Drain)
+	}
+
+	_, err = podOptions(badEnvConfig(), probeImage)
+	envRejected(t, err)
+}
+
+// A custom env that a pod cannot hold is rejected by check, before a cluster
+// exists (README "Interfaces between tasks").
+func TestCheckRejectsACustomEnv(t *testing.T) {
+	envRejected(t, (&wiring{}).check(context.Background(), badEnvConfig()))
+}
+
+// Both probes write their pod's evidence into the run's evidence folder under
+// the names that probe gives, and read the API with the session's client
+// (Task 10's review).
+func TestProbeOptionsCarryTheSession(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		cfg  *config.Config
+	}{{"built-in", httpConfig()}, {"custom", customConfig()}} {
+		t.Run(row.name, func(t *testing.T) {
+			var names []string
+			s := &session{client: fake.NewClientset(), cfg: row.cfg, evidence: func(name string) (io.WriteCloser, error) {
+				names = append(names, name)
+				return &recordingEvidence{}, nil
+			}}
+			raw := &bytes.Buffer{}
+			o, err := s.probeOptions(row.cfg, "rollproof.test/rollproof@sha256:fff", raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if o.Client != s.client || o.Raw != raw || o.StartTimeout != time.Minute || o.Now == nil {
+				t.Errorf("client %v, raw %v, start timeout %s, now set %v; want the session's, the run's and a minute",
+					o.Client, o.Raw, o.StartTimeout, o.Now != nil)
+			}
+			if o.Evidence == nil {
+				t.Fatal("no Evidence")
+			}
+			if _, err := o.Evidence("probe-pod.json"); err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff([]string{"probe-pod.json"}, names); diff != "" {
+				t.Errorf("evidence names (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // recordingEvidence is an evidence writer that records that it was closed.
 type recordingEvidence struct {
 	mu     sync.Mutex
@@ -390,7 +659,7 @@ func TestProbeHTTP(t *testing.T) {
 	}
 	written := time.Now()
 	for _, line := range strings.Split(text, "\n") {
-		if got := probe.ParseLine(line, written); got.Kind != probe.Observed {
+		if got := probe.ParseLine(line, written, time.Time{}); got.Kind != probe.Observed {
 			t.Errorf("line %q is not an observation", line)
 		}
 	}

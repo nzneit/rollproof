@@ -35,7 +35,8 @@ func holder(t Timeline, p *placement, m time.Time) int {
 	return -1
 }
 
-// countObservations fills the counts of p.results (steps 1 to 5 of the observation rules). An
+// countObservations fills the counts of p.results (steps 1 to 5 of the observation rules), and
+// records whether a passed line gave ms (HasSlowest) and whether any line gave lag (HasLag). An
 // observation that no begun window holds, whose time is before the first window's Start, is
 // counted in the first window, the install window, when the run has one; the rest that no window
 // holds add to p.uncounted. So it is the install window's for the criteria below too: the time of
@@ -53,9 +54,11 @@ func countObservations(t Timeline, p *placement) {
 		}
 		r := &p.results[i]
 		r.LagMs = max(r.LagMs, o.Lag)
+		r.HasLag = r.HasLag || o.HasLag
 		if o.OK {
 			r.Checks += o.N
 			r.SlowestMs = max(r.SlowestMs, o.Ms)
+			r.HasSlowest = r.HasSlowest || o.HasMs
 			continue
 		}
 		r.Checks++

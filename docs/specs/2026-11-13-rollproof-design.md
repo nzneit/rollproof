@@ -1,6 +1,7 @@
 # rollproof: design
 
-Date: 2026-11-13. Revised on 2026-11-16. Amended and revised on 2026-11-17. Amended on 2026-11-18.
+Date: 2026-11-13. Revised on 2026-11-16. Amended and revised on 2026-11-17. Amended on 2026-11-18
+and 2026-11-19.
 
 Status: the design below was agreed section by section in conversation on 2026-11-13. Three
 reviews followed. The first two:
@@ -44,7 +45,20 @@ Section 14, point 23 records the steps, the rulings and what the revision leaves
 maintainer approved the revision. A second plan brought the code to it on 2026-11-18, with one
 more change to the cluster that its runs called for (section 13; section 14, point 24).
 The maintainer ruled the same day on what its reviews and runs left (section 14, points 25 to
-27). The second plan carried point 25, and a third plan brings the code to the others.
+27). The second plan carried point 25, and a third plan brought the code to the others on
+2026-11-18 and 2026-11-19, with two more rulings of the second day (section 14, points 24 and
+28).
+
+Before the plan for step 4 of the build order (section 13), a review on 2026-11-19 looked for the
+places where the text does not hold together for that step, and found 25. Three were choices, and
+the maintainer ruled on them the same day (section 14, point 29). This text carries those rulings
+and the corrections of twelve more. Ten were beliefs that nobody had tried. A run that day settled
+four: the three that the rulings rest on, and one of section 14, point 21 (section 16). The others
+are left to later steps. A cold re-read of that text the same day, by an AI agent on an Opus
+model, found 25 places where it disagreed with itself, its sources or the built code; all 25 fixes
+were adopted, the exception for a too-early `t` written during the drain among them, which the
+maintainer then widened to every fault of a failed check's line written there (section 6;
+section 14, point 29).
 
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
 Fable model wrote each of the first two reviews. AI agents on an Opus model gathered the evidence,
@@ -54,12 +68,15 @@ designs for the revision of 2026-11-17. An AI session on an Opus model compared 
 maintainer, and the same session, then on a Fable model, wrote the revision. Two AI agents on a
 DeepSeek model reviewed it, and the session, on an Opus model again, checked their findings and
 carried the maintainer's rulings into the text.
-The amendments of 2026-11-18 were written by an AI session on an Opus model, at the maintainer's
-rulings.
+The amendments of 2026-11-18 and the first of 2026-11-19 were written by an AI session on an Opus
+model, at the maintainer's rulings. An AI agent on a Fable model wrote the review of 2026-11-19,
+and an AI agent on an Opus model wrote its rulings and corrections into the text, and then the
+fixes of the cold re-read.
 Where a statement rests on a measurement, a page or a source file that was read, section 16 names
 the source. Everything else is design, not fact. Nothing here had been run when the design was
-agreed. The revision of 2026-11-17 rests on one result of the first plan's runs, and section 16
-names that too.
+agreed. The revision of 2026-11-17 rests on one result of the first plan's runs, and the rulings
+of section 14, point 29, on a run of 2026-11-19. Sections 6, 9 and 14 also rest on the proofs of
+the build order's second step. Section 16 names them all.
 
 `rollproof` is a working name. It has not been checked for collisions.
 
@@ -363,7 +380,7 @@ Common case: a user with a workload the built-in probe does not cover writes a s
 
 **A. Observation stream**
 
-- The tool starts the probe once and stops it once with SIGTERM.
+- The tool starts the probe once and stops it once with SIGTERM, unless a signal ended the run.
 - The probe prints one JSON line per check: `{"ok": true}` or `{"ok": false}`, with optional fields.
 - The tool assigns each line to a window by its time, and counts.
 
@@ -426,9 +443,10 @@ Losers: C, because a crashed probe and real downtime both show as a non-zero exi
 
 ### The contract
 
-**Form.** A custom probe is a container image. The tool runs it as a pod in the cluster, with the
-`command`, `args` and `env` that the configuration gives; they mean what they mean in a pod's
-container. `env` is therefore a list, and an entry may take its value from a Secret (section 8).
+**Form.** A custom probe is a container image, named with its digest (section 8). The tool runs it
+as a pod in the cluster, with the `command`, `args` and `env` that the configuration gives; they
+mean what they mean in a pod's container. `env` is therefore a list, and an entry may take its
+value from a Secret (section 8).
 A stock image and a shell loop are a complete probe, with no image to build.
 
 A probe that runs on the runner is not in the first release. One form keeps the contract small,
@@ -464,6 +482,7 @@ How a line is read:
   behind a prefix, such as the date that a logging library puts first, and it makes its window
   not verified. A failure must not vanish because of the way it was printed.
 - A line that starts with `{` must be one valid JSON object, or its window is not verified.
+- An object that holds a top-level name twice is not valid, and its window is not verified.
 - A valid object with no top-level `ok` field is log text, so a library that logs JSON does no
   harm. The report says how many such lines there were.
 - An object whose `ok` is not `true` or `false`, or whose known field has a type or a value other
@@ -474,7 +493,12 @@ How a line is read:
 A fault of a line is placed in the window that holds the moment the line was written. Section 10
 says how it is weighed against a failure in the same window. A fault of a line that was written
 before the probe's first observation has no window, and makes the run not verified (rule 9 of
-section 10).
+section 10). A fault of the probe after the last window has ended, such as a bad line written
+during the drain, has no window either. It changes no verdict and is a warning. A whole line
+written then whose top-level `ok` is `false`, and that is a fault in any other way, is the
+exception: its fault belongs to the last window, because a failure must not vanish because of the
+way it was printed. A `t` earlier than the moment the tool asked for the probe's pod, by more than
+the bound of the clock check, is one such fault (section 14, point 29).
 
 **Time.** The default time of a line is the timestamp the node's container runtime puts on it in
 the pod's log. The runtime takes it from its own clock when it has read the whole line from the
@@ -499,8 +523,11 @@ the install window began is counted in the install window too: the first observa
 began before its line was written, and so may others that the probe's start met. One whose time
 is after the last window ended is not counted; the evidence keeps it.
 One whose `t` is later than the moment its line was written is a fault of the line, because a
-check cannot begin after its result. Like every such fault, it makes the window in which the line
-was written not verified.
+check cannot begin after its result. One whose `t` is earlier than the moment the tool asked for
+the probe's pod, by more than the bound of the clock check, is a fault of the line, as one later
+than its line is: no check can have begun before the probe existed. Like every such fault, it
+makes the window in which the line was written not verified; for a failed check written during
+the drain, the last window (above).
 
 A failed check that began in one window and whose line was written in a later one is counted
 where it began. The report says how many failures crossed the start of a transition in this way,
@@ -514,7 +541,9 @@ not judged.
   when its first observation arrives. If none arrives within `limits.timeout`, the run is not
   verified, and the report shows the state of the probe's pod (section 10). A probe that exits
   before its first observation ends that wait at once: the run is not verified because the probe
-  exited, and nobody waits out the timeout for a probe that is gone.
+  exited, and nobody waits out the timeout for a probe that is gone. When the API server refuses
+  the probe's pod, the run is not verified at once, as `probe-not-started`, with the API server's
+  text.
 - **The install window.** The first observation opens the install window, at the moment its
   line was written, by the runtime's timestamp and not by a `t` on the line. The install settles
   under the probe for `limits.settle`, counted from that moment at the earliest and started again
@@ -543,10 +572,10 @@ not judged.
   always silent. The built-in probe writes a line within one request timeout and one second while
   it works, so its first moments are not silent for that reason either.
 - **Stop.** The tool stops the probe when the run's last window has ended, whether or not every
-  transition was run, or when the run ends before the probe's first observation, unless a signal
-  ended the run (section 10). It deletes the probe's pod with a grace period as long as the
-  drain, so the probe gets SIGTERM, and it goes on reading the probe's lines until the container
-  has exited.
+  transition was run, when a failure of the tool has cut a window short, or when the run ends
+  before the probe's first observation, unless a signal ended the run (section 10). It deletes
+  the probe's pod with a grace period as long as the drain, so the probe gets SIGTERM, and it goes
+  on reading the probe's lines until the container has exited.
   The drain is 10 seconds for a custom probe. For the built-in probe it is the request timeout
   plus 5 seconds.
 - **What a probe does on SIGTERM.** It starts no new check, writes the line of every check that
@@ -555,20 +584,26 @@ not judged.
 - **A probe that does not stop.** A probe that is still running when the drain ends is killed
   with its pod. That changes no verdict. The report says that the probe did not stop when asked,
   and that checks still in flight were not reported. A shell that runs as the first process of
-  its container ignores SIGTERM unless it sets a trap, which is why the example above sets one.
+  its container ignores SIGTERM unless it sets a trap, as a run showed for busybox's shell
+  (section 16), which is why the example above sets one.
 - **Late results.** A probe whose results can arrive up to D seconds after a check began needs
   `limits.settle` of at least D. Otherwise a failure that a transition caused is reported after
   that transition's window has closed (rule 8 of section 10), or, for the last window, later than
   the drain, and then it is lost. The contract has no value for "not known yet".
 - **The log stream.** The tool follows the probe's log for the whole run. When the stream ends
   while the container still runs, the tool opens it again, and it must neither lose a line nor
-  count one twice. How it does that, and whether following a log survives the kubelet's rotation
-  of it, is open (section 14, point 11). After the tool has asked the probe to stop, a stream
-  that ends while the pod still reads the container as running is not opened again: the tool
-  waits until the pod reads the container as ended, and the end of that stream is then the end
-  of the log. A stream ends only after the container has ended, and the pod's status says so a
-  moment later (section 14, point 26). Where the tool cannot read the log to its end, the window
-  is not verified, as a failure of the tool.
+  count one twice. The proof of section 14, point 11, answered how: a followed stream crossed the
+  kubelet's rotations of the log with no line lost or read twice, and a stream opened again from
+  the second of the last line read, skipping the lines whose timestamp is before that line's and,
+  by count, those that carry its timestamp and were read, read every line once. No two lines
+  carried one timestamp in its runs, so a count above one was not exercised
+  (`docs/proofs/p11-log-rotation.md`). A line that a rotation moved out of reach before the
+  stream was opened again is lost, and the tool sees the gap. After the tool has asked the probe
+  to stop, a stream that ends while the pod still reads the container as running is not opened
+  again: the tool waits until the pod reads the container as ended, and the end of that stream is
+  then the end of the log. A stream ends only after the container has ended, and the pod's status
+  says so a moment later (section 14, point 26). Where the tool cannot read the log to its end,
+  the window is not verified, as a failure of the tool.
 - The probe knows nothing of windows, transitions or thresholds.
 
 **What the author owns.** The rate and the shape of the load are the probe author's. A loop that
@@ -615,7 +650,14 @@ tool never watches a probe pod. One consequence: a Service whose traffic policy 
 node has no endpoint for a client on that node, and cannot be probed from there.
 
 The built-in probe's pod meets the `restricted` Pod Security level, so a label that `setup` puts
-on the namespace cannot keep it out. For a custom probe the image decides.
+on the namespace cannot keep it out. The tool writes a custom probe's pod as it writes its own
+probe's, with the same security settings: the container runs as user 65532 and not as root, may
+gain no privilege, drops every capability and uses the runtime's default seccomp profile. That pod
+meets the `restricted` level too. A probe's program must therefore work as user 65532, whatever
+user its image names. The shell loop of the example does, in a stock busybox image (section 16).
+Besides its image, `command`, `args`, `env` and drain, one thing differs: a custom probe's pod
+mounts the token of the namespace's default service account, so that a probe can read the
+Kubernetes API with the rights that `setup` gave it. The built-in probe's pod mounts none.
 
 ### The built-in HTTP probe
 
@@ -647,8 +689,9 @@ It speaks the same contract. It is the tool's own binary, started as `rollproof 
   for the requests that passed and ended in that second: `n`, the `t` of the first of them, the
   longest of them in `ms`, and in `lag` the furthest that any of them began behind its schedule. A
   second in which no request passed gets no summary line. Within one request timeout every
-  request has passed or failed, and either writes a line, so the probe is never silent while it
-  works: the configuration keeps `probe.http.timeout` shorter than `limits.silence` (section 8).
+  request has passed or failed. A failure writes its line then, and a pass when its second is
+  over, up to one second later. So the probe is never silent while it works: the configuration
+  keeps `probe.http.timeout` more than one second shorter than `limits.silence` (section 8).
 - **On SIGTERM** it starts no new request, waits for those in flight to end or to time out,
   writes their lines and exits.
 - **Names.** It resolves the URL's host for its first request, and for each request after it until
@@ -924,19 +967,27 @@ makes the run not verified, and a non-zero exit of a deploy or a rollback is a f
 whose program cannot be started counts as a non-zero exit. Helm exits with the same code for
 every failure. A deploy that failed because a value broke the chart's schema is therefore a fail
 like any other, and it should be: the candidate cannot be deployed with those values. The
-command's output in the evidence says what it was.
+command's output in the evidence says what it was. When a process that a command started keeps
+the command's output open after the command has exited, the command counts as exited one second
+later.
 
 **When a command runs too long.** A command that is still running at `limits.timeout` is stopped:
-the tool sends it SIGTERM and kills it 10 seconds later. For a deploy or a rollback that is a
-stall. For the install and for a `setup` command the run is not verified.
+the tool sends SIGTERM to the command and to every process it started that stays in its process
+group, and 10 seconds later kills those of them that are left, whether or not the command itself
+has exited. The tool waits until they are gone, at most one second after the kill. For a deploy or
+a rollback that is a stall. For the install and for a `setup` command the run is not verified.
 
-**When a signal stops the run.** The tool stops a command that is running in the same way, but
-does not wait for it. However such a command then ends, its ending is the tool's doing and is
-not judged as a failed command.
+**When a signal stops the run.** The tool sends SIGTERM to a command that is running and to its
+process group, does not wait for them, and kills what is left of them before it writes its
+results, so that none of it outlives the run. However such a command then ends, its ending is the
+tool's doing and is not judged as a failed command.
 
-**When the tool fails.** The tool stops a command that is running in the same way, and does so
-before it stops the probe (section 6), so that no command goes on changing the cluster while the
-probe's last lines are read. Its ending is not judged either (section 14, point 27).
+**When the tool fails.** The tool sends SIGTERM to a command that is running and to its process
+group before it stops the probe (section 6), so that a command that ends on SIGTERM no longer
+changes the cluster while the probe's last lines are read. It does not wait for the command: it
+kills what is left of it 10 seconds later, or as soon as the probe has stopped if that comes
+first, and always before it writes its results. Its ending is not judged either (section 14,
+point 27).
 
 **The restart.** The tool performs it itself, the same way for both drivers: it changes the pod
 template annotation that `kubectl rollout restart` changes, on every watched workload. A
@@ -1095,9 +1146,12 @@ type Deployer interface {
 }
 ```
 
-The plan's interface tells three endings of a command apart, because the report does: it exited
-non-zero, it could not be started, or the tool stopped it at the limit. The restart
-is not in this interface; `watch` performs it (section 5).
+The plan's interface tells four endings of a command that did not succeed apart, because the
+report does: it exited non-zero, it could not be started, the tool stopped it at the limit, or the
+tool stopped it because a signal came or the tool itself failed. The last is not judged: the
+reason is then `interrupted` or `internal-error`. The restart is not in this interface; `watch`
+performs it (section 5). A restart has no command, and its record says whether the API server
+took the change.
 
 ## 8. Configuration and the action
 
@@ -1242,7 +1296,7 @@ probe:                      # section 6
     expect-status: 200-299
   # or:
   # custom:
-  #   image: registry.example/tools/busybox@sha256:…   # required
+  #   image: registry.example/tools/busybox@sha256:…   # required, with a digest
   #   command: [sh, -c, "…"]
   #   args: []
   #   env:                  # a list, as in a pod's container
@@ -1287,9 +1341,12 @@ decided by the file, not by the folder it was started from.
 
 - A `limits.silence` that is not shorter than both `limits.steady` and `limits.settle`. A window
   must be long enough to show a silent probe.
-- A `probe.http.timeout` that is not shorter than `limits.silence`. While every request is slow
-  and none has timed out yet, the built-in probe writes nothing, and a sound run would end as
-  silent.
+- A `probe.http.timeout` that is not more than one second shorter than `limits.silence`. While
+  every request is slow and none has timed out yet, the built-in probe writes nothing, and a
+  request that passes writes its line only when its second is over, up to one second later. With
+  a longer timeout a sound run would end as silent.
+- A `probe.custom.image` that carries no digest. `${images.NAME.ref}` carries one, and so does a
+  reference that ends in `@${images.NAME.digest}`.
 - The same host in two entries of `registries`.
 - A `deploy.namespace` that section 7 reserves.
 - A probe URL that carries a user name or a password.
@@ -1344,12 +1401,12 @@ tool.
 | `cluster.registry-image` | A registry image pinned by digest, written into the tool at each release | It is the one image the tool itself starts. A digest names its content, so an organization can mirror it and name the copy here |
 | `cluster.workers` | 3 | A rolling update that adds a pod before it removes one needs a node for the extra pod. Three workers give that room to two replicas that must not share a node, which was the experiments' shape. A workload with three such replicas needs four workers (section 9) |
 | `probe.http.rate` | 200 a second | Measured to fit a hosted runner with 2 CPUs, with no false failure in 150 jobs, against a handler that sleeps. A handler that costs CPU may not hold this rate on a small runner, and a clean steady window does not show that it will: a transition adds a starting pod to the same CPUs. The report gives, for every window, how far the probe ran behind its schedule, which shows a starved runner |
-| `probe.http.timeout` | 2 s | It is the caller's own latency rule: a slower request is a failure. 2 s is the experiments' value, where the slowest request that passed on a hosted runner took 247 ms. A service with a latency budget writes its budget here, and keeps `limits.silence` above it |
+| `probe.http.timeout` | 2 s | It is the caller's own latency rule: a slower request is a failure. 2 s is the experiments' value, where the slowest request that passed on a hosted runner took 247 ms. A service with a latency budget writes its budget here, and keeps `limits.silence` more than one second above it |
 | `probe.http.expect-status` | 200 to 299 | A redirect or an error page is not an answer from the workload |
 | `limits.steady` | 10 s | Long enough to show that the probe and the workload work before anything changes: 2,000 checks at the default rate. It is not a control for a failure that is rare without any rollout; the paragraph below the table is for that |
 | `limits.settle` | 15 s | It covers what begins only after a transition has finished: a second rollout, a controller that acts a little late, a new pod that fails soon after it became ready, and a probe's late results. The experiments do not size it. Their failures after a rollout reported done ended within about 3 s, but they are counted from `kubectl rollout status`, which returns before old pods are gone, and the tool waits for those. 15 s is a first value, and a fixture is to confirm it or change it (section 14, point 7). The install settles for the same time under the probe, in the install window (section 7). There it covers the moment a cluster takes to route to a Service that the install has just created, about a second in the first plan's runs, and the first moments of the probe's own pod. Nothing sizes it for that either. Every run that reaches its steady window reports how long before it the last failed check came, which shows how much of the time was needed |
 | `limits.timeout` | 5 minutes | The length of Helm's default timeout for one operation. It is not the same bound: Helm applies its timeout to each hook separately, and this limit covers a whole transition from its start, hooks included. The tool passes the value to Helm as its `--timeout` (section 7). One limit covers, each on its own: the engine's pull of the node image, its pull of the registry image, the wait for the registry to answer, the wait for the cluster to be ready, a node's pull of an image, a chart's fetch, a `setup` command, the install, the probe's start and a transition |
-| `limits.silence` | 5 s | While it works, the built-in probe writes a line within one request timeout, and at the defaults at least one a second. A custom probe that checks less often raises it, and raises `limits.steady` and `limits.settle` with it |
+| `limits.silence` | 5 s | While it works, the built-in probe writes a line within one request timeout and one second, and at the defaults at least one a second. A custom probe that checks less often raises it, and raises `limits.steady` and `limits.settle` with it |
 
 There is no failure budget. A pass means that the probe reported no failure in the steady window
 or in a transition's window, which is the claim the tool is named for. A failed check in the
@@ -1500,8 +1557,8 @@ binaries are statically linked, because the binary is also the probe's whole ima
   does not show it (section 10).
 - **Rootless engines.** When the container engine runs without root, the tool sets the option in
   the nodes' container runtime that stops each container from taking a kernel session key. Without
-  it, a few clusters exhaust the user's key quota. Whether one cluster needs it is open
-  (section 14).
+  it, a few clusters exhaust the user's key quota. One cluster without it used more than half of
+  the quota while its nodes were deleted, so the setting stays (section 14, point 12).
 - **Attempts to connect that had no answer.** The tool sets, in each node, how long the kernel's
   connection tracking keeps an attempt to connect that has had no answer: 5 s, where Linux keeps
   it 120 s (`net.netfilter.nf_conntrack_tcp_timeout_syn_sent`). While kube-proxy brings in the
@@ -1571,7 +1628,9 @@ from. A chart that takes only a tag writes the tag with the digest after it,
 reference and asks the registry for the digest alone. Kubernetes still takes the default pull
 policy from the tag: `latest` before the digest gives `Always`, and any other tag gives
 `IfNotPresent`. The pull is by digest in both cases. The fall-back to the real registry and the
-dropped tag are read from the runtime's source and have not been run (section 14, point 1).
+dropped tag were read from the runtime's source, and the proof of section 14, point 1, ran both,
+with images of one manifest each and a plain-HTTP registry standing in for the real host
+(`docs/proofs/p01-registry-order.md`).
 
 `as` names the repository that the real manifests use, for example
 `registry.example/team/orders`. The tool stores the image in the run's registry under that
@@ -1590,8 +1649,9 @@ repository and digest, through the node's own registry settings. A node that can
 that the tool has just stored shows a fault of the set-up: the registry, the node settings or a
 full disk. The run is then not verified before anything is deployed, and no stalled deploy is
 blamed on the candidate. The first pull of the candidate also no longer falls inside the deploy's
-window. Each node's pull is bounded by `limits.timeout`. How the tool asks a node to pull, so
-that the node uses the settings it uses for the kubelet, is open (section 14, point 1).
+window. Each node's pull is bounded by `limits.timeout`. The tool asks a node to pull with
+`crictl pull`, run in the node, which uses the settings that the kubelet's pulls use, as the proof
+of section 14, point 1, showed.
 
 **Which pods ran it.** For every entry of `images`, the report says which watched workloads had
 pods that ran its digest, and which transition created those pods (section 10). A chart that does
@@ -1609,6 +1669,11 @@ the probe cannot be a different version from the tool. The image holds the binar
 else, so the binary must be statically linked. The released ones are. The tool checks its own
 binary before it creates anything, and one that needs a shared library makes `run` stop with a
 message. This is one reason the tool runs on Linux only.
+
+**A custom probe's image.** It is the caller's. When `images` lists it, every node pulls it during
+set-up. Otherwise the control-plane node pulls it when the probe's pod starts, inside the probe's
+start and its `limits.timeout`, and a pull that fails shows, once `limits.timeout` has passed, as
+`probe-not-started`, with the state of the pod.
 
 ### Registries: credentials, mirrors and certificate authorities
 
@@ -1655,7 +1720,8 @@ contacts for that pull. Three things follow.
 **Who can read the credentials.** The file sits in every node, at the place where the kubelet
 reads it, and kind sets no Pod Security level. Any pod that mounts that path of its node can
 therefore read it: the workload under test, a Helm hook, a pod that a `setup` command started, a
-custom probe. A caller gives the tool credentials that can only read, and that expire soon.
+pod that a custom probe creates with the rights that `setup` gave it. A caller gives the tool
+credentials that can only read, and that expire soon.
 
 Pods may still use `imagePullSecrets` from their own chart. The tool does nothing for them and
 does not get in their way.
@@ -1706,7 +1772,8 @@ does not get in their way.
    finished and the settle time has passed, or until `limits.timeout` when it stalls. Only a
    signal, or a failure of the tool itself, cuts a window short.
 3. Each condition from the probe's first observation on is placed in a window. Rule 9 says what
-   happens to one before it.
+   happens to one before it, and section 6 what happens to a fault of the probe after the last
+   window.
    - A failure belongs to the window that holds its time.
    - Silence belongs to every window it overlaps.
    - A stall, a failed command, a refused restart, a watched workload of a form the tool cannot
@@ -1714,7 +1781,8 @@ does not get in their way.
      that fails after the probe's first observation, and a watched workload of a form the tool
      cannot judge that appears in that time, belong to the install window.
    - A fault of the probe belongs to the window that holds the moment it happened: an early exit,
-     a line that breaks the contract, a `t` later than its line.
+     a line that breaks the contract, a `t` later than its line, or earlier than the moment the
+     tool asked for the probe's pod by more than the bound of the clock check (section 6).
    - A signal and a failure of the tool itself belong to the window in progress. One that comes
      while the tool is stopping the probe, before the verdict is decided, belongs to the last
      window.
@@ -1746,7 +1814,8 @@ does not get in their way.
    chart that could not be set up, a `setup` command or an install that failed, nothing to watch,
    a workload or a target the tool cannot judge, a probe that never started, a clock in the nodes
    that differs from the runner's, a fault of the probe (an early exit, a line that breaks the
-   contract, a `t` later than its line), a signal, a failure of the tool.
+   contract, a `t` later than its line, or earlier than the moment the tool asked for the probe's
+   pod by more than the bound of the clock check; section 6), a signal, a failure of the tool.
 10. Nothing that happens after the verdict was decided changes it. The verdict is decided once
     the probe has stopped and its late lines are in (section 5). An error while the tool then
     writes its report, completes the evidence or deletes the cluster is a warning, on the
@@ -1874,8 +1943,11 @@ results: /tmp/rollproof-results-7f3a
     it. Its result is one of pass, FAIL, NOT VERIFIED, not run and not judged. "After finish"
     counts the failures that fell in the settle time.
     "Slowest" is the slowest check that passed, and "behind" the furthest that the probe ran
-    behind its schedule, both as the probe reported them. When failures crossed the start of a
-    transition (section 6), a line under the table says how many.
+    behind its schedule, both as the probe reported them. When no passed line of a window gives
+    `ms`, the window has no slowest check, and when no line of it gives `lag`, it has no lag. The
+    console prints "-" for each, in the install's lines too, and `result.json` holds null, also in
+    an install record with no counts. When failures crossed the start of a transition
+    (section 6), a line under the table says how many.
   - The second table lists every watched workload for every transition that ran. "Probed" says
     whether the workload's pods are behind the Service that the built-in probe's URL names: the
     tool reads that Service's endpoints and their owners at the start and at the end of each
@@ -1899,7 +1971,7 @@ results: /tmp/rollproof-results-7f3a
     could not be scheduled, the text names the cluster's shape and `cluster.workers`. When the
     settle time started again, the text says what started it. When the command was still running
     and the tool stopped it, the text says so. A probe that never started is shown the same way,
-    by the state of its pod.
+    by the state of its pod, or by the API server's text when it refused the pod.
   - Every pass ends with the lists "exercised" and "not exercised" (see "What every report
     states").
   - The probe's lines also say how many of its lines were JSON objects with no `ok` field, that
@@ -1922,29 +1994,31 @@ results: /tmp/rollproof-results-7f3a
     and its result, which is one of `pass`, `fail`, `not-verified`, `not-run` and `not-judged`.
     With them its counts: checks, failures, failures after the transition finished, failures by
     class, failures that crossed its start, and the time of the first failure. And the slowest
-    check that passed and the furthest lag that the probe reported;
+    check that passed and the furthest lag that the probe reported, each null when the probe gave
+    none;
   - the install: when it was ready, when the probe's first observation was written, when it had
     settled, and what started its settle time again, if anything did. With them the counts of the
     install window: checks, failures, failures by class, the time of the last failure, the
-    slowest check that passed and the furthest lag that the probe reported. They count every
-    observation whose time is before the install window or falls in it, a failure whose line was
-    written after it included. The install window is reported here and not in the list of windows, so a wrapper
-    that adds up the windows' failures does not count these. The steady window's start is the
-    moment the install had settled; the time of the probe's first observation is here. A run
-    that ended before the install was ready has no install record. One that ended before the
-    probe's first observation has no time of it and no counts, and one that ended before the
-    install had settled has no time of settling;
-  - every transition: whether it stalled, how its command ended, and what started the settle time
-    again, if anything did. For each watched workload: the pods at the start, the pods replaced,
-    whether it was added or removed, whether it is probed, and the quickest stop;
-  - the probes the tool started, as a list that has one entry in the first release. Each has
-    its settings and their defaults, the names of its headers or of its `env` entries in place of
-    their values, the counts of its `command` and `args`, how many lines it wrote and how many of
-    them were JSON objects with no `ok` field, whether it ran without a certificate check, and
-    whether it stopped when asked. When the tool did not ask it to stop, or stopped waiting for
-    it, because a signal stopped the run, or did not finish asking, because the tool failed while
-    it stopped the probe, `stopped_when_asked` is null, the counts are those of the lines read
-    until then, and a note says which (section 14, point 27);
+    slowest check that passed and the furthest lag that the probe reported, each null when the
+    probe gave none. They count every observation whose time is before the install window or
+    falls in it, a failure whose line was written after it included. The install window is
+    reported here and not in the list of windows, so a wrapper that adds up the windows' failures
+    does not count these. The steady window's start is the moment the install had settled; the
+    time of the probe's first observation is here. A run that ended before the install was ready
+    has no install record. One that ended before the probe's first observation has no time of it
+    and no counts, and one that ended before the install had settled has no time of settling;
+  - every transition: whether it stalled, how its command ended or, for a restart, whether the
+    API server took its change, and what started the settle time again, if anything did. For each
+    watched workload: the pods at the start, the pods replaced, whether it was added or removed,
+    whether it is probed, and the quickest stop;
+  - the probes the tool started, as a list that has at most one entry in the first release. Each
+    has its settings and their defaults, the names of its headers or of its `env` entries in place
+    of their values, the counts of its `command` and `args`, how many lines it wrote and how many
+    of them were JSON objects with no `ok` field, whether it ran without a certificate check, which
+    is null for a custom probe, and whether it stopped when asked. When the tool did not ask it to
+    stop, or stopped waiting for it, because a signal stopped the run, or did not finish asking,
+    because the tool failed while it stopped the probe, `stopped_when_asked` is null, the counts
+    are those of the lines read until then, and a note says which (section 14, point 27);
   - for the Helm driver, for each release: the chart's name, the version that Helm resolved,
     where the chart came from, and the names of the values files and the top-level keys of the
     inline maps that the tool passed, and never a value. Helm keeps the merged values and not
@@ -1994,8 +2068,9 @@ results: /tmp/rollproof-results-7f3a
 - **GitHub job summary.** The same tables and lists as Markdown, written only when the tool
   detects GitHub Actions.
 - **Evidence folder.**
-  - The probe's raw lines; the window boundaries; a per-second timeline that puts failure counts
-    beside pod events (created, ready, deleted, gone).
+  - The probe's raw lines; the window boundaries and the moment each transition finished, each
+    written when it happens; a per-second timeline that puts failure counts beside pod events
+    (created, ready, deleted, gone).
   - The events of the workload's namespace and of the probe's, which stay after their pod is
     gone, for the one hour that the API server keeps an event by default.
   - The pod lists before and after each transition, and the logs of every pod of a watched
@@ -2027,9 +2102,9 @@ results: /tmp/rollproof-results-7f3a
 | `nothing-watched` | not verified | `limits.settle` after the install command returned, no Deployment, StatefulSet or DaemonSet matched `deploy.namespace` and `deploy.selector` |
 | `workload-unsupported` | not verified | A watched StatefulSet or DaemonSet has an update strategy other than the rolling one |
 | `target-unsupported` | not verified | The built-in probe's URL names a Service that does not exist, is headless, or routes only within a node, or it names one pod of a headless Service |
-| `probe-not-started` | not verified | No observation arrived inside `limits.timeout`, and the probe was still running |
+| `probe-not-started` | not verified | No observation arrived inside `limits.timeout`, and the probe had not exited; or the API server refused the probe's pod |
 | `probe-exited` | not verified | The probe exited before the tool stopped it, whether before its first observation or in a window |
-| `probe-line-invalid` | not verified | A line broke the probe contract: its form, a field's type or value, a `t` later than the line, or an observation behind a prefix |
+| `probe-line-invalid` | not verified | A line broke the probe contract: its form, a field's type or value, a `t` later than the line or earlier than the moment the tool asked for the probe's pod by more than the bound of the clock check, or an observation behind a prefix |
 | `steady-not-clean` | not verified | The probe reported a failure in the steady window. A failure in the install window is not one |
 | `probe-silent` | not verified | The probe wrote no observation for longer than `limits.silence` |
 | `no-pod-replaced` | not verified | A transition finished, its command succeeded, and it replaced no pod |
@@ -2127,14 +2202,19 @@ A line leaves the list when a fixture shows the tool catching what it names.
   written in the file, a combination of releases or commands that section 7 rejects, both or
   neither of a pair that needs exactly one, a `version` beside a chart path that exists, a chart
   version that is a number, a comma in a values file's path, the limits that section 8 holds
-  against each other, a reserved namespace, a host listed twice, and the base of relative paths.
-- Probe lines, on a fake clock: the type and the range of each field, an observation behind a
-  prefix, a cut last line, an unknown `v`, assignment to windows, a failure that crosses the
-  start of a transition, silence at a window's start and at its end, the start timeout, a probe
-  that exits before its first observation, and what counts during the drain. And the install
-  window: observations that are counted and not judged, one whose time is before it, a failure
-  that began there and was written in the steady window, and silence and a fault of the probe
-  there.
+  against each other, a custom probe's image with no digest, a reserved namespace, a host listed
+  twice, and the base of relative paths.
+- Probe lines, on a fake clock: the type and the range of each field, a top-level name twice, an
+  observation behind a prefix, a cut last line, an unknown `v`, a `t` later than its line, a `t`
+  earlier than the moment the tool asked for the probe's pod, by more than the bound of the clock
+  check and by less, assignment to windows, a failure that crosses the start of a transition,
+  silence at a window's start and at its end, the start timeout, a probe that exits before its
+  first observation, what counts during the drain, a fault of the probe there, and a failed
+  check written there whose line is a fault: by a `t` earlier than the probe's pod by more than
+  the bound of the clock check, and in another way, such as a `t` later than its line. And the
+  install window: observations that are counted and not judged, one whose
+  time is before it, a failure that began there and was written in the steady window, and
+  silence and a fault of the probe there.
 - The built-in probe against a server in the same process: the rate held while the handler is
   slow, and the lag it reports; each failure class; a status outside the range; a redirect; a
   body cut short; the summary line; the headers and the `Host` as the server received them;
@@ -2148,17 +2228,19 @@ A line leaves the list when a fixture shows the tool catching what it names.
   that appears, and with a break after the limit;
   pods counted by UID; a workload added, removed and renamed; nothing to
   watch; a strategy other than the rolling one; a Deployment past its progress deadline; the
-  quickest stop, over pods that were ready; which workloads are behind a Service.
+  quickest stop, over pods that were ready; which workloads are behind a Service; a restart that
+  the API server refuses.
 - The target check: each form of host, a headless Service, a pod's name, a node-local policy, a
   Service that does not exist.
 - Golden files for the report formats, one for each verdict and one for each ending of a run
   that the console list names: before the probe's first observation, in the install window, and
-  with the install window deciding the verdict. Golden files, too, for the kind configuration and
-  node settings the tool generates. Among them a host that has `as`, a mirror, a `ca` and
-  credentials together.
+  with the install window deciding the verdict. One more is for a custom probe that gives neither
+  `ms` nor `lag`. Golden files, too, for the kind configuration and node settings the tool
+  generates. Among them a host that has `as`, a mirror, a `ca` and credentials together.
 - The deploy drivers against a fake command runner that records the arguments, the environment
   and the folder: the flags of section 7, that the variables it lists are gone, how each ending
-  of a command maps to a reason, and a command stopped at the limit.
+  of a command maps to a reason, a command stopped at the limit, and one stopped because a signal
+  came or the tool failed.
 - Masking: a password planted in every input, a command's output and a pod's log included, and
   then searched for, in both forms, in everything the tool wrote.
 - The command line, in a child process whose run is a fake: SIGINT and SIGTERM during a run end
@@ -2170,7 +2252,7 @@ A line leaves the list when a fixture shows the tool catching what it names.
   is never deleted.
 - The checks that raise a reason outside a window, each against a fake: every check of the
   runner, the clock check, a node that cannot pull a stored image, a chart that cannot be
-  fetched, and a restart that the API server refuses.
+  fetched, and a probe's pod that the API server refuses.
 
 **With a cluster.** The real binary runs against a fixture service. The fixture is a small Go HTTP
 service, copied from the experiments' test service, with switches for start delay and shutdown
@@ -2188,8 +2270,8 @@ window is counted and decides nothing.
 | The candidate exits on SIGTERM | Fail, in the rollback window |
 | No node is free for the extra pod | Fail, the deploy stalls; `pod-unschedulable` is listed beside the stall |
 | The previous release exits on SIGTERM | Fail, in the deploy window; the rollback is not run |
-| A custom probe stops writing during the deploy and never writes again | Not verified |
-| A custom probe exits during the deploy | Not verified |
+| A custom probe stops writing when it first reads the candidate's version from the Service, and never writes again | Not verified, `probe-silent` in the deploy's window |
+| A custom probe exits when it first reads the candidate's version from the Service | Not verified, `probe-exited` in the deploy's window |
 | The deploy replaces no pod | Not verified |
 | The previous release never becomes ready | Not verified |
 | A `setup` command fails | Not verified |
@@ -2198,9 +2280,9 @@ window is counted and decides nothing.
 | A second rollout starts 5 s after the tool saw the deploy's first one finish | Pass; the deploy's window covers both rollouts, and `result.json` says what started the settle time again |
 | The chart denies traffic by default, and the test's values let the probe in | Pass |
 | A custom probe, the TCP loop of section 6 pointed at the fixture's own Service and port, judges the first fixture | Pass |
-| The same custom probe reports a failed check about 500 times a second for its first 5 s, and only then checks the Service | Pass; the install record holds at least 2,000 failures, the last of them at least 9 s before the steady window, and neither the steady window nor a transition's holds one |
+| The same check, as a small program that first reports a failed check every 2 ms for 5 s by its own clock, and only then checks the Service | Pass; the install record holds at least 2,000 failures, the last of them at least 9 s before the steady window, and neither the steady window nor a transition's holds one |
 | The same, with failed checks for its first 20 s | Not verified, `steady-not-clean`; the failures from 15 s after its first observation on fall in the steady window |
-| The same custom probe judges a candidate with no readiness probe | Fail, in the deploy window |
+| The TCP loop, as a custom probe, judges a candidate with no readiness probe | Fail, in the deploy window |
 | The workload is a StatefulSet behind a Service with a cluster address | Pass |
 | The workload is a DaemonSet behind a Service with a cluster address | Pass |
 | The first fixture through the commands driver, with all three commands | Pass |
@@ -2212,6 +2294,7 @@ window is counted and decides nothing.
 | A custom probe ignores SIGTERM | Pass; the report says that the probe did not stop |
 | The candidate changes a second workload only, which the probe does not reach | Pass; the probed workload reads "not replaced", and the deploy's line under "exercised" says so |
 | A `setup` command makes the probe's namespace enforce the `restricted` level | Pass |
+| The same, judged by the TCP loop of section 6 as a custom probe | Pass |
 | The previous release's pods report ready, and its handler fails every request | Not verified, `steady-not-clean`, within a minute of the install; the text says that no check has passed since the probe started |
 
 The first row is the fixture that the other rows change one thing of. This document calls it the
@@ -2225,11 +2308,12 @@ observation, as the install window does. The two rows hold the start of the stea
 between 5 and 20 s after that observation, with thousands of observations in the install window,
 so that a reader of the probe's lines that starts late shows too. The first fixture alone cannot
 show it: the moment the cluster takes to route to a new Service varies, and a run may meet none.
+Both rows assert first that the install's settle time did not start again.
 
 Where a row names no reason code, the set it expects is the one code of its cause in the table of
-reasons: `probe-failures` for a fail in a window, `probe-silent` for the probe that stops writing,
-`probe-exited` for the one that exits, and `no-pod-replaced`, `install-failed` and `setup-failed`
-for the three rows after it.
+reasons: `probe-failures` for a fail in a window, and `no-pod-replaced`, `install-failed` and
+`setup-failed` for the eighth, ninth and tenth rows. The sixth and seventh rows name their codes.
+For these two rows the suite also asserts the window of the reason.
 
 The third row is why the rollback leg exists. A candidate that shuts down badly passes its own
 deploy, because the pods that stop during the deploy belong to the previous release. The fifth row
@@ -2245,10 +2329,11 @@ status` instead, the second rollout could begin before the settle time does, and
 pass without the rule it is there for.
 
 The rows with a probe that goes silent, exits or ignores SIGTERM use small custom probes, because
-the built-in probe has no switch for any of that and must not get one. Four rows use the TCP loop:
-in two a custom probe decides the verdict of a real transition, and two prove the install window.
-Every other row uses the built-in probe, and every row but the StatefulSet's and the DaemonSet's is
-a Deployment.
+the built-in probe has no switch for any of that and must not get one. Three rows use the TCP
+loop: in two a custom probe decides the verdict of a real transition, and in one its pod starts in
+a namespace that enforces the `restricted` level. Two rows prove the install window with a small
+program that makes the same check. Every other row uses the built-in probe, and every row but the
+StatefulSet's and the DaemonSet's is a Deployment.
 
 **The suite's matrix.** The suite runs on Docker, on amd64, with the default node image, once
 under Helm 3 and once under Helm 4. The first fixture alone also runs on the oldest node image
@@ -2349,12 +2434,13 @@ the fourth on gets a plan of its own. The first plan covers steps 1 to 3.
    the maintainer's word.
 3. **A walking skeleton.** `config`, `cluster`, `images` for local images and the probe's own,
    `run`, the Helm driver, the built-in HTTP probe, `watch`, `verdict`, the console report and
-   `result.json`. The tool
-   creates its own kind cluster and registry on the developer's machine. The first four fixtures
-   of section 12 give their expected verdicts. The workflow for the unit tests comes with this
-   step.
-4. **The rest of the two contracts.** The custom probe, the commands driver, the `setup` commands,
-   restart-only runs, and the remaining fixtures.
+   `result.json`. The tool creates its own kind cluster and registry on the developer's machine.
+   Five fixtures of section 12, its first four and its last, give their expected verdicts. The
+   workflow for the unit tests comes with this step.
+4. **The rest of the two contracts.** The custom probe and `docs/probe-contract.md`, the commands
+   driver, the `setup` commands, restart-only runs, `archive` in `images`, the rest of the evidence
+   folder of section 10 with the last event in a stall's text, and the remaining fixtures, with the
+   first fixture on the oldest node image.
 5. **Enterprise settings.** `registries`, `as` in `images`, and the mirror job.
 6. **The action**, the job summary and the remaining workflows.
 7. **Graduation**, and in the new repository the fixture series of section 12, before the first
@@ -2365,21 +2451,35 @@ A plan of its own brought the skeleton to this text on 2026-11-18, before step 4
 for when the install has settled, then the install window, in the same step as the built-in
 probe's changes: no warm-up, a schedule that starts when the probe starts, and a failed lookup as
 a failed check. Then the counts and the report, and last the nodes' setting of section 9 for an
-attempt to connect that had no answer (section 14, points 23 and 24).
+attempt to connect that had no answer (section 14, points 23 and 24). A third plan, on 2026-11-18
+and 2026-11-19, cleared what the second left: the end of the probe's log, a limit for each wait
+of the cluster's creation, the probe's record and the exit after a signal, the order of the stop
+after a failure of the tool, and the engine's pulls (section 14, points 26 to 28).
+
+Each plan's list of decisions and rulings stands with this text where this text is silent, and
+the next plan reads them: `docs/plans/2026-11-16-first-plan/README.md` and
+`docs/plans/2026-11-17-install-window/README.md`. The third plan, `docs/plans/2026-11-18-debts.md`,
+keeps no such list; its rulings are in section 14, point 24 (the node setting under Docker and
+Podman, and a `limits.settle` under about 7 s) and points 26 to 28.
 
 ## 14. Open points for the plan
 
 The plan settles each open point with a test or a reading before anything is built on what it
-decides. Points 6, 17 and 18 are settled and stay here for the record. Points 7 and 16 are settled
-by the fixture runs, and points 13 and 14 before the first release. Point 15 is a caveat with
-nothing to settle, point 22 records two rules that stand for now, and point 23 records why the
-install settles under the probe and what that leaves open. The build order of section 13 says
-which step proves which point.
+decides. Points 6, 17 and 18 are settled and stay here for the record. The proofs of the build
+order's second step answered points 1 and 9 to 12, what point 5 says of the command lines in each
+Helm major, and point 8 for nerdctl only: there kind's own 30-second wait for a node's log line
+failed in 5 of 9 creations, and the tool tries the creation again. Their records are under
+`docs/proofs/`, whose index lists what they left unproved, point 8 with Docker among it. Points 7
+and 16 are settled by the fixture runs, and points 13 and 14 before the first release. Point 15
+is a caveat with nothing to settle, point 22 records two rules that stand for now, and point 23
+records why the install settles under the probe and what that leaves open. Points 24 to 28
+record findings and rulings of 2026-11-18 and 2026-11-19, and point 29 the rulings of 2026-11-19
+before the plan for step 4. The build order of section 13 says which step proves which point.
 
 1. **Registry order in the nodes.** That a node tries the run's registry first for a host and then
    falls back to the real registry is what the container runtime's documentation and source say
-   (section 16), but it has not been run for this design. First task of the plan. The same task
-   proves three more things:
+   (section 16); it had not been run for this design when this point was written, and was the
+   first plan's first task. The same task proves three more things:
    - that a reference by digest is served by the run's registry when its node entry may serve
      pulls and may not resolve tags, so that a tag is never answered by the run's registry;
    - that a reference with a tag and a digest is pulled by the digest, as the runtime's source
@@ -2390,7 +2490,10 @@ which step proves which point.
 
    It also settles two things that section 9 needs: the one list of places for a host that has
    `as`, a mirror and a `ca` together; and how the tool has a node pull an image during set-up,
-   so that the node uses the registry settings it uses for the kubelet.
+   so that the node uses the registry settings it uses for the kubelet. The proof
+   `docs/proofs/p01-registry-order.md` ran the order, both kinds of reference and the node's pull
+   (section 9). `docs/proofs/p01b-mirror.md` ran the one list of places, with a mirror under a
+   path, in the form with a `server` line.
 2. **Mirrors that need credentials.** Read in source and not run (section 9): an entry's
    credentials reach its mirror, and credentials listed under the mirror's own host are never
    used. The task confirms both with a run. It also finds the mechanism for a mirror whose
@@ -2430,21 +2533,32 @@ which step proves which point.
 8. **kind as a library.** kind's project calls itself alpha grade, has not committed to its
    library surface, and has no compatibility plan between node images and kind releases. The plan
    confirms that the linked release creates a cluster through the Docker and nerdctl providers,
-   with the node settings section 9 needs.
+   with the node settings section 9 needs. The proof `docs/proofs/p08-kind-library.md` ran it
+   through nerdctl only: there kind's own 30-second wait for a node's log line failed in 5 of 9
+   creations, and the tool tries the creation again. Every setting held where the creation
+   returned. Docker was not run.
 9. **Which kind release to link**, and the node images kind lists for it. The tool promises those
-   of them that its suite ran on (section 12).
+   of them that its suite ran on (section 12). `docs/proofs/p09-kind-release.md` answered it: the
+   tool links kind v0.33.0, whose default node image is `kindest/node:v1.37.0`, and the oldest of
+   the four images it lists, v1.34.11, is the suite's second image (section 12).
 10. **The rollout rules.** Whether the Go package that holds the rules of `kubectl rollout status`
     can be imported. Copied rules have to be read again at every Kubernetes minor.
+    `docs/proofs/p10-rollout-rules.md` answered it: importing the package made the binary more
+    than 3 MB larger, so the tool copies the three rules, with a test that compares the copy with
+    kubectl's package.
 11. **A pod's log across rotation.** The kubelet rotates a container's log at 10 MiB by default.
     Whether following the log through the API survives a rotation was not checked. A custom probe
     that prints a line for every check at a high rate reaches that size within minutes. The tool
     follows the log of every watched pod too (section 10), so the answer matters for both. The
     same task settles how a stream that ended early is opened again with no line lost and none
     counted twice. The log API takes a start time in whole seconds, so the tool has to match
-    lines by the runtime's own timestamps.
+    lines by the runtime's own timestamps. `docs/proofs/p11-log-rotation.md` answered it: a
+    followed stream crosses a rotation by itself, and section 6 gives the rule for one that ended
+    early.
 12. **Keys on a rootless engine.** How many kernel keys one cluster uses through a run without the
     setting of section 9. The experiments met the quota with four clusters at once. If one cluster
-    stays well under it, the setting leaves the tool.
+    stays well under it, the setting leaves the tool. `docs/proofs/p12-keys.md` measured more than
+    half the quota while the nodes were deleted, so the setting stays (section 9).
 13. **Masking, and what leaves the runner.** The rule of section 8 needs a security reviewer's eye
     before the first release. So do four facts of section 11: the change under test runs with the
     job's power, every pod in the cluster can read the nodes' credentials, a registry entry's
@@ -2487,10 +2601,12 @@ which step proves which point.
     of the action that is cancelled covers the action.
 21. **Facts that the third review's changes rest on and that nobody read in a source.**
     - That a shell which runs as the first process of a container sets no handler for SIGTERM.
-      The kernel's rule for such a process was read; the shell's side was not. The fixture with
-      a probe that ignores SIGTERM passes either way.
+      The kernel's rule for such a process was read. The shell's side was not, until a run on
+      2026-11-19: busybox's shell, run so with no trap, ignored SIGTERM and was gone only after
+      the grace period (section 16). The fixture with a probe that ignores SIGTERM passes either
+      way.
     - That a pod's status names the digest of the image each container runs. The report's lines
-      for `images` depend on it.
+      for `images` depend on it. The proof of point 1 showed it for images of one manifest each.
     - That an engine in a virtual machine, as Docker Desktop is on Linux, gives the nodes a clock
       of their own, and what bound the clock check needs.
     - That a privileged node lets a pod under test reach the runner. Section 11 assumes that it
@@ -2734,6 +2850,44 @@ which step proves which point.
     **the review's fix**, which counted the registry's limit from the container's start and left
     the pull without a limit.
 
+29. **The custom probe's pod, its image and an early `t`, rulings of 2026-11-19.** Before the plan
+    for step 4, a review of this text found three places where it left a choice open for the
+    custom probe. The maintainer ruled on all three the same day.
+    - **The custom probe's pod.** The text said that a custom probe's image decides whether its
+      pod meets the `restricted` level. Pod Security judges the pod's fields, which the tool
+      writes, and not its image, as a run that day showed (section 16). The maintainer chose that
+      the tool writes a custom probe's pod with the built-in probe's security settings, and with
+      the token of the namespace's default service account mounted (section 6). A probe's program
+      must therefore work as user 65532, whatever user its image names. A probe's pod that the
+      API server refuses ends the run at once as `probe-not-started`, with the API server's text.
+      What lost: **no security settings**, under which the image runs as it was built and a
+      namespace that enforces the `restricted` level refuses the pod; and **the `restricted`
+      fields with no fixed user**, under which an image that runs as root does not start. In the
+      run, busybox, which runs as root, was admitted under them and not started.
+    - **The custom probe's image.** Section 9 stores images by digest only, because a tag can come
+      to name another image with no sign of it, and the configuration asked only that
+      `probe.custom.image` be there. The maintainer chose that the configuration rejects a
+      `probe.custom.image` that carries no digest (section 8). What lost: **a tag**, named in the
+      report by the reference as written and by the digest its pod ran. A tag goes against the
+      rule of section 9, and the digest that a pod's status names was shown for images of one
+      manifest only.
+    - **A `t` before the probe existed.** An observation whose time is before the install window
+      is counted there and judged nowhere (point 25). For a custom probe that holds for any `t`
+      before the window, whenever its line was written, so a `t` that is wrong towards the past
+      moves a failure out of every judged window, and only the install's counts show it. The
+      maintainer chose that a `t` earlier than the moment the tool asked for the probe's pod, by
+      more than the bound of the clock check, is a fault of the line, for every probe (section 6).
+      It does not reverse point 25: every check that the probe's start met began after the tool
+      asked for the pod. A failed check written during the drain whose line is a fault, by such
+      a `t` or in any other way, is not a warning, as the probe's other faults after the last
+      window are: it belongs to the last window, and section 6's rule for such faults, which the
+      first plan's decision 8 set, gives way for that case. The exception first named such a `t`
+      alone; the maintainer widened it the same day, after a re-read found that a failed check
+      written then with another fault of its line still counted nowhere. What lost: **a sentence
+      of warning only**, which would have named the case and left such a failure out of every
+      judged window; and **the exception for such a `t` alone**, which let a failure written
+      during the drain vanish because of the way it was printed.
+
 ## 15. Not in the first release
 
 - A rollback that interrupts a half-finished deploy.
@@ -2956,20 +3110,44 @@ the repository.
 | The same copy with no warm-up, the nodes' value set to 5 s, three runs under both Helm majors | That a node of rootless nerdctl takes the value, and that no failure came after the first second in 6 of 6 runs |
 | The revision's end-to-end runs with the setting: the suite once, then its two failed fixtures again | That no late timeout came in the nine runs that reached the probe, and the two failures that section 14, point 24, names |
 
+Seen on 2026-11-19, for section 14, points 21 and 29. One run on the same workstation made one
+kind cluster, with the kind that the project's `go.mod` pins, `v0.33.0`, and its default node
+image (the script names none), through nerdctl without root, as on 2026-11-17. The cluster ran
+Kubernetes `v1.37.0` and was deleted afterwards. Its pods ran `busybox:1.37.0` from Docker Hub, in
+a namespace whose label made it enforce the `restricted` level at its latest version. Its script
+and output are not filed in the repository.
+
+| Source | What this design takes from it |
+| --- | --- |
+| A pod with no security settings, then the built-in probe's pod as the tool writes it, with busybox and a `sleep` command in place of the probe's image and arguments | That kind enforces the `restricted` level that a namespace's label names: the first pod was refused, with the API server's text, and the second was admitted and ran |
+| The same image in a pod with no security settings, in one with the `restricted` fields and no user, and in one with the settings of section 6 and the service account's token mounted | That Pod Security judges a pod's fields and not its image: the first pod was refused and the other two were admitted. The kubelet did not start the second, because its image runs as root. The third ran as user 65532, and that user could read the mounted token |
+| The loop of section 6, unchanged but for its target, the API server's Service, run as user 65532 | That `nc -z -w1` against an open port, `sleep 0.1` and `trap` work in busybox 1.37.0 as that user, though the failure branch did not run; that the loop wrote 756 lines in 76.5 s, every one valid JSON with `ok` true; that the runtime's timestamps on them were 0.101 to 0.106 s apart, so each line reached the log on its own; that its pod, deleted with a grace period of 10 s, was gone after 1.0 s |
+| A shell as the first process of a container, `while true; do sleep 1; done`, with no trap, then with `trap 'exit 0' TERM` | That the shell with no trap ignored SIGTERM: its pod, deleted with a grace period of 10 s, was gone only after 11.1 s, past the grace period. With the trap it was gone after 0.9 s |
+
 Still not shown by any run or any page: that 15 s is long enough for an install to settle under
 the probe; that a node of Docker or Podman takes the setting of section 14, point 24; that a
 shorter time between the proxy's syncs would hide failures that the fixtures catch. And, from
-before the
-revision: that a node which the tool asks to pull an image uses the
-settings it uses for the kubelet; that nodes behind a proxy reach the run's registry by its
-address; that a shell as the first process of a container ignores SIGTERM; that a pod's status
-names the digest it ran; that Docker Desktop on Linux gives the nodes a clock of their own; that
-a pod in a privileged node can reach the runner; that the fixture for the known miss passes; that
-a job inside a container can reach the cluster; that a larger sync time of the proxy gives no
-delay that can be set; the two rollouts under a reloader; how a mirror under a path behaves; that
-Podman run as root lets the runner reach the node addresses as Docker does; that a port mapping
-cannot be added to a node after it was created; which Go version Helm's released binaries are
-built with; and where a pod goes when the node its volume is tied to cannot take it. That the
-hosted runner's Docker runs as root is read from the image's install script, which no page
-states. What is known of these is reasoned from the sources above or is the drafting session's
-own knowledge, and section 14 lists those of them that need a test.
+before the revision: that nodes behind a proxy reach the run's registry by its address; that
+Docker Desktop on Linux gives the nodes a clock of their own; that a pod in a privileged node can
+reach the runner; that the fixture for the known miss passes; that a job inside a container can
+reach the cluster; that a larger sync time of the proxy gives no delay that can be set; the two
+rollouts under a reloader; that Podman run as root lets the runner reach the node addresses as
+Docker does; that a port mapping cannot be added to a node after it was created; which Go version
+Helm's released binaries are built with; and where a pod goes when the node its volume is tied to
+cannot take it. And, left by the proofs of the build order's second step: a mirror under a path
+in the form with no `server` line, which step 5 writes; a pull that falls through to a real host
+over HTTPS; and that kind creates the cluster through Docker. That the hosted runner's Docker runs
+as root is read from the image's install script, which no page states. What is known of these is
+reasoned from the sources above or is the drafting session's own knowledge, and section 14 lists
+those of them that need a test.
+
+This list named four more facts before. The proofs of the build order's second step showed three
+of them: that a node which the tool asks to pull an image with `crictl pull` uses the settings it
+uses for the kubelet; that a pod's status names the digest it ran, for images of one manifest
+each; and how a mirror under a path behaves, with a settings file that names the real host as its
+`server` (the project's own `docs/proofs/p01-registry-order.md` and `docs/proofs/p01b-mirror.md`).
+The run of 2026-11-19 showed the fourth for busybox's shell: as the first process of a container,
+it ignores SIGTERM unless it sets a trap. Sections 6, 9 and 14 also rest on the project's own
+`docs/proofs/p05-helm-cli.md`, `docs/proofs/p08-kind-library.md`, `docs/proofs/p09-kind-release.md`,
+`docs/proofs/p10-rollout-rules.md`, `docs/proofs/p11-log-rotation.md` and
+`docs/proofs/p12-keys.md`.

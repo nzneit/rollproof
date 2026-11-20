@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"rollproof/internal/config"
 	"rollproof/internal/deploy"
@@ -61,8 +64,9 @@ type resultFile struct {
 		Notes              []string `json:"notes"`
 	} `json:"probes"`
 	Transitions []struct {
-		Name    string `json:"name"`
-		Command string `json:"command"`
+		Name    string  `json:"name"`
+		Command *string `json:"command"` // nil for null
+		Restart *string `json:"restart"` // nil for null
 	} `json:"transitions"`
 }
 
@@ -126,7 +130,7 @@ func TestPass(t *testing.T) {
 	if code := w.run(context.Background()); code != 0 {
 		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
 	}
-	want := []string{"load", "check", "create", "store", "deployer", "fetch", "watcher",
+	want := []string{"load", "check", "create", "store", "deployer", "fetch", "setup", "watcher",
 		"install", "install-ready", "target", "probe", "start", "install-settled", "deploy", "transition-deploy",
 		"rollback", "transition-rollback", "probe-stop", "end-commands", "watch-stop", "delete"}
 	if diff := cmp.Diff(want, w.calls.list()); diff != "" {
@@ -185,7 +189,7 @@ func TestDeployFailsRollbackNotRun(t *testing.T) {
 }
 
 func TestEachBeforeFailure(t *testing.T) {
-	setUp := []string{"load", "check", "create", "store", "deployer", "fetch"}
+	setUp := []string{"load", "check", "create", "store", "deployer", "fetch", "setup"}
 	then := func(tail ...string) []string { return append(append([]string{}, setUp...), tail...) }
 	rows := []struct {
 		name  string
@@ -207,7 +211,10 @@ func TestEachBeforeFailure(t *testing.T) {
 		}, "cluster-failed", []string{"load", "check", "create", "store", "end-commands", "delete"}},
 		{"fetch", func(w *world) {
 			w.deployer.fetchErr = verdict.Condition{Code: verdict.ChartFetchFailed, Text: "the previous release's chart could not be fetched"}
-		}, "chart-fetch-failed", then("end-commands", "delete")},
+		}, "chart-fetch-failed", []string{"load", "check", "create", "store", "deployer", "fetch", "end-commands", "delete"}},
+		{"setup fails", func(w *world) {
+			w.cluster.setup = deploy.Result{Name: "setup", Ending: deploy.ExitedNonZero, ExitCode: 1}
+		}, "setup-failed", then("end-commands", "delete")},
 		{"target", func(w *world) {
 			w.cluster.targetErr = verdict.Condition{Code: verdict.TargetUnsupported, Text: "the Service orders/orders is headless"}
 		}, "target-unsupported", then("watcher", "install", "install-ready", "target", "end-commands", "watch-stop", "delete")},
@@ -219,6 +226,9 @@ func TestEachBeforeFailure(t *testing.T) {
 			w.watcher.installErr = verdict.Condition{Code: verdict.NothingWatched,
 				Text: "15 s after the install command returned, namespace orders held no Deployment, StatefulSet or DaemonSet"}
 		}, "nothing-watched", then("watcher", "install", "install-ready", "end-commands", "watch-stop", "delete")},
+		{"probe options", func(w *world) {
+			w.cluster.probeErr = verdict.Condition{Code: verdict.ConfigRejected, Text: "probe.custom.env[0]: not a form a pod's env takes"}
+		}, "config-rejected", then("watcher", "install", "install-ready", "target", "probe", "end-commands", "watch-stop", "delete")},
 		{"probe not started", func(w *world) {
 			w.probe.startErr = verdict.Condition{Code: verdict.ProbeNotStarted, Text: "no observation within limits.timeout"}
 		}, "probe-not-started", then("watcher", "install", "install-ready", "target", "probe", "start", "probe-stop", "end-commands", "watch-stop", "delete")},
@@ -247,18 +257,111 @@ func TestEachBeforeFailure(t *testing.T) {
 	}
 }
 
+// A setup command stopped by a signal is the signal's, not a failed command: the
+// run reports interrupted and nothing after the set-up starts.
+func TestSetupStoppedBySignal(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.cluster.setup = deploy.Result{Name: "setup", Ending: deploy.StoppedBySignal, ExitCode: -1}
+	w.hooks["setup"] = cancel
+	if code := w.run(ctx); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"interrupted"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	calls := w.calls.list()
+	if slices.Contains(calls, "watcher") || slices.Contains(calls, "install") {
+		t.Errorf("the run went on after the signal: calls %q", calls)
+	}
+}
+
+// A failed setup command is named in the reason by its path and its first word as the
+// configuration writes it, which the run takes from the index that Setup returns.
+func TestSetupFailureNamesTheCommand(t *testing.T) {
+	w := newWorld(t)
+	w.cfg.Setup = [][]string{{"kubectl", "apply"}, {"helm", "repo", "add"}}
+	w.cfg.SetupWords = []string{"kubectl", "${env.HELM}"}
+	w.cluster.setup = deploy.Result{Name: "setup", Ending: deploy.ExitedNonZero, ExitCode: 3}
+	w.cluster.setupIndex = 1
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if window, text := w.result().windowOf("setup-failed"); window != "" || text != "setup[1] (${env.HELM}) exited with code 3" {
+		t.Errorf("setup-failed in window %q with text %q", window, text)
+	}
+}
+
 func TestNotBuilt(t *testing.T) {
 	w := newWorld(t)
-	w.cfg.Probe = config.Probe{Custom: &config.Custom{
-		Image: "registry.example/tools/busybox@sha256:" + strings.Repeat("0", 64)}}
+	w.cfg.Registries = []config.Registry{{Host: "registry.example"}}
 	if code := w.run(context.Background()); code != 2 {
 		t.Fatalf("exit %d, want 2", code)
 	}
 	if diff := cmp.Diff([]string{"load"}, w.calls.list()); diff != "" {
 		t.Errorf("calls (-want +got):\n%s", diff)
 	}
-	if window, text := w.result().windowOf("config-rejected"); window != "" || text != "not built yet: probe.custom" {
+	if window, text := w.result().windowOf("config-rejected"); window != "" || text != "not built yet: registries" {
 		t.Errorf("config-rejected in window %q with text %q", window, text)
+	}
+}
+
+// A custom probe has no target check, and watch is told of no Service: whether a workload is
+// probed is not known (decision 8). result.json names the probe by its image and gives its env's
+// names and the counts of its command and args, never their values (section 8, "Secrets").
+func TestCustomProbeHasNoTargetCheck(t *testing.T) {
+	w := newWorld(t)
+	image := "registry.example/tools/busybox@sha256:" + strings.Repeat("0", 64)
+	w.cfg.Probe = config.Probe{Custom: &config.Custom{Image: image, Command: []string{"sh", "-c", "echo S3CRET-VALUE"},
+		Env: []config.EnvVar{{Name: "TOKEN", ValueFrom: map[string]any{"secretKeyRef": map[string]any{"name": "probe-token", "key": "token"}}}}}}
+	for _, name := range []verdict.WindowName{verdict.Deploy, verdict.Rollback} {
+		tr := w.watcher.transitions[name]
+		tr.Workloads = slices.Clone(tr.Workloads)
+		tr.Workloads[0].Probed = "not known"
+		w.watcher.transitions[name] = tr
+	}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if slices.Contains(w.calls.list(), "target") {
+		t.Errorf("the target was checked for a custom probe: calls %q", w.calls.list())
+	}
+	if w.watcher.service != nil {
+		t.Errorf("UseService was given %v, want nil", w.watcher.service)
+	}
+	if calls := w.watcher.useCalls; len(calls) == 0 || calls[len(calls)-1] != "install-ready" {
+		t.Errorf("UseService came after %q, want install-ready last", calls)
+	}
+	b, err := os.ReadFile(filepath.Join(w.out, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"S3CRET-VALUE", "probe-token"} {
+		if strings.Contains(string(b), value) {
+			t.Errorf("result.json holds %q", value)
+		}
+	}
+	var file map[string]any
+	if err := json.Unmarshal(b, &file); err != nil {
+		t.Fatal(err)
+	}
+	p := file["probes"].([]any)[0].(map[string]any)
+	want := map[string]any{"kind": "custom", "target": image, "env_names": []any{"TOKEN"},
+		"command_count": 3.0, "args_count": 0.0, "certificate_checked": nil}
+	for k, v := range want {
+		if diff := cmp.Diff(v, p[k]); diff != "" {
+			t.Errorf("probes[0].%s (-want +got):\n%s", k, diff)
+		}
+	}
+	if _, ok := p["certificate_checked"]; !ok {
+		t.Error("probes[0] has no certificate_checked")
+	}
+	tr := file["transitions"].([]any)[0].(map[string]any)
+	probed := tr["workloads"].([]any)[0].(map[string]any)["probed"]
+	if probed != "not known" {
+		t.Errorf("transitions[0].workloads[0].probed is %v, want not known", probed)
 	}
 }
 
@@ -452,7 +555,8 @@ func TestSignalDuringDeploy(t *testing.T) {
 		t.Errorf("window results (-want +got):\n%s", diff)
 	}
 	// The command ended before the interrupted check, so the record keeps its ending.
-	if len(r.Transitions) != 1 || r.Transitions[0].Name != "deploy" || r.Transitions[0].Command != "stopped-by-signal" {
+	if len(r.Transitions) != 1 || r.Transitions[0].Name != "deploy" || r.Transitions[0].Command == nil ||
+		*r.Transitions[0].Command != "stopped-by-signal" {
 		t.Errorf("transitions %+v, want deploy with command stopped-by-signal", r.Transitions)
 	}
 	if n := w.calls.count("delete"); n != 0 {
@@ -669,6 +773,114 @@ func TestToolFaultAfterTheLastWindow(t *testing.T) {
 	}
 }
 
+// drainFault is one bad line that the drain gives, written at t0+71s, after
+// the rollback's end at t0+70s; failedCheck says it is a failed check's line.
+func drainFault(failedCheck bool) probe.Event {
+	return probe.Event{Fault: &verdict.Condition{Code: verdict.ProbeLineInvalid,
+		At: t0.Add(71 * time.Second), Text: "the line holds ok twice"}, FailedCheck: failedCheck}
+}
+
+// Section 6 and section 14, point 29: a failed check's line that is a fault, written during the
+// drain, belongs to the last window, so that a failure does not vanish because of its printing.
+func TestAFailedChecksBadLineInTheDrainIsJudged(t *testing.T) {
+	w := newWorld(t)
+	w.probe.last = []probe.Event{drainFault(true)}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"pass", "pass", "not-verified"}, r.results()); diff != "" {
+		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+	if window, _ := r.windowOf("probe-line-invalid"); window != "rollback" {
+		t.Errorf("probe-line-invalid in window %q, want rollback", window)
+	}
+	if len(r.Warnings) != 0 {
+		t.Errorf("warnings %q, want none", r.Warnings)
+	}
+}
+
+func TestAnotherFaultInTheDrainIsAWarning(t *testing.T) {
+	w := newWorld(t)
+	w.probe.last = []probe.Event{drainFault(false)}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if r.Verdict != "pass" {
+		t.Errorf("verdict %q, want pass", r.Verdict)
+	}
+	want := []string{"after the last window: probe-line-invalid: the line holds ok twice"}
+	if diff := cmp.Diff(want, r.Warnings); diff != "" {
+		t.Errorf("warnings (-want +got):\n%s", diff)
+	}
+}
+
+func TestAFailedChecksBadLineGoesToTheLastWindowThatBegan(t *testing.T) {
+	w := newWorld(t)
+	w.probe.events = append(w.probe.events, failureAt(20*time.Second, 20*time.Second))
+	ev := drainFault(true)
+	ev.Fault.At = t0.Add(41 * time.Second) // after the deploy's end at t0+40s; the rollback never runs
+	w.probe.last = []probe.Event{ev}
+	if code := w.run(context.Background()); code != 1 {
+		t.Fatalf("exit %d, want 1\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if window, _ := r.windowOf("probe-line-invalid"); window != "deploy" {
+		t.Errorf("probe-line-invalid in window %q, want deploy; reasons %q, warnings %q", window, r.codes(), r.Warnings)
+	}
+	if len(r.Warnings) != 0 {
+		t.Errorf("warnings %q, want none", r.Warnings)
+	}
+}
+
+// The rule moves only what came at or after the last window's end: a failed check's bad line
+// written inside the deploy window, which the drain gives, stays in deploy, not in the rollback.
+func TestAFailedChecksBadLineBeforeTheLastWindowsEndStaysInItsWindow(t *testing.T) {
+	w := newWorld(t)
+	ev := drainFault(true)
+	ev.Fault.At = t0.Add(20 * time.Second) // inside the deploy window, t0+10s to t0+40s
+	w.probe.last = []probe.Event{ev}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if window, _ := r.windowOf("probe-line-invalid"); window != "deploy" {
+		t.Errorf("probe-line-invalid in window %q, want deploy", window)
+	}
+	if diff := cmp.Diff([]string{"pass", "not-verified", "not-judged"}, r.results()); diff != "" {
+		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+	if len(r.Warnings) != 0 {
+		t.Errorf("warnings %q, want none", r.Warnings)
+	}
+}
+
+func TestMoveToolFaultsRefusesFlagsNotBesideTimed(t *testing.T) {
+	tl := verdict.Timeline{Timed: []verdict.Condition{{Code: verdict.ProbeLineInvalid}, {Code: verdict.InternalError}}}
+	defer func() {
+		want := "moveToolFaults: 1 failed-check flags for 2 timed conditions; they must run index for index"
+		if p := recover(); p != want {
+			t.Errorf("panic %v, want %q", p, want)
+		}
+	}()
+	(&runState{}).moveToolFaults(&tl, []bool{true})
+}
+
+// Carry-in T29-1 stays: a failure of the tool after the last window moves there, failed check or not.
+func TestAToolFaultInTheDrainStillMoves(t *testing.T) {
+	w := newWorld(t)
+	ev := drainFault(false)
+	ev.Fault.Code = verdict.InternalError
+	w.probe.last = []probe.Event{ev}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+	}
+	if window, _ := w.result().windowOf("internal-error"); window != "rollback" {
+		t.Errorf("internal-error in window %q, want rollback", window)
+	}
+}
+
 func TestEvidenceThatCannotBeOpenedIsAWarning(t *testing.T) {
 	w := newWorld(t)
 	w.hooks["store"] = func() {
@@ -684,12 +896,300 @@ func TestEvidenceThatCannotBeOpenedIsAWarning(t *testing.T) {
 		t.Fatalf("exit %d, want 0", code)
 	}
 	r := w.result()
-	if r.Verdict != "pass" || len(r.Warnings) != 2 {
-		t.Fatalf("verdict %q, warnings %q; want a pass with two warnings", r.Verdict, r.Warnings)
+	if r.Verdict != "pass" || len(r.Warnings) != 4 {
+		t.Fatalf("verdict %q, warnings %q; want a pass with four warnings", r.Verdict, r.Warnings)
 	}
-	if !strings.Contains(r.Warnings[0], "probe.log") || !strings.Contains(r.Warnings[1], "windows.json") {
-		t.Errorf("warnings %q do not name the two files", r.Warnings)
+	for i, name := range []string{"probe.log", "windows.json", "timeline.tsv", "events.txt"} {
+		if !strings.Contains(r.Warnings[i], name) {
+			t.Errorf("warning %d is %q; want one that names %s", i, r.Warnings[i], name)
+		}
 	}
+}
+
+// The window marks are in windows.json while the run goes: a transition's finishes as they came,
+// and a window's start before its end.
+func TestWindowMarksAsTheyHappen(t *testing.T) {
+	w := newWorld(t)
+	w.watcher.finishAt = map[verdict.WindowName][]time.Duration{verdict.Deploy: {15 * time.Second, 22 * time.Second}}
+	w.watcher.finishes = make(chan watch.Finish, 8)
+	var during []mark
+	var duringErr error
+	// The hook runs on the command's goroutine: it keeps what it read, and the test judges it here.
+	w.hooks["rollback"] = func() { during, duringErr = w.readMarks() }
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if duringErr != nil {
+		t.Fatalf("windows.json during the rollback: %v", duringErr)
+	}
+	if len(during) != 4 {
+		t.Fatalf("marks during the rollback %+v, want four", during)
+	}
+	deploy, rollback := during[2], during[3]
+	if !when(deploy.Start, t0.Add(10*time.Second)) || !when(deploy.End, t0.Add(40*time.Second)) {
+		t.Errorf("the deploy window is [%v, %v), want [%v, %v)", deploy.Start, deploy.End, t0.Add(10*time.Second), t0.Add(40*time.Second))
+	}
+	want := []time.Time{t0.Add(25 * time.Second), t0.Add(32 * time.Second)}
+	if diff := cmp.Diff(want, deploy.Finishes); diff != "" {
+		t.Errorf("the deploy's finishes (-want +got):\n%s", diff)
+	}
+	if !when(rollback.Start, t0.Add(40*time.Second)) || rollback.End != nil {
+		t.Errorf("the rollback window is [%v, %v), want [%v, null)", rollback.Start, rollback.End, t0.Add(40*time.Second))
+	}
+	if after := w.windowMarks(); len(after) != 4 || !when(after[3].End, t0.Add(70*time.Second)) {
+		t.Errorf("marks after the run %+v; want the rollback to end at %v", after, t0.Add(70*time.Second))
+	}
+}
+
+// A finish is in windows.json while the transition's command still runs: the follower writes it,
+// not the run's next mark.
+func TestAFinishIsWrittenWhileTheWindowIsOpen(t *testing.T) {
+	w := newWorld(t)
+	w.watcher.finishAt = map[verdict.WindowName][]time.Duration{verdict.Deploy: {15 * time.Second}}
+	w.watcher.finishes = make(chan watch.Finish, 8)
+	hold := make(chan struct{})
+	w.deployer.block = map[string]chan struct{}{"deploy": hold}
+	seen := make(chan bool, 1)
+	go func() {
+		defer close(hold)
+		limit := time.After(5 * time.Second)
+		for {
+			b, err := os.ReadFile(filepath.Join(w.out, "evidence", "windows.json"))
+			var ms []mark
+			if err == nil && json.Unmarshal(b, &ms) == nil && len(ms) > 2 && len(ms[2].Finishes) == 1 {
+				seen <- true
+				return
+			}
+			select {
+			case <-limit:
+				seen <- false
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}()
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if !<-seen {
+		t.Error("the deploy's finish was not in windows.json within 5 s while its command ran")
+	}
+}
+
+// Rule 10: a pod log's evidence write that fails only at the watcher's Stop, after the console was
+// printed, is a warning on the console and in result.json.
+func TestWarningAtTheWatchersStop(t *testing.T) {
+	w := newWorld(t)
+	var podLog io.WriteCloser
+	w.hooks["watcher"] = func() { // a follower opens the pod's log and writes its first line
+		podLog, _ = w.evidence("pods/orders-a-1.log")
+		if _, err := podLog.Write([]byte("listening\n")); err != nil {
+			t.Error(err)
+		}
+	}
+	w.hooks["watch-stop"] = func() { // the file is closed under the follower, and its last write fails
+		_ = podLog.Close()
+		_, _ = podLog.Write([]byte("stopped\n"))
+	}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	const prefix = "the evidence pods/orders-a-1.log could not be written: "
+	r := w.result()
+	if len(r.Warnings) != 1 || !strings.HasPrefix(r.Warnings[0], prefix) {
+		t.Errorf("result.json's warnings are %q, want the pod log's", r.Warnings)
+	}
+	lines := strings.Split(strings.TrimSuffix(w.stdout.String(), "\n"), "\n")
+	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "warning: "+prefix) {
+		t.Errorf("the console's last line is %q, want the pod log's warning", last)
+	}
+}
+
+// Rule 10: a pod log's evidence write that fails after the last result.json was written and the
+// console printed, and before the clean-up begins, is a warning in result.json and on the console,
+// told once.
+func TestWarningBetweenTheConsoleAndTheCleanUp(t *testing.T) {
+	w := newWorld(t)
+	var podLog io.WriteCloser
+	w.hooks["watcher"] = func() {
+		podLog, _ = w.evidence("pods/orders-a-1.log")
+	}
+	failed := false
+	w.onStdout = func(p []byte) { // the console's text: result.json is final, and cleanUp has not begun
+		if !failed && bytes.Contains(p, []byte("results: ")) && w.calls.count("watch-stop") == 0 {
+			failed = true
+			_ = podLog.Close()
+			_, _ = podLog.Write([]byte("stopped\n"))
+		}
+	}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if !failed {
+		t.Fatal("the console was not printed before the clean-up")
+	}
+	const prefix = "the evidence pods/orders-a-1.log could not be written: "
+	r := w.result()
+	if len(r.Warnings) != 1 || !strings.HasPrefix(r.Warnings[0], prefix) {
+		t.Errorf("result.json's warnings are %q, want the pod log's", r.Warnings)
+	}
+	if n := strings.Count(w.stdout.String(), prefix); n != 1 {
+		t.Errorf("the console tells the pod log's warning %d times, want once:\n%s", n, w.stdout.String())
+	}
+}
+
+// Section 14, point 25: the checks that the probe's start met, whose lines were written about 2 s
+// after their t, are counted in the install window, and so are in timeline.tsv's rows, which then
+// begin at the second of the earliest of them; the rows' sums equal the counts of result.json.
+func TestTimelineHoldsTheChecksTheInstallCounts(t *testing.T) {
+	w := newWorld(t)
+	events := []probe.Event{failureAt(-17*time.Second, -15*time.Second)} // the first observation
+	events = append(events, passes(-15, -15)...)
+	events = append(events, failureAt(-16600*time.Millisecond, -14600*time.Millisecond),
+		failureAt(-16200*time.Millisecond, -14200*time.Millisecond))
+	w.probe.events = append(events, passes(-14, 70)...)
+	w.run(context.Background())
+	r := w.result()
+	if r.Install == nil || r.Install.Failed != 3 {
+		t.Fatalf("install %+v, want the three failures of the probe's start counted", r.Install)
+	}
+	b, err := os.ReadFile(filepath.Join(w.out, "evidence", "timeline.tsv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")[1:]
+	if !strings.HasPrefix(rows[0], "2026-11-13T09:59:43Z\t") {
+		t.Fatalf("timeline.tsv's first row is %q, want the second of the earliest check, 09:59:43", rows[0])
+	}
+	if len(rows) != 87 {
+		t.Errorf("%d rows, want 87: from t0-17s to the rollback's end at t0+70s", len(rows))
+	}
+	checks, failed := 0, 0
+	for _, row := range rows {
+		f := strings.Split(row, "\t")
+		c, err1 := strconv.Atoi(f[1])
+		n, err2 := strconv.Atoi(f[2])
+		if err1 != nil || err2 != nil {
+			t.Fatalf("row %q does not hold two counts", row)
+		}
+		checks, failed = checks+c, failed+n
+	}
+	want := r.Install.Checks
+	for _, win := range r.Windows {
+		want += win.Checks
+	}
+	if checks != want || failed != r.Install.Failed {
+		t.Errorf("the rows sum to %d checks and %d failed, want %d and %d, the counts of result.json",
+			checks, failed, want, r.Install.Failed)
+	}
+}
+
+func TestTimelineAndEventsAreWritten(t *testing.T) {
+	w := newWorld(t)
+	w.watcher.podEvents = []watch.PodEvent{{At: t0.Add(12 * time.Second), Pod: "orders-7f8e9d-k3m2p", Workload: "deployment/orders", Kind: "created"}}
+	w.watcher.events = "Normal Scheduled pod/orders-7f8e9d-k3m2p\n"
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	b, err := os.ReadFile(filepath.Join(w.out, "evidence", "timeline.tsv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const header = "second\tchecks\tfailed\tpod events\n"
+	if !strings.HasPrefix(string(b), header) {
+		t.Fatalf("timeline.tsv begins %q, want the header %q", b, header)
+	}
+	rows := strings.Split(strings.TrimSuffix(strings.TrimPrefix(string(b), header), "\n"), "\n")
+	if len(rows) != 85 {
+		t.Errorf("%d rows, want 85: from t0-15s to the rollback's end at t0+70s", len(rows))
+	}
+	found := false
+	for _, row := range rows {
+		if strings.HasPrefix(row, "2026-11-13T10:00:12Z\t") {
+			found = true
+			if !strings.HasSuffix(row, "\tcreated orders-7f8e9d-k3m2p (deployment/orders)") {
+				t.Errorf("row %q does not end with the pod's creation", row)
+			}
+		}
+	}
+	if !found {
+		t.Error("no row for 2026-11-13T10:00:12Z")
+	}
+	if b, err := os.ReadFile(filepath.Join(w.out, "evidence", "events.txt")); err != nil || string(b) != w.watcher.events {
+		t.Errorf("events.txt is %q, %v; want %q", b, err, w.watcher.events)
+	}
+	calls := w.watcher.eventsCalls
+	if len(calls) == 0 || calls[len(calls)-1] != "end-commands" || slices.Contains(calls, "watch-stop") || slices.Contains(calls, "delete") {
+		t.Errorf("the events were listed after %v; want after end-commands, before watch-stop and delete", calls)
+	}
+}
+
+// Review Focus 4: evidence that cannot be completed after the verdict is a warning, and the
+// verdict and result.json stand.
+func TestEvidenceFailuresAreWarnings(t *testing.T) {
+	t.Run("the completion panics", func(t *testing.T) {
+		w := newWorld(t)
+		w.watcher.eventsPanic = true
+		if code := w.run(context.Background()); code != 0 {
+			t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+		}
+		r := w.result()
+		if !r.Final || r.Verdict != "pass" {
+			t.Errorf("final %v, verdict %q; want a final pass", r.Final, r.Verdict)
+		}
+		want := []string{"the tool failed after the verdict was decided: the event list broke"}
+		if diff := cmp.Diff(want, r.Warnings); diff != "" {
+			t.Errorf("warnings (-want +got):\n%s", diff)
+		}
+		if !strings.HasPrefix(w.stdout.String(), "rollproof: PASS") {
+			t.Errorf("stdout begins %q, want the console's first line", w.stdout.String())
+		}
+	})
+	t.Run("the evidence folder is gone", func(t *testing.T) {
+		w := newWorld(t)
+		w.hooks["probe-stop"] = func() {
+			dir := filepath.Join(w.out, "evidence")
+			if err := os.RemoveAll(dir); err != nil {
+				t.Error(err)
+			}
+			if err := os.WriteFile(dir, []byte("x"), 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+		if code := w.run(context.Background()); code != 0 {
+			t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+		}
+		r := w.result()
+		if !r.Final || r.Verdict != "pass" || len(r.Warnings) != 3 {
+			t.Fatalf("final %v, verdict %q, warnings %q; want a final pass with three warnings", r.Final, r.Verdict, r.Warnings)
+		}
+		for i, name := range []string{"windows.json", "timeline.tsv", "events.txt"} {
+			if !strings.Contains(r.Warnings[i], name) {
+				t.Errorf("warning %d is %q; want one that names %s", i, r.Warnings[i], name)
+			}
+		}
+	})
+	t.Run("the API server stops answering", func(t *testing.T) {
+		limit := completionLimit
+		completionLimit = 50 * time.Millisecond
+		defer func() { completionLimit = limit }()
+		w := newWorld(t)
+		w.watcher.eventsWait = true
+		began := time.Now()
+		if code := w.run(context.Background()); code != 0 {
+			t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+		}
+		if took := time.Since(began); took > 5*time.Second {
+			t.Errorf("the run took %v, want under 5 s", took)
+		}
+		r := w.result()
+		if !r.Final || r.Verdict != "pass" {
+			t.Errorf("final %v, verdict %q; want a final pass", r.Final, r.Verdict)
+		}
+		if diff := cmp.Diff([]string{"the events were not written: context deadline exceeded"}, r.Warnings); diff != "" {
+			t.Errorf("warnings (-want +got):\n%s", diff)
+		}
+	})
 }
 
 func TestWindowMarks(t *testing.T) {
@@ -1013,18 +1513,29 @@ func TestNoGapBetweenWindows(t *testing.T) {
 	}
 }
 
-// windowMarks reads the windows' boundaries from the evidence folder.
+// windowMarks reads the windows' boundaries from the evidence folder, and fails the test when it
+// cannot. Only the test's goroutine calls it.
 func (w *world) windowMarks() []mark {
 	w.t.Helper()
+	marks, err := w.readMarks()
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return marks
+}
+
+// readMarks reads and decodes windows.json, and reports its error to the caller: safe from any
+// goroutine.
+func (w *world) readMarks() ([]mark, error) {
 	b, err := os.ReadFile(filepath.Join(w.out, "evidence", "windows.json"))
 	if err != nil {
-		w.t.Fatalf("read windows.json: %v", err)
+		return nil, fmt.Errorf("read windows.json: %w", err)
 	}
 	var marks []mark
 	if err := json.Unmarshal(b, &marks); err != nil {
-		w.t.Fatalf("decode windows.json: %v", err)
+		return nil, fmt.Errorf("decode windows.json: %w", err)
 	}
-	return marks
+	return marks, nil
 }
 
 func TestTheRecordKeepsThePodsAtTheFirstFailure(t *testing.T) {
@@ -1232,6 +1743,8 @@ type panicWriter struct{}
 func (*panicWriter) Final(report.Run) error { panic("the results writer broke") }
 
 func (*panicWriter) Evidence(string) (io.WriteCloser, error) { return nopWriteCloser{io.Discard}, nil }
+
+func (*panicWriter) ReplaceEvidence(string, []byte) error { return nil }
 
 func (*panicWriter) Dir() string { return "out" }
 
@@ -1764,7 +2277,7 @@ func TestTheReaderStartsWithTheProbe(t *testing.T) {
 	var early []probe.Event
 	for i := range 5000 { // one check every 2 ms for the probe's first 10 s
 		at := first.Add(time.Duration(i) * 2 * time.Millisecond)
-		early = append(early, probe.Event{Obs: &verdict.Observation{Written: at, T: at, OK: true, N: 1, Ms: 30, Lag: 2}})
+		early = append(early, probe.Event{Obs: &verdict.Observation{Written: at, T: at, OK: true, N: 1, Ms: 30, HasMs: true, Lag: 2, HasLag: true}})
 	}
 	w.probe.events = append(early, w.probe.events...)
 	done := make(chan int, 1)
@@ -2179,11 +2692,24 @@ func TestWhileTheProbeStopsAfterAToolFailure(t *testing.T) {
 // Rule 8: a condition of the install window that the tool learns of only after the steady window
 // began is placed late. The steady window runs to its end, and the run stops there.
 func TestAnInstallWindowJudgedLate(t *testing.T) {
+	installWindowJudgedLate(t, false)
+}
+
+// The same, for a failed check's bad line: it stays in the install window, which holds its time,
+// and does not move to the steady window, the last that began.
+func TestAFailedChecksInstallWindowLineJudgedLateStaysInstall(t *testing.T) {
+	installWindowJudgedLate(t, true)
+}
+
+// installWindowJudgedLate runs TestAnInstallWindowJudgedLate's case, with the late line a failed
+// check's line when failedCheck is true.
+func installWindowJudgedLate(t *testing.T, failedCheck bool) {
+	t.Helper()
 	w := newWorld(t)
 	u := w.units()
 	u.Clock = &lateClock{fakeClock: w.clock, before: func() {
 		w.probe.send(probe.Event{Fault: &verdict.Condition{Code: verdict.ProbeLineInvalid,
-			Text: "the line is not one JSON object", At: t0.Add(-5 * time.Second)}})
+			Text: "the line is not one JSON object", At: t0.Add(-5 * time.Second)}, FailedCheck: failedCheck})
 	}}
 	code := Run(context.Background(), Options{ConfigPath: filepath.Join(w.cfg.Dir, "rollproof.yaml"), Out: w.out,
 		Stdout: &w.stdout, Stderr: &w.stderr, Version: "test", Getenv: func(string) string { return "" }}, u)
@@ -2202,5 +2728,277 @@ func TestAnInstallWindowJudgedLate(t *testing.T) {
 	}
 	if n := w.calls.count("deploy"); n != 0 {
 		t.Errorf("deploy was called %d times, want 0", n)
+	}
+}
+
+// restartWorld is a world whose deployer gives a restart alone, as a Helm driver with no previous
+// release does, and whose restart replaces both pods of deployment/orders.
+func restartWorld(t *testing.T) *world {
+	w := newWorld(t)
+	w.deployer.transitions = []verdict.WindowName{verdict.Restart}
+	w.watcher.restart = watch.Restart{Accepted: true}
+	w.watcher.transitions[verdict.Restart] = w.watcher.transitions[verdict.Deploy]
+	return w
+}
+
+// after gives the calls that follow the first call named name.
+func after(calls []string, name string) []string {
+	i := slices.Index(calls, name)
+	if i < 0 {
+		return nil
+	}
+	return calls[i+1:]
+}
+
+// A restart's window runs the watcher's restart in place of a command and then waits for the
+// transition as for any other; its record says that the API server took the change, and a pass
+// says that only a restart was tested.
+func TestRestartTransition(t *testing.T) {
+	w := restartWorld(t)
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	got := after(w.calls.list(), "install-settled")
+	if len(got) < 3 || !slices.Equal(got[:3], []string{"restart", "transition-restart", "probe-stop"}) {
+		t.Errorf("the calls after install-settled are %q, want restart, transition-restart, probe-stop first", got)
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"pass", "pass"}, r.results()); diff != "" {
+		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+	if len(r.Windows) != 2 || r.Windows[0].Name != "steady" || r.Windows[1].Name != "restart" {
+		t.Errorf("windows %+v, want steady and restart", r.Windows)
+	}
+	if len(r.Transitions) != 1 || r.Transitions[0].Command != nil || r.Transitions[0].Restart == nil ||
+		*r.Transitions[0].Restart != "accepted" {
+		t.Errorf("transitions %+v, want one with command null and restart accepted", r.Transitions)
+	}
+	const line = "\n  a deploy to another release and a rollback, because only a restart was tested\n"
+	if !strings.Contains(w.stdout.String(), line) {
+		t.Errorf("stdout has no %q:\n%s", line, w.stdout.String())
+	}
+}
+
+// A restart that the API server refused makes its window not verified as restart-failed, with the
+// workload and the server's text, and never as a transition that replaced no pod.
+func TestRestartStopsAtARefusal(t *testing.T) {
+	w := restartWorld(t)
+	w.watcher.restart = watch.Restart{Accepted: false, Workload: "statefulset/db",
+		Text: `admission webhook "deny" denied the request`}
+	w.watcher.transitions[verdict.Restart] = watch.Transition{}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"restart-failed"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	const want = `the API server refused the restart of statefulset/db: admission webhook "deny" denied the request`
+	if window, text := r.windowOf("restart-failed"); window != "restart" || text != want {
+		t.Errorf("restart-failed in window %q with text %q, want restart with %q", window, text, want)
+	}
+	if len(r.Transitions) != 1 || r.Transitions[0].Restart == nil || *r.Transitions[0].Restart != "refused" {
+		t.Errorf("transitions %+v, want one with restart refused", r.Transitions)
+	}
+}
+
+// In a restart-only run the install installs the candidate, and the install's texts name it
+// (section 4, "A run with no previous release"); a run with a previous release keeps the texts as
+// they are.
+func TestRestartOnlyInstallNamesTheCandidate(t *testing.T) {
+	restartOnly := []verdict.WindowName{verdict.Restart}
+	both := []verdict.WindowName{verdict.Deploy, verdict.Rollback}
+	settleWith := func(text string) func(w *world) {
+		return func(w *world) {
+			w.watcher.settle = func(first time.Time) watch.Settling {
+				return watch.Settling{First: first, Ended: first.Add(5 * time.Second),
+					InWindow: []verdict.Condition{{Code: verdict.InstallFailed, At: first.Add(5 * time.Second), Text: text}}}
+			}
+		}
+	}
+	settleBefore := func(text string) func(w *world) {
+		return func(w *world) {
+			w.watcher.settle = func(first time.Time) watch.Settling {
+				return watch.Settling{First: first, Ended: first.Add(5 * time.Second),
+					Before: []verdict.Condition{{Code: verdict.InstallFailed, Text: text}}}
+			}
+		}
+	}
+	const (
+		within  = "the install was not ready within limits.timeout\ndeployment/orders: 0 of 2 ready"
+		passed  = "the install was not ready when limits.timeout passed\npod orders-1 was deleted"
+		stopped = "the install stopped being ready after limits.timeout, while it still settled\npod orders-1 was deleted"
+	)
+	for _, row := range []struct {
+		name        string
+		transitions []verdict.WindowName
+		fault       func(w *world)
+		window      string
+		text        string
+		detail      []string
+	}{
+		{"the install exits non-zero, restart only", restartOnly, func(w *world) {
+			w.deployer.results["install"] = deploy.Result{Ending: deploy.ExitedNonZero, ExitCode: 1}
+		}, "", "the install of the candidate exited with code 1", nil},
+		{"the install exits non-zero, with a previous release", both, func(w *world) {
+			w.deployer.results["install"] = deploy.Result{Ending: deploy.ExitedNonZero, ExitCode: 1}
+		}, "", "the install command exited with code 1", nil},
+		{"not ready within the limit, restart only", restartOnly, func(w *world) {
+			w.watcher.installErr = verdict.Condition{Code: verdict.InstallFailed, Text: within}
+		}, "", "the install of the candidate was not ready within limits.timeout", []string{"deployment/orders: 0 of 2 ready"}},
+		{"not ready within the limit, with a previous release", both, func(w *world) {
+			w.watcher.installErr = verdict.Condition{Code: verdict.InstallFailed, Text: within}
+		}, "", "the install was not ready within limits.timeout", []string{"deployment/orders: 0 of 2 ready"}},
+		{"not ready when the limit passed, restart only", restartOnly, settleWith(passed),
+			"install", "the install of the candidate was not ready when limits.timeout passed", []string{"pod orders-1 was deleted"}},
+		{"not ready when the limit passed, with a previous release", both, settleWith(passed),
+			"install", "the install was not ready when limits.timeout passed", []string{"pod orders-1 was deleted"}},
+		{"stopped being ready, restart only", restartOnly, settleWith(stopped),
+			"install", "the install of the candidate stopped being ready after limits.timeout, while it still settled", []string{"pod orders-1 was deleted"}},
+		{"stopped being ready, with a previous release", both, settleWith(stopped),
+			"install", "the install stopped being ready after limits.timeout, while it still settled", []string{"pod orders-1 was deleted"}},
+		{"stopped being ready before the install window, restart only", restartOnly, settleBefore(stopped),
+			"", "the install of the candidate stopped being ready after limits.timeout, while it still settled", []string{"pod orders-1 was deleted"}},
+		{"stopped being ready before the install window, with a previous release", both, settleBefore(stopped),
+			"", "the install stopped being ready after limits.timeout, while it still settled", []string{"pod orders-1 was deleted"}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.deployer.transitions = row.transitions
+			row.fault(w)
+			if code := w.run(context.Background()); code != 2 {
+				t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+			}
+			r := w.result()
+			if diff := cmp.Diff([]string{"install-failed"}, r.codes()); diff != "" {
+				t.Errorf("reasons (-want +got):\n%s", diff)
+			}
+			if window, text := r.windowOf("install-failed"); window != row.window || text != row.text {
+				t.Errorf("install-failed in window %q with text %q, want %q with %q", window, text, row.window, row.text)
+			}
+			if diff := cmp.Diff(row.detail, r.detailOf("install-failed"), cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("detail (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A panic in the restart is the tool's failure, caught as a command's is and placed in the
+// restart's window.
+func TestRestartPanics(t *testing.T) {
+	w := restartWorld(t)
+	w.watcher.restartPanics = true
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if !slices.Contains(r.codes(), "internal-error") {
+		t.Fatalf("reasons %q, want internal-error", r.codes())
+	}
+	if window, text := r.windowOf("internal-error"); window != "restart" || !strings.Contains(text, "the restart broke") {
+		t.Errorf("internal-error in window %q with text %q, want restart with the panic's text", window, text)
+	}
+}
+
+// A transition whose name the run cannot start is the tool's failure, and is never run as a
+// deploy.
+func TestUnknownTransition(t *testing.T) {
+	w := newWorld(t)
+	w.deployer.transitions = []verdict.WindowName{"upgrade"}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"internal-error"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	if _, text := r.windowOf("internal-error"); text != "the tool cannot start a upgrade transition" {
+		t.Errorf("internal-error with text %q", text)
+	}
+	for _, name := range []string{"deploy", "rollback", "restart"} {
+		if n := w.calls.count(name); n != 0 {
+			t.Errorf("%s called %d times, want 0", name, n)
+		}
+	}
+}
+
+// A run with a deploy and no rollback runs the deploy alone, and its pass says what that leaves
+// out.
+func TestDeployWithoutRollback(t *testing.T) {
+	w := newWorld(t)
+	w.deployer.transitions = []verdict.WindowName{verdict.Deploy}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if n := w.calls.count("rollback"); n != 0 {
+		t.Errorf("rollback called %d times, want 0", n)
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"pass", "pass"}, r.results()); diff != "" {
+		t.Errorf("window results (-want +got):\n%s", diff)
+	}
+	const line = "the candidate's shutdown and the installed release's start-up, because the run has no rollback"
+	if !strings.Contains(w.stdout.String(), line) {
+		t.Errorf("stdout has no %q:\n%s", line, w.stdout.String())
+	}
+}
+
+// A restart that limits.timeout cut, and no signal, is a stall told once with the watcher's own,
+// never a refusal: its record's restart is null.
+func TestRestartStoppedAtTheLimit(t *testing.T) {
+	w := restartWorld(t)
+	w.cfg.Limits.Timeout = 50 * time.Millisecond
+	w.watcher.restartWaits = true
+	w.watcher.transitions[verdict.Restart] = watch.Transition{Stalled: true}
+	done := make(chan int, 1)
+	go func() { done <- w.run(context.Background()) }()
+	var code int
+	select {
+	case code = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run still waits for a restart that limits.timeout should have stopped")
+	}
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 (a stall is a fail)\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"transition-stalled"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	if window, text := r.windowOf("transition-stalled"); window != "restart" ||
+		!strings.Contains(text, "the restart was still running at limits.timeout") {
+		t.Errorf("transition-stalled in window %q with text %q", window, text)
+	}
+	if len(r.Transitions) != 1 || r.Transitions[0].Restart != nil {
+		t.Errorf("transitions %+v, want one with restart null", r.Transitions)
+	}
+}
+
+// A restart that a signal cut short is interrupted and never reaches the restart's own judgement:
+// no refusal is told and its record's restart is null.
+func TestRestartInterrupted(t *testing.T) {
+	w := restartWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.watcher.restart = watch.Restart{Accepted: false, Text: "context canceled"}
+	w.hooks["restart"] = cancel
+	if code := w.run(ctx); code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if diff := cmp.Diff([]string{"interrupted"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	if len(r.Transitions) != 1 || r.Transitions[0].Restart != nil {
+		t.Errorf("transitions %+v, want one with restart null", r.Transitions)
+	}
+	raw, err := os.ReadFile(filepath.Join(w.out, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for where, text := range map[string]string{"stdout": w.stdout.String(), "result.json": string(raw)} {
+		if strings.Contains(text, "refused the restart of") {
+			t.Errorf("%s tells of a refusal:\n%s", where, text)
+		}
 	}
 }
