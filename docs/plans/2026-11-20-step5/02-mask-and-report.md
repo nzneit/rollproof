@@ -44,7 +44,7 @@ func TestFormsOfAPassword(t *testing.T) {
 	padded := base64.StdEncoding.EncodeToString([]byte(user + ":" + pw))
 	forms := map[string]string{
 		"plain":                  pw,
-		"JSON with HTML escaping": jsonForm(t, pw, true),  // pa\"ss\\w<&>\u0001
+		"JSON with HTML escaping": jsonForm(t, pw, true),  // pa\"ss\\w\u003c\u0026\u003e\u0001
 		"JSON":                   jsonForm(t, pw, false), // pa\"ss\\w<&>\u0001
 		"Go":                     strconv.Quote(pw)[1 : len(strconv.Quote(pw))-1], // pa\"ss\\w<&>\x01
 		"base64 without padding": base64.RawStdEncoding.EncodeToString([]byte(user + ":" + pw)),
