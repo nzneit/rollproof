@@ -43,8 +43,7 @@ type Options struct {
 	// MirrorNote names the mirror of an image's host, as Config.MirrorNote
 	// does, for the texts that list a pod: a container that waits with
 	// ErrImagePull or ImagePullBackOff gets "; " and the sentence after its
-	// state when the sentence is not empty. Nil names none. The Watcher hands
-	// it to its Tracker.
+	// state when the sentence is not empty. Nil names none.
 	MirrorNote func(image string) string
 	// ProbeNamespace is the probe's namespace, whose events WriteEvents writes
 	// beside those of Namespace; the tool passes rollproof-probe. Empty writes

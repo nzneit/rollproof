@@ -83,9 +83,8 @@ func (w *wiring) create(ctx context.Context, cfg *config.Config, name string, ev
 	return &session{c: c, client: client, cfg: cfg, evidence: evidence}, nil
 }
 
-// clusterSpec is the Spec that Create gets for cfg and the cluster's full name n: the fields that
-// create writes today, the configuration's registries, and AsHosts from cfg.AsHosts(), so that
-// every node's settings for those hosts list the run's registry first.
+// clusterSpec is the Spec that Create gets for cfg and the cluster's full name n. AsHosts comes
+// from cfg.AsHosts(), so that every node's settings for those hosts list the run's registry first.
 func clusterSpec(cfg *config.Config, n string, keep bool, evidence func(string) (io.WriteCloser, error)) cluster.Spec {
 	return cluster.Spec{
 		Name:          n,

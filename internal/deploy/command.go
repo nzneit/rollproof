@@ -165,8 +165,9 @@ func (discardCloser) Close() error                { return nil }
 // Write as they are; each output stream of the command goes in through its
 // own stream, which passes on only whole lines, so the two streams interleave
 // only at line ends and a password that one stream prints across two reads of
-// its pipe reaches the masking writer in one piece. It remembers the last byte
-// the evidence received and never fails the command.
+// its pipe reaches the masking writer with no byte of the other stream inside
+// it. It remembers the last byte the evidence received and never fails the
+// command.
 type sink struct {
 	mu             sync.Mutex
 	w              io.WriteCloser
@@ -176,7 +177,9 @@ type sink struct {
 }
 
 // lineMax is the most a stream's partial line holds: at this size, with no
-// newline, it is passed on as it is.
+// newline, it is passed on as it is, so that a stream that never writes a
+// newline neither holds all its output in memory nor keeps it from the
+// evidence until the command ends.
 const lineMax = 64 << 10
 
 // put passes p to the evidence unless the evidence is closed. s.mu is held.
@@ -198,7 +201,9 @@ func (s *sink) Write(p []byte) (int, error) {
 // stream is one output stream of a command. A write is added to the stream's
 // partial line, and every complete line, up to and including its last
 // newline, is passed to the evidence; a partial line of lineMax bytes is
-// passed on as it is. What comes after the evidence is closed is dropped.
+// passed on as it is. What comes after the evidence is closed, from a process
+// the command left behind, is dropped and reported as written: a failed write
+// would only stop the copy from draining the pipe.
 type stream struct {
 	s       *sink
 	partial *[]byte // &s.stdout or &s.stderr

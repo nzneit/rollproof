@@ -497,14 +497,10 @@ func TestPodStateTextNamesTheMirror(t *testing.T) {
 		return ""
 	}
 	pod := waiting("ImagePullBackOff", "Back-off pulling image \""+img+"\"")
-	// podStateText(pod, noteOf) ==
-	//   "the pod is Pending; container probe is waiting: ImagePullBackOff: Back-off pulling image \"" + img + "\"; " + mirrorNote
 	want := "the pod is Pending; container probe is waiting: ImagePullBackOff: Back-off pulling image \"" + img + "\"; " + mirrorNote
 	if got := podStateText(pod, noteOf); got != want {
 		t.Errorf("podStateText = %q, want %q", got, want)
 	}
-	// podStateText(pod, nil) has no "; the nodes pull"; so for ErrImagePull with the note, and
-	// ContainerCreating gives no note.
 	if got := podStateText(pod, nil); strings.Contains(got, "; the nodes pull") {
 		t.Errorf("podStateText with a nil note = %q, want no sentence", got)
 	}
