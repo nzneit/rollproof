@@ -1,10 +1,10 @@
 // Package e2e runs the real rollproof binary against the fixture service,
 // one fixture of the design's section 12 at a time, under Helm 3 and Helm 4.
 //
-// The fixture rows carry the build tag e2e. The tests of config_test.go carry
-// none: they check the run description, the window marks and the actions with
-// no cluster, so `go test ./...` runs them, and `go test -tags e2e ./e2e/`
-// runs them too.
+// The fixture rows carry the build tag e2e. The tests of config_test.go and
+// mirror_helpers_test.go carry none: they check the run description, the
+// window marks, the actions and the mirror job's helpers with no cluster, so
+// `go test ./...` runs them, and `go test -tags e2e ./e2e/` runs them too.
 //
 // The suite runs every row of section 12 under both Helm majors and takes
 // about two and a half hours. It needs Linux, a container engine that kind supports

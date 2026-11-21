@@ -92,9 +92,9 @@ func TestMirror(t *testing.T) {
 
 // holdRunImages makes sure that the engine holds the node image and the registry image that
 // bin/rollproof version names on its lines "node image REF" and "registry image REF": each is
-// pulled now when `E image inspect REF` fails, so that the run asks the engine for no pull
-// (decision 18). A version command that fails, a line that is missing, or a pull that fails,
-// fails the test.
+// pulled now when `E image inspect REF` fails, so that the run asks the engine for no pull: the
+// job cuts the nodes' route to public registries and not the engine's (decision 18). A version
+// command that fails, a line that is missing, or a pull that fails, fails the test.
 func holdRunImages(t *testing.T) {
 	t.Helper()
 	out, err := exec.Command(filepath.Join(root, "bin", "rollproof"), "version").CombinedOutput()

@@ -14,6 +14,8 @@ defaults:
 jobs:
   mirror:
     runs-on: ubuntu-24.04
+    # Longer than go test's -timeout 60m below plus the steps before it, so that a hung test ends
+    # by its own limit, with its goroutine dump and its cleanups, before GitHub cancels the job.
     timeout-minutes: 75
     env:
       CGO_ENABLED: "0"

@@ -108,7 +108,9 @@ func mirrorSetup(in mirrorInputs) [][]string {
 
 // cutScript is the script that cuts a node's route to everything but the engine network's
 // subnets, kind's pod and service subnets, loopback, and IPv6 link-local and multicast; it fails
-// when it finds no IPv4 subnet or when its chain is missing afterwards.
+// when it finds no IPv4 subnet or when its chain is missing afterwards. It uses iptables-nft, as
+// p02b does: the node's iptables uses the legacy backend, whose filter table a rootless node
+// cannot make.
 const cutScript = `set -e
 v4=$(ip -4 -o route show dev eth0 scope link | cut -d' ' -f1)
 v6=$(ip -6 -o route show dev eth0 | cut -d' ' -f1)
@@ -218,7 +220,8 @@ func newPassword() (string, error) {
 }
 
 // passwordForms returns every form to search for, each once: plain, the base64 of USER:PASSWORD
-// padded and not, the JSON spellings with and without HTML escaping, and the Go spelling.
+// padded and not, the JSON spellings with and without HTML escaping, and the Go spelling with
+// its quotes, as strconv.Quote writes it.
 func passwordForms(user, password string) []string {
 	credential := user + ":" + password
 	quoted, _ := json.Marshal(password) // a string always encodes
@@ -247,8 +250,9 @@ func passwordForms(user, password string) []string {
 }
 
 // findForms walks every regular file under root and returns, sorted, "PATH holds form I" for each
-// file that holds a form, PATH relative to root; none is empty. I is the form's 0-based index in
-// forms, never its text, and an empty form is skipped rather than searched.
+// file that holds a form, PATH relative to root. I is the form's 0-based index in forms, never
+// its text. forms should hold no empty string; one that does is skipped rather than searched,
+// since it would make every file a finding.
 func findForms(root string, forms []string) ([]string, error) {
 	var found []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -288,7 +292,8 @@ type standinRequest struct {
 }
 
 // parseStandinLog returns the addresses of the CONN lines and the REQ lines of a stand-in's log,
-// in order; other lines are skipped.
+// in order; other lines are skipped, and so is a REQ line that is cut short, so that it hides no
+// line after it.
 func parseStandinLog(text string) (conns []string, reqs []standinRequest) {
 	for _, line := range strings.Split(text, "\n") {
 		switch {
@@ -359,9 +364,6 @@ func TestLoopbackProblems(t *testing.T) {
 }
 
 func TestCutScript(t *testing.T) {
-	// exec.Command("sh", "-n", "-c", cutScript) exits 0; the script holds "-I OUTPUT 1 -j ROLLPROOF-CUT"
-	// and "-I FORWARD 1 -j ROLLPROOF-CUT" for both families, "10.244.0.0/16", "10.96.0.0/16",
-	// "fe80::/10", "ff00::/8", "--reject-with tcp-reset", and its last line checks the IPv6 chain.
 	if out, err := exec.Command("sh", "-n", "-c", cutScript).CombinedOutput(); err != nil {
 		t.Fatalf("sh -n rejected the cut: %v\n%s", err, out)
 	}
@@ -383,9 +385,7 @@ func TestCutScript(t *testing.T) {
 
 func TestNewAuthority(t *testing.T) {
 	// The folder holds exactly ca.pem, server.pem and server-key.pem, so no key of the authority
-	// is written; the server certificate verifies against ca.pem for the DNS names mirrorName and
-	// realName and for the IP 127.0.0.1; server-key.pem is its key (tls.LoadX509KeyPair); every
-	// file is 0644.
+	// is written.
 	dir := t.TempDir()
 	caPath, err := newAuthority(dir)
 	if err != nil {
@@ -451,9 +451,6 @@ func TestNewAuthority(t *testing.T) {
 }
 
 func TestPasswordForms(t *testing.T) {
-	// newPassword gives 23 bytes ending in `"&<`, a new one each call; passwordForms("rollproof", pw)
-	// holds pw, base64 of "rollproof:"+pw padded and not, json.Marshal's spelling without its quotes,
-	// the spelling without HTML escaping, and strconv.Quote's, each once.
 	pw, err := newPassword()
 	if err != nil {
 		t.Fatal(err)
@@ -511,13 +508,8 @@ func TestPasswordForms(t *testing.T) {
 
 func TestFindForms(t *testing.T) {
 	// A finding names the form's 0-based index, never its text, and an empty form is never
-	// searched. With forms {"alpha", "bravo", ""}, a/b.log holding "before bravo after" and c.txt
-	// holding none, findForms gives exactly {"a/b.log holds form 1"}: a finding that printed the
-	// text would say "holds form bravo", and an empty form searched would add both files.
-	//
-	// The second case pins the sort and every file and form: with forms {"alpha", "bravo"}, z.txt
-	// holding "alpha" and a/b.log holding "bravo and alpha", findForms gives exactly
-	// {"a/b.log holds form 0", "a/b.log holds form 1", "z.txt holds form 0"}.
+	// searched: a finding that printed the text would say "holds form bravo", and an empty form
+	// searched would add both files.
 	t.Run("names the index and skips an empty form", func(t *testing.T) {
 		dir := t.TempDir()
 		if err := os.Mkdir(filepath.Join(dir, "a"), 0o755); err != nil {
@@ -565,8 +557,6 @@ func TestFindForms(t *testing.T) {
 }
 
 func TestParseStandinLog(t *testing.T) {
-	// "READY\nCONN 10.4.1.2:40000\nREQ HEAD /docker-io/v2/x/manifests/d user=rollproof status=200\nLOAD x@d\n"
-	// gives conns []string{"10.4.1.2:40000"} and one request {HEAD, /docker-io/v2/x/manifests/d, rollproof, 200}.
 	text := "READY\nCONN 10.4.1.2:40000\nREQ HEAD /docker-io/v2/x/manifests/d user=rollproof status=200\nLOAD x@d\n"
 	conns, reqs := parseStandinLog(text)
 	if diff := cmp.Diff([]string{"10.4.1.2:40000"}, conns); diff != "" {

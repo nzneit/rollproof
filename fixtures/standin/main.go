@@ -51,6 +51,7 @@ func newHandler(reg http.Handler, prefixes []string, user, password string, log 
 			who = gotUser
 		}
 		path := r.URL.Path
+		// The login comes before the prefixes, so that a request without it learns nothing of them.
 		if !hasLogin || !okUser || !okPassword {
 			w.Header().Set("WWW-Authenticate", realm)
 			w.WriteHeader(http.StatusUnauthorized)
@@ -69,6 +70,8 @@ func newHandler(reg http.Handler, prefixes []string, user, password string, log 
 		}
 		rec := &statusWriter{ResponseWriter: w}
 		reg.ServeHTTP(rec, r)
+		// net/http answers 200 for a handler that wrote nothing, and the line says what was
+		// answered.
 		status := rec.status
 		if status == 0 {
 			status = http.StatusOK
@@ -202,7 +205,7 @@ func check(ctx context.Context, url string, limit time.Duration) error {
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
-			return err
+			return err // a URL that does not parse: waiting would not change it
 		}
 		resp, err := client.Do(req)
 		if err == nil {
