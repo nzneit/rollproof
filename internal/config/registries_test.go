@@ -154,15 +154,6 @@ func TestRegistriesRejects(t *testing.T) {
 }
 
 func TestCARejects(t *testing.T) {
-	// For each case, a file or folder at certs/ca.pem, then the entry
-	//   - host: "registry.example"
-	//     ca: certs/ca.pem
-	// rejected at registries[0].ca with the problem:
-	//   nothing at the path                 -> "does not exist"
-	//   a folder                            -> "is not a file the tool can read"
-	//   an empty file                       -> "holds no certificate in PEM form"
-	//   writeKeyPEM, a private key alone    -> "holds no certificate in PEM form"
-	//   writeDER, a certificate in DER      -> "holds no certificate in PEM form"
 	const entry = "registries:\n  - host: \"registry.example\"\n    ca: certs/ca.pem\ndeploy:\n"
 	for _, tc := range []struct {
 		name    string
@@ -191,7 +182,6 @@ func TestCARejects(t *testing.T) {
 }
 
 func TestRegistriesAccepts(t *testing.T) {
-	// Each loads with no error; the planted CA is writeCA's, at certs/ca.pem.
 	dir, _ := project(t, "certs")
 	writeCA(t, filepath.Join(dir, "certs", "ca.pem"))
 	load := func(t *testing.T, lines string) {
@@ -211,7 +201,7 @@ func TestRegistriesAccepts(t *testing.T) {
 	}
 	hosts := []string{"registry.example", "registry.example:5000", "10.1.2.3", "10.1.2.3:5000",
 		"localhost", "localhost:5000", "[fd00::5]", "[fd00::5]:5000", "myregistry:5000", "docker.io",
-		"index.docker.io:443", "rollproof.test:5000"} // the last two: decision 13
+		"index.docker.io:443", "rollproof.test:5000"} // the last two: a port makes another host than a rejected name (decision 13)
 	mirrors := []string{"mirror.example", "mirror.example/registry-example",
 		"cache.example/v2/proxy-project", "mirror.example:8443/A_b.c~d-e", "mirror.example/cache/v2"}
 	ases := []string{"registry.example/team/orders", "registry.example:5000/orders",
@@ -232,11 +222,8 @@ func TestRegistriesAccepts(t *testing.T) {
 			as(t, value)
 		})
 	}
-	// Also accepted, as two entries each:
-	//   registry.example and registry.example:443 (compared as written);
-	//   a.example with mirror b.example/x, beside the entry b.example (a mirror on another
-	//   entry's host takes nothing from it, section 9);
-	//   an entry with a host alone, and one with a ca of two certificates and text around them.
+	// registry.example and registry.example:443 are two hosts, since hosts are compared as written;
+	// a mirror on another entry's host takes nothing from that entry (section 9).
 	t.Run("registry.example and registry.example:443", func(t *testing.T) {
 		load(t, "  - host: \"registry.example\"\n  - host: \"registry.example:443\"\n")
 	})
@@ -265,9 +252,6 @@ func TestRegistriesAccepts(t *testing.T) {
 }
 
 func TestAsHosts(t *testing.T) {
-	// images: a with as registry.example/team/a, b with as registry.example/team/b,
-	// c with as docker.io/library/c, d with no as -> []string{"docker.io", "registry.example"};
-	// no as at all -> nil.
 	text := variant(t, base, "deploy:\n", "images:\n"+
 		"  a:\n    local: a:candidate\n    as: registry.example/team/a\n"+
 		"  b:\n    local: b:candidate\n    as: registry.example/team/b\n"+

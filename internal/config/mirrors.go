@@ -8,7 +8,8 @@ import (
 // ImageHost returns the registry host of an image's name as the nodes read it: the part before
 // the first slash when that part holds a dot or a colon, is localhost, or holds an upper-case
 // letter; docker.io for any other name, and for index.docker.io. A tag or a digest does not
-// change it.
+// change it. The rule is splitDockerDomain's in github.com/distribution/reference v0.6.0
+// (normalize.go), which the nodes use, written out here; a change there changes it.
 func ImageHost(image string) string {
 	first, _, hasSlash := strings.Cut(image, "/")
 	if !hasSlash {

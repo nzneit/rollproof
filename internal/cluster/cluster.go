@@ -154,10 +154,10 @@ type Cluster struct {
 // parts stay behind and the text says so.
 // A step's error is a ClusterFailed Condition, and a name without rollproof-
 // an InternalError.
-// The credentials file is written, mode 0600, into the run's folder before
-// kind creates the nodes; each node gets every ca and settings file with
-// rollproof.test's. A file that cannot be read or written fails the step it
-// belongs to, cluster-failed, as today.
+// When an entry has credentials, the credentials file is written, mode 0600,
+// into the run's folder before kind creates the nodes; each node gets every ca
+// and settings file with rollproof.test's. A file that cannot be read or
+// written fails the step it belongs to.
 func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	if err := remove(ctx, e, s.Name, s.RunDir); err != nil {
 		var c verdict.Condition

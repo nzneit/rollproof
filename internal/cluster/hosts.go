@@ -7,9 +7,10 @@ import (
 )
 
 // HostSettings returns the settings file every node needs for entry.Host, by decision 5: the
-// mirror as the default place with its path override and the ca, and the run's registry, at
-// runRegistry, as the one place tried before it. runRegistry is empty when no entry of images
-// names the host in as. An empty result means the node needs no file for the host.
+// mirror, when there is one, as the default place with its path override; the ca, for the
+// default place, the mirror or else the host itself; and the run's registry, at runRegistry, as
+// the one place tried before it. runRegistry is empty when no entry of images names the host in
+// as. An empty result means the node needs no file for the host.
 func HostSettings(entry config.Registry, runRegistry string) string {
 	var b strings.Builder
 	if entry.Mirror != "" {
