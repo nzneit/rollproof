@@ -279,12 +279,39 @@ func TestStallDetailsNameTheMirror(t *testing.T) {
 	}
 	const notUpdated = `deployment/orders: Waiting for deployment "orders" rollout to finish: 1 out of 2 new replicas have been updated...`
 	const line = "pod orders-b-1: phase Pending, container app waiting "
+	// An init container that waits for an image on another host with a mirror, after a native
+	// sidecar that runs; the note is the one of the init container's own image.
+	initImg := "docker.io/team/migrate@sha256:" + strings.Repeat("b", 64)
+	const initNote = "the nodes pull docker.io only from its mirror mirror.corp.example/docker-io, and a pull's error may name the image alone"
+	oInit := options()
+	oInit.MirrorNote = func(image string) string {
+		switch image {
+		case img:
+			return note
+		case initImg:
+			return initNote
+		}
+		return ""
+	}
+	initWaiting := func() *corev1.Pod {
+		p := waiting("PodInitializing")
+		always := corev1.ContainerRestartPolicyAlways
+		p.Spec.InitContainers = []corev1.Container{{Name: "proxy", Image: "busybox", RestartPolicy: &always},
+			{Name: "migrate", Image: initImg}}
+		p.Status.InitContainerStatuses = []corev1.ContainerStatus{
+			{Name: "proxy", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			{Name: "migrate", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}}}
+		return p
+	}
 	for _, r := range []struct {
 		name  string
 		opts  TrackerOptions
 		pod   *corev1.Pod
 		lines []string
 	}{
+		{name: "an init container in ImagePullBackOff", opts: oInit, pod: initWaiting(),
+			lines: []string{notUpdated, "pod orders-b-1: phase Pending, init container proxy running, " +
+				"init container migrate waiting (ImagePullBackOff); " + initNote + ", container app waiting (PodInitializing)"}},
 		{name: "ImagePullBackOff", opts: o, pod: waiting("ImagePullBackOff"),
 			lines: []string{notUpdated, line + "(ImagePullBackOff); " + note}},
 		{name: "ErrImagePull", opts: o, pod: waiting("ErrImagePull"),
@@ -327,28 +354,58 @@ func TestInstallTextNamesTheMirror(t *testing.T) {
 		}
 		return ""
 	}
-	p := pod("orders-b-1", "b1", "ReplicaSet", "orders-b", false, false)
-	p.Status.Phase = corev1.PodPending
-	p.Spec.Containers = []corev1.Container{{Name: "app", Image: img}}
-	p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "app",
+	// An init container that waits for an image on another host with a mirror.
+	initImg := "docker.io/team/migrate@sha256:" + strings.Repeat("b", 64)
+	const initNote = "the nodes pull docker.io only from its mirror mirror.corp.example/docker-io, and a pull's error may name the image alone"
+	o.MirrorNote = func(image string) string {
+		switch image {
+		case img:
+			return note
+		case initImg:
+			return initNote
+		}
+		return ""
+	}
+	waiting := func(reason string) *corev1.Pod {
+		p := pod("orders-b-1", "b1", "ReplicaSet", "orders-b", false, false)
+		p.Status.Phase = corev1.PodPending
+		p.Spec.Containers = []corev1.Container{{Name: "app", Image: img}}
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "app",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}}}}
+		return p
+	}
+	initWaiting := waiting("PodInitializing")
+	initWaiting.Spec.InitContainers = []corev1.Container{{Name: "migrate", Image: initImg}}
+	initWaiting.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: "migrate",
 		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}}}
-	tr := NewTracker(o)
-	for _, obj := range []runtime.Object{
-		deployment("orders", 2, 1, 1, 0, 0, 0), replicaSet("orders-b", "orders"), p,
+	for _, r := range []struct {
+		name, line string
+		pod        *corev1.Pod
+	}{
+		{"a container in ImagePullBackOff", "pod orders-b-1: phase Pending, container app waiting (ImagePullBackOff); " + note,
+			waiting("ImagePullBackOff")},
+		{"an init container in ImagePullBackOff", "pod orders-b-1: phase Pending, init container migrate waiting (ImagePullBackOff); " +
+			initNote + ", container app waiting (PodInitializing)", initWaiting},
 	} {
-		tr.Set(obj, at(1))
-	}
-	_, ready, err := tr.InstallState(t0, at(2), at(300))
-	if ready {
-		t.Fatalf("InstallState(+300 s) is ready, want the timeout")
-	}
-	want := verdict.Condition{Code: verdict.InstallFailed,
-		Text: "the install was not ready within limits.timeout\n" +
-			"deployment/orders: Waiting for deployment spec update to be observed...\n" +
-			"pod orders-b-1: phase Pending, container app waiting (ImagePullBackOff); " + note}
-	var c verdict.Condition
-	if !errors.As(err, &c) || c != want {
-		t.Errorf("InstallState(+300 s) err = %v, want %v", err, want)
+		t.Run(r.name, func(t *testing.T) {
+			tr := NewTracker(o)
+			for _, obj := range []runtime.Object{
+				deployment("orders", 2, 1, 1, 0, 0, 0), replicaSet("orders-b", "orders"), r.pod,
+			} {
+				tr.Set(obj, at(1))
+			}
+			_, ready, err := tr.InstallState(t0, at(2), at(300))
+			if ready {
+				t.Fatalf("InstallState(+300 s) is ready, want the timeout")
+			}
+			want := verdict.Condition{Code: verdict.InstallFailed,
+				Text: "the install was not ready within limits.timeout\n" +
+					"deployment/orders: Waiting for deployment spec update to be observed...\n" + r.line}
+			var c verdict.Condition
+			if !errors.As(err, &c) || c != want {
+				t.Errorf("InstallState(+300 s) err = %v, want %v", err, want)
+			}
+		})
 	}
 }
 

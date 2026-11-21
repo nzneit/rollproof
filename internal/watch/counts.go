@@ -248,19 +248,30 @@ func (t *Tracker) incomplete(ws []Workload, at time.Time) ([]string, map[string]
 }
 
 // podSentence says a pod's phase, why it is not scheduled, and the state of each of its
-// containers and how each last ended. A container that waits with ErrImagePull or
-// ImagePullBackOff gets "; " and the sentence that note gives for its image, when note is not nil
-// and gives one.
+// containers and how each last ended: first its init containers, native sidecars (init containers
+// with restartPolicy Always) among them, each as "init container NAME", then its other containers,
+// each as "container NAME". A container that waits with ErrImagePull or ImagePullBackOff gets "; "
+// and the sentence that note gives for its image, taken from the pod's spec for the container of
+// that name, when note is not nil and gives one.
 func podSentence(p *corev1.Pod, note func(image string) string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "pod %s: phase %s", p.Name, p.Status.Phase)
 	if c, ok := scheduled(p); ok && c.Status == corev1.ConditionFalse {
 		fmt.Fprintf(&b, ", not scheduled (%s: %s)", c.Reason, c.Message)
 	}
-	for _, s := range p.Status.ContainerStatuses {
-		fmt.Fprintf(&b, ", container %s %s", s.Name, containerState(s.State))
+	containerSentences(&b, "init container", p.Status.InitContainerStatuses, p.Spec.InitContainers, note)
+	containerSentences(&b, "container", p.Status.ContainerStatuses, p.Spec.Containers, note)
+	return b.String()
+}
+
+// containerSentences writes ", KIND NAME STATE" for each of statuses, with how it last ended, and
+// the note for a container that waits with ErrImagePull or ImagePullBackOff, its image taken from
+// specs by the container's name.
+func containerSentences(b *strings.Builder, kind string, statuses []corev1.ContainerStatus, specs []corev1.Container, note func(image string) string) {
+	for _, s := range statuses {
+		fmt.Fprintf(b, ", %s %s %s", kind, s.Name, containerState(s.State))
 		if last := s.LastTerminationState.Terminated; last != nil {
-			fmt.Fprintf(&b, " and last ended (%s, exit code %d)", last.Reason, last.ExitCode)
+			fmt.Fprintf(b, " and last ended (%s, exit code %d)", last.Reason, last.ExitCode)
 		}
 		if note == nil || s.State.Waiting == nil {
 			continue
@@ -270,7 +281,7 @@ func podSentence(p *corev1.Pod, note func(image string) string) string {
 		default:
 			continue
 		}
-		for _, c := range p.Spec.Containers {
+		for _, c := range specs {
 			if c.Name != s.Name {
 				continue
 			}
@@ -280,7 +291,6 @@ func podSentence(p *corev1.Pod, note func(image string) string) string {
 			break
 		}
 	}
-	return b.String()
 }
 
 // containerState says a container's state. A state with none of its three parts set is waiting,
