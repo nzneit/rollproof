@@ -297,8 +297,8 @@ func TestSetupFailureNamesTheCommand(t *testing.T) {
 	}
 }
 
-// An image with as is stored under its repository's path and pulled like any other once every
-// node's settings route its host: nothing stops the run, and it reaches the cluster's creation.
+// A configuration whose image has as is run like any other: nothing stops the run, which reaches
+// the cluster's creation and exits 0.
 func TestAnImageWithAsIsRun(t *testing.T) {
 	w := newWorld(t)
 	w.cfg.Images = map[string]config.Image{"orders": {Local: "orders:candidate", As: "registry.example/team/orders"}}

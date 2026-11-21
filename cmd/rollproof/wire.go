@@ -230,13 +230,24 @@ func (s *session) Setup(ctx context.Context) (deploy.Result, int) {
 	return deploy.Setup(ctx, s.runner, s.cfg.Setup, s.cfg.Limits.Timeout)
 }
 
-// Watcher follows the workloads of the test's namespace, and names the mirror
-// of an image's host in its texts as the configuration does. The Service whose
-// endpoints a transition reads comes later, from UseService.
+// Watcher follows the workloads of the test's namespace with watchOptions. The
+// Service whose endpoints a transition reads comes later, from UseService.
 func (s *session) Watcher(ctx context.Context, cfg *config.Config) (run.Watcher, error) {
 	startCtx, cancel := context.WithTimeout(ctx, cfg.Limits.Timeout)
 	defer cancel()
-	w, err := watch.Start(startCtx, s.client, watch.Options{
+	w, err := watch.Start(startCtx, s.client, s.watchOptions(cfg))
+	if err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+// watchOptions are the watcher's options: the configuration's namespace,
+// selector, settle time, timeout and workers, the session's evidence, the
+// probe's namespace, and the configuration's MirrorNote, so that its texts
+// name the mirror of an image's host. No Service is set.
+func (s *session) watchOptions(cfg *config.Config) watch.Options {
+	return watch.Options{
 		Namespace:      cfg.Deploy.Namespace,
 		Selector:       cfg.Deploy.Selector,
 		Settle:         cfg.Limits.Settle,
@@ -246,11 +257,7 @@ func (s *session) Watcher(ctx context.Context, cfg *config.Config) (run.Watcher,
 		Evidence:       s.evidence,
 		ProbeNamespace: cluster.ProbeNamespace,
 		MirrorNote:     cfg.MirrorNote,
-	})
-	if err != nil {
-		return nil, err
 	}
-	return w, nil
 }
 
 // Target checks that the built-in probe's URL reaches a Service of the cluster.

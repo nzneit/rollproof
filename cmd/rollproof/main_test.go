@@ -31,6 +31,7 @@ import (
 	"rollproof/internal/probe"
 	"rollproof/internal/run"
 	"rollproof/internal/verdict"
+	"rollproof/internal/watch"
 )
 
 func noEnv(string) string { return "" }
@@ -151,6 +152,25 @@ func TestRunWithoutAFile(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		if code := realMain([]string{"run", "-f", "does-not-exist.yaml", flag, out}, &stdout, &stderr, noEnv); code != 2 {
 			t.Fatalf("%s: exit %d, want 2", flag, code)
+		}
+		final, codes, _ := readResult(t, out)
+		if !final || len(codes) != 1 || codes[0] != "config-rejected" {
+			t.Errorf("%s: final %v, reasons %q; want a final file with config-rejected", flag, final, codes)
+		}
+	}
+}
+
+// TestRunWithKeepCluster passes -keep-cluster and --keep-cluster to a run whose configuration
+// stops before Check: either spelling is taken, and the run writes its final result.
+func TestRunWithKeepCluster(t *testing.T) {
+	for _, flag := range []string{"-keep-cluster", "--keep-cluster"} {
+		out := t.TempDir()
+		var stdout, stderr bytes.Buffer
+		if code := realMain([]string{"run", "-f", "does-not-exist.yaml", flag, "--out", out}, &stdout, &stderr, noEnv); code != 2 {
+			t.Fatalf("%s: exit %d, want 2\n%s", flag, code, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "usage:") {
+			t.Errorf("%s: the flag was refused:\n%s", flag, stderr.String())
 		}
 		final, codes, _ := readResult(t, out)
 		if !final || len(codes) != 1 || codes[0] != "config-rejected" {
@@ -580,6 +600,42 @@ func TestClusterSpec(t *testing.T) {
 	}
 	if reflect.ValueOf(s.Evidence).Pointer() != reflect.ValueOf(ev).Pointer() {
 		t.Error("Evidence is not the opener that create was given")
+	}
+}
+
+// The watcher's options carry the configuration's fields, the session's evidence and the probe's
+// namespace, and name the mirror of an image's host as the configuration does (decision 12).
+func TestWatchOptions(t *testing.T) {
+	ev := func(string) (io.WriteCloser, error) { return nil, nil }
+	cfg := &config.Config{
+		Cluster:    config.Cluster{Workers: 2},
+		Deploy:     config.Deploy{Namespace: "orders", Selector: "app=orders"},
+		Limits:     config.Limits{Settle: 15 * time.Second, Timeout: 3 * time.Minute},
+		Registries: []config.Registry{{Host: "registry.example", Mirror: "mirror.corp.example/r"}},
+	}
+	s := &session{client: fake.NewClientset(), cfg: cfg, evidence: ev}
+	o := s.watchOptions(cfg)
+	want := watch.Options{Namespace: "orders", Selector: "app=orders", Settle: 15 * time.Second,
+		Timeout: 3 * time.Minute, Workers: 2, ProbeNamespace: "rollproof-probe"}
+	if diff := cmp.Diff(want, o, cmpopts.IgnoreFields(watch.Options{}, "Now", "Evidence", "MirrorNote")); diff != "" {
+		t.Errorf("Options (-want +got):\n%s", diff)
+	}
+	if o.Now == nil {
+		t.Error("Now is nil, want the clock")
+	}
+	if reflect.ValueOf(o.Evidence).Pointer() != reflect.ValueOf(ev).Pointer() {
+		t.Error("Evidence is not the session's opener")
+	}
+	image := "registry.example/x@sha256:" + strings.Repeat("0", 64)
+	note := cfg.MirrorNote(image)
+	if note == "" {
+		t.Fatalf("the configuration names no mirror for %s", image)
+	}
+	if o.MirrorNote == nil {
+		t.Fatal("MirrorNote is nil, want the configuration's")
+	}
+	if got := o.MirrorNote(image); got != note {
+		t.Errorf("MirrorNote gives %q, want %q", got, note)
 	}
 }
 
