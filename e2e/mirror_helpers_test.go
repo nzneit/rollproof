@@ -314,6 +314,50 @@ func parseStandinLog(text string) (conns []string, reqs []standinRequest) {
 	return conns, reqs
 }
 
+// loopbackProblems returns what the CONN lines of the stand-in name's log show against the check
+// that nothing outside its own container connected to it: a sentence when no line is from
+// 127.0.0.1, which the setup's -check exec makes, so that a log with no connection at all proves
+// nothing; then a sentence for each line from another address, a node or anything else.
+func loopbackProblems(name, text string) []string {
+	conns, _ := parseStandinLog(text)
+	var problems []string
+	loopback := false
+	for _, addr := range conns {
+		if host, _, err := net.SplitHostPort(addr); err == nil && host == "127.0.0.1" {
+			loopback = true
+			continue
+		}
+		problems = append(problems, name+" logged a connection from "+addr+", want none from an address other than 127.0.0.1")
+	}
+	if !loopback {
+		problems = append([]string{name + " logged no connection from 127.0.0.1, which the setup's -check makes, so its log proves nothing"}, problems...)
+	}
+	return problems
+}
+
+func TestLoopbackProblems(t *testing.T) {
+	const noLoopback = "real logged no connection from 127.0.0.1, which the setup's -check makes, so its log proves nothing"
+	for _, r := range []struct {
+		name, text string
+		want       []string
+	}{
+		{"loopback only", "READY\nCONN 127.0.0.1:40000\nCONN 127.0.0.1:40002\n", nil},
+		{"no CONN line", "READY\nLOAD team/candidate@sha256:d\n", []string{noLoopback}},
+		{"loopback and a node", "READY\nCONN 127.0.0.1:40000\nCONN 10.89.0.3:51000\n",
+			[]string{"real logged a connection from 10.89.0.3:51000, want none from an address other than 127.0.0.1"}},
+		{"a node only", "CONN 10.89.0.3:51000\n",
+			[]string{noLoopback, "real logged a connection from 10.89.0.3:51000, want none from an address other than 127.0.0.1"}},
+		{"an address with no port", "CONN 127.0.0.1:40000\nCONN 127.0.0.1\n",
+			[]string{"real logged a connection from 127.0.0.1, want none from an address other than 127.0.0.1"}},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			if diff := cmp.Diff(r.want, loopbackProblems("real", r.text)); diff != "" {
+				t.Errorf("loopbackProblems (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestCutScript(t *testing.T) {
 	// exec.Command("sh", "-n", "-c", cutScript) exits 0; the script holds "-I OUTPUT 1 -j ROLLPROOF-CUT"
 	// and "-I FORWARD 1 -j ROLLPROOF-CUT" for both families, "10.244.0.0/16", "10.96.0.0/16",
@@ -338,8 +382,10 @@ func TestCutScript(t *testing.T) {
 }
 
 func TestNewAuthority(t *testing.T) {
-	// The server certificate verifies against ca.pem for the DNS names mirrorName and realName and
-	// for the IP 127.0.0.1; server-key.pem is its key (tls.LoadX509KeyPair); every file is 0644.
+	// The folder holds exactly ca.pem, server.pem and server-key.pem, so no key of the authority
+	// is written; the server certificate verifies against ca.pem for the DNS names mirrorName and
+	// realName and for the IP 127.0.0.1; server-key.pem is its key (tls.LoadX509KeyPair); every
+	// file is 0644.
 	dir := t.TempDir()
 	caPath, err := newAuthority(dir)
 	if err != nil {
@@ -347,6 +393,17 @@ func TestNewAuthority(t *testing.T) {
 	}
 	if want := filepath.Join(dir, "ca.pem"); caPath != want {
 		t.Errorf("newAuthority returned %q, want %q", caPath, want)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if diff := cmp.Diff([]string{"ca.pem", "server-key.pem", "server.pem"}, names); diff != "" {
+		t.Errorf("the folder's files (-want +got):\n%s", diff)
 	}
 	for _, name := range []string{"ca.pem", "server.pem", "server-key.pem"} {
 		fi, err := os.Stat(filepath.Join(dir, name))

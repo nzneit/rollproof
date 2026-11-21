@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"fmt"
 	"io/fs"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,8 +43,8 @@ func TestMirror(t *testing.T) {
 		mirrorLog := standinLogOf(t, mirrorName)
 		_, reqs := parseStandinLog(mirrorLog)
 		previous := "/docker-io/v2/rollproof/fixture/manifests/" + in.previousDigest
-		if !hasRequest(reqs, previous, "rollproof", 200) {
-			t.Errorf("the mirror logged no request for %s by rollproof answered 200; its requests: %+v", previous, reqs)
+		if !hasRequest(reqs, previous, jobUser, 200) {
+			t.Errorf("the mirror logged no request for %s by %s answered 200; its requests: %+v", previous, jobUser, reqs)
 		}
 		for _, req := range reqs {
 			if strings.Contains(req.path, in.candidateDigest) {
@@ -79,8 +78,8 @@ func TestMirror(t *testing.T) {
 
 		_, reqs := parseStandinLog(standinLogOf(t, mirrorName))
 		candidate := "/real/v2/team/candidate/manifests/" + in.candidateDigest
-		if !hasRequest(reqs, candidate, "rollproof", 404) {
-			t.Errorf("the mirror logged no request for %s by rollproof answered 404; its requests: %+v", candidate, reqs)
+		if !hasRequest(reqs, candidate, jobUser, 404) {
+			t.Errorf("the mirror logged no request for %s by %s answered 404; its requests: %+v", candidate, jobUser, reqs)
 		}
 		realLog := standinLogOf(t, realName)
 		if load := "LOAD team/candidate@" + in.candidateDigest; !strings.Contains(realLog, load) {
@@ -195,15 +194,12 @@ func hasRequest(reqs []standinRequest, path, user string, status int) bool {
 	return false
 }
 
-// checkOnlyLoopback fails the test for each CONN line of the stand-in name's log whose address is
-// other than 127.0.0.1: a node, or anything else outside its own container, connected to it.
+// checkOnlyLoopback fails the test for each problem that loopbackProblems finds in the stand-in
+// name's log: no connection from 127.0.0.1, or one from another address.
 func checkOnlyLoopback(t *testing.T, name, text string) {
 	t.Helper()
-	conns, _ := parseStandinLog(text)
-	for _, addr := range conns {
-		if host, _, err := net.SplitHostPort(addr); err != nil || host != "127.0.0.1" {
-			t.Errorf("%s logged a connection from %s, want none from an address other than 127.0.0.1", name, addr)
-		}
+	for _, p := range loopbackProblems(name, text) {
+		t.Error(p)
 	}
 }
 
