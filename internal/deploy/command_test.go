@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,8 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+
+	"rollproof/internal/mask"
 )
 
 const testKubeconfig = "/run/rollproof-test/kubeconfig"
@@ -309,6 +312,123 @@ func TestRunEvidence(t *testing.T) {
 	h.runner.Run(context.Background(), Command{Name: "absent", Args: []string{"rollproof-test-no-such-program"}})
 	if got := h.read(t, "absent"); !strings.HasSuffix(got, "rollproof: not-started, exit code -1\n") {
 		t.Errorf("evidence of a command that did not start %q", got)
+	}
+}
+
+func TestRunEvidenceKeepsEachStreamsLinesWhole(t *testing.T) {
+	// Standard output prints a password in two writes, with a line of standard error between
+	// them; the masking writer must still see the password in one piece. The two halves come from
+	// the environment, so that the command line in the evidence holds neither.
+	m := mask.New([]mask.Credential{{Username: "ci", Password: "hunter2secret"}})
+	evidence := t.TempDir()
+	environ := append(os.Environ(), "ROLLPROOF_TEST_HEAD=user hunter2", "ROLLPROOF_TEST_TAIL=secret ok")
+	r := NewRunner(RunnerOptions{Dir: t.TempDir(), Kubeconfig: testKubeconfig, Environ: environ,
+		Evidence: func(name string) (io.WriteCloser, error) {
+			f, err := os.Create(filepath.Join(evidence, name))
+			if err != nil {
+				return nil, err
+			}
+			return m.Writer(f), nil
+		}})
+	script := `printf %s "$ROLLPROOF_TEST_HEAD"; sleep 0.2; echo warn >&2; sleep 0.2; printf '%s\n' "$ROLLPROOF_TEST_TAIL"`
+	if res := r.Run(context.Background(), Command{Name: "split", Args: []string{"sh", "-c", script}}); res.Ending != Succeeded {
+		t.Fatalf("ending %s", res.Ending)
+	}
+	b, err := os.ReadFile(filepath.Join(evidence, "split"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	if !strings.Contains(got, "***") {
+		t.Errorf("the evidence holds no %q:\n%s", "***", got)
+	}
+	for _, part := range []string{"hunter2secret", "hunter2", "2secret"} {
+		if strings.Contains(got, part) {
+			t.Errorf("the evidence holds %q:\n%s", part, got)
+		}
+	}
+	lines := strings.Split(got, "\n")
+	for _, line := range []string{"warn", "user *** ok"} {
+		if !slices.Contains(lines, line) {
+			t.Errorf("the evidence has no line %q:\n%s", line, got)
+		}
+	}
+}
+
+// bufferCloser is evidence that keeps what it is given and counts its closes; it is safe for
+// concurrent use.
+type bufferCloser struct {
+	mu     sync.Mutex
+	b      strings.Builder
+	closes int
+}
+
+func (c *bufferCloser) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.b.Write(p)
+}
+
+func (c *bufferCloser) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closes++
+	return nil
+}
+
+func (c *bufferCloser) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.b.String()
+}
+
+func TestSinkPassesOnALongPartialLine(t *testing.T) {
+	for _, name := range []string{"stdout", "stderr"} {
+		t.Run(name, func(t *testing.T) {
+			ev := &bufferCloser{}
+			s := &sink{w: ev}
+			w := stream{s, &s.stdout}
+			if name == "stderr" {
+				w = stream{s, &s.stderr}
+			}
+			long := strings.Repeat("a", 65536)
+			_, _ = io.WriteString(w, long[:65535])
+			if got := ev.String(); got != "" {
+				t.Fatalf("after 65535 bytes with no newline the evidence holds %d bytes, want none", len(got))
+			}
+			_, _ = io.WriteString(w, "a"+"bb")
+			if got := ev.String(); got != long {
+				t.Fatalf("after 65536 bytes with no newline the evidence holds %d bytes, want those 65536", len(got))
+			}
+			s.finish(Succeeded, 0)
+			if got, want := ev.String(), long+"bb\nrollproof: ok, exit code 0\n"; got != want {
+				t.Errorf("after finish the evidence ends %q, want it to end %q", got[65536:], want[65536:])
+			}
+		})
+	}
+}
+
+func TestSinkFinishPassesOnEachPartialLine(t *testing.T) {
+	ev := &bufferCloser{}
+	s := &sink{w: ev}
+	stdout, stderr := stream{s, &s.stdout}, stream{s, &s.stderr}
+	_, _ = io.WriteString(s, "the command\n")
+	_, _ = io.WriteString(stderr, "err one\nerr two")
+	_, _ = io.WriteString(stdout, "out one\nout two")
+	if got, want := ev.String(), "the command\nerr one\nout one\n"; got != want {
+		t.Fatalf("before finish the evidence holds %q, want %q", got, want)
+	}
+	s.finish(ExitedNonZero, 1)
+	if got, want := ev.String(), "the command\nerr one\nout one\nout twoerr two\nrollproof: exit-nonzero, exit code 1\n"; got != want {
+		t.Errorf("after finish the evidence holds %q, want %q", got, want)
+	}
+	if ev.closes != 1 {
+		t.Errorf("the evidence was closed %d times, want once", ev.closes)
+	}
+	_, _ = io.WriteString(stdout, "late\n")
+	_, _ = io.WriteString(stderr, "late\n")
+	if got := ev.String(); strings.Contains(got, "late") {
+		t.Errorf("a line written after finish reached the evidence: %q", got)
 	}
 }
 
