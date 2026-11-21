@@ -3209,27 +3209,45 @@ func TestStderrIsMasked(t *testing.T) {
 }
 
 // probe.log is closed by the run, so that the tail that the masker held back reaches the file:
-// after the probe's stop in a run that passes, and when the evidence is completed in a run that a
-// signal ended in the deploy, where the probe's Stop is never asked (decision 3).
+// after the probe's stop in a run that passes, when the evidence is completed in a run that a
+// signal ended in the deploy, where the probe's Stop is never asked, and at once when
+// Cluster.Probe fails (decision 3). A line that the probe writes after the close, as the probe's
+// log follower does after a signal, is dropped: it reaches neither the file nor the warnings.
 func TestProbeLogIsClosed(t *testing.T) {
 	const pw1 = "s3cret-pass"
+	// late is longer than the longest form, so that a masking writer would pass it on at once.
+	const late = "a line after the close, longer than any form\n"
 	for _, tc := range []struct {
-		name   string
-		signal bool
-		code   int
-		stops  int // how often the probe's Stop is asked
+		name     string
+		signal   bool
+		probeErr error
+		code     int
+		stops    int // how often the probe's Stop is asked
+		// closedBy is the call after which the next decision finds probe.log whole, before the
+		// evidence is completed; "" when only the completion closes it.
+		closedBy string
 	}{
-		{"a run that passes", false, 0, 1},
-		{"a signal in the deploy", true, 2, 0},
+		{"a run that passes", false, nil, 0, 1, "probe-stop"},
+		{"a signal in the deploy", true, nil, 2, 0, ""},
+		{"Cluster.Probe fails", false, verdict.Condition{Code: verdict.ConfigRejected,
+			Text: "the probe's pod cannot be written"}, 2, 0, "probe"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newWorld(t)
 			w.cfg.Registries = []config.Registry{{Host: "registry.example", Username: "ci", Password: pw1}}
 			w.cluster.rawText = "first line\nlast line " + pw1 + "\n"
+			w.cluster.probeErr = tc.probeErr
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			const want = "first line\nlast line ***\n"
 			path := filepath.Join(w.out, "evidence", "probe.log")
+			// The watcher stops in the clean-up, after the evidence was completed: the probe writes
+			// once more then.
+			w.hooks["watch-stop"] = func() {
+				if _, err := io.WriteString(w.cluster.raw, late); err != nil {
+					t.Errorf("the write after the close gave %v, want none", err)
+				}
+			}
 			if tc.signal {
 				w.deployer.results["deploy"] = deploy.Result{Ending: deploy.StoppedBySignal, ExitCode: -1}
 				w.hooks["transition-deploy"] = func() {
@@ -3237,18 +3255,18 @@ func TestProbeLogIsClosed(t *testing.T) {
 					cancel()
 				}
 			}
-			// What probe.log holds at the first decision after the probe's Stop, before the
-			// evidence is completed: takeStop has closed it by then.
-			var afterStop *string
+			// What probe.log holds at the first decision after the call closedBy, before the evidence
+			// is completed: the call's step has closed it by then.
+			var atDecision *string
 			defer func(h func()) { decideHook = h }(decideHook)
 			decideHook = func() {
-				if afterStop == nil && w.calls.count("probe-stop") > 0 {
+				if tc.closedBy != "" && atDecision == nil && w.calls.count(tc.closedBy) > 0 {
 					b, err := os.ReadFile(path)
 					if err != nil {
 						t.Error(err)
 					}
 					s := string(b)
-					afterStop = &s
+					atDecision = &s
 				}
 			}
 			if code := w.run(ctx); code != tc.code {
@@ -3258,17 +3276,104 @@ func TestProbeLogIsClosed(t *testing.T) {
 				t.Errorf("the probe's Stop called %d times, want %d", n, tc.stops)
 			}
 			switch {
-			case tc.stops == 0:
-			case afterStop == nil:
-				t.Error("no decision came after the probe's Stop")
-			case *afterStop != want:
-				t.Errorf("after the probe's Stop, probe.log is %q, want %q", *afterStop, want)
+			case tc.closedBy == "":
+			case atDecision == nil:
+				t.Errorf("no decision came after %s", tc.closedBy)
+			case *atDecision != want:
+				t.Errorf("at the decision after %s, probe.log is %q, want %q", tc.closedBy, *atDecision, want)
 			}
 			b, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if got := string(b); got != want {
+				t.Errorf("probe.log is %q, want %q", got, want)
+			}
+			for _, text := range w.result().Warnings {
+				if strings.Contains(text, "probe.log") {
+					t.Errorf("result.json warns of probe.log: %q", text)
+				}
+			}
+		})
+	}
+}
+
+// A line written to probe.log after closeProbeLog is dropped and reported as written, with no
+// warning: the probe's log follower outlives a signal, and its later lines are past the run's
+// evidence. The masker is set, so the write goes the masking way.
+func TestAProbeLineAfterTheCloseIsDropped(t *testing.T) {
+	const pw1 = "s3cret-pass"
+	out := t.TempDir()
+	rw, err := report.Open(out, func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	rw.SetMasker(mask.New([]mask.Credential{{Username: "ci", Password: pw1}}))
+	var warned []string
+	s := &runState{ev: &evidence{files: rw.Evidence, warn: func(text string) { warned = append(warned, text) }}}
+	raw := s.openProbeLog()
+	if _, err := io.WriteString(raw, "a\n"); err != nil {
+		t.Fatal(err)
+	}
+	s.closeProbeLog()
+	// "late\n" alone would be held back by the masking writer and never reach the closed file; the
+	// second line is longer than the longest form, so a masking writer would pass it on at once.
+	for _, line := range []string{"late\n", "a later line, longer than any form of the password\n"} {
+		if n, err := io.WriteString(raw, line); n != len(line) || err != nil {
+			t.Errorf("writing %q after the close gave %d, %v; want %d, nil", line, n, err, len(line))
+		}
+	}
+	if len(warned) != 0 {
+		t.Errorf("warnings %q, want none", warned)
+	}
+	b, err := os.ReadFile(filepath.Join(out, "evidence", "probe.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(b); got != "a\n" {
+		t.Errorf("probe.log is %q, want %q", got, "a\n")
+	}
+}
+
+// A refused final write still closes probe.log, so that the tail that the masker held back
+// reaches the file: on finish's error of writeFinal and on its recovered panic.
+func TestARefusedFinalWriteClosesTheProbeLog(t *testing.T) {
+	const pw1 = "s3cret-pass"
+	for _, tc := range []struct {
+		name string
+		w    *panicWriter
+	}{
+		{"the final write fails", &panicWriter{err: errors.New("the disk is full")}},
+		{"the final write panics", &panicWriter{text: "the results writer broke"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := t.TempDir()
+			rw, err := report.Open(out, func(string) string { return "" })
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := mask.New([]mask.Credential{{Username: "ci", Password: pw1}})
+			rw.SetMasker(m)
+			var stdout, stderr bytes.Buffer
+			s := &runState{
+				o:        Options{Stdout: &stdout, Stderr: &stderr},
+				parent:   context.Background(),
+				w:        tc.w,
+				warnings: &warnings{},
+				mask:     m,
+			}
+			s.ev = &evidence{files: rw.Evidence, warn: s.warnings.add}
+			if _, err := io.WriteString(s.openProbeLog(), "last line "+pw1); err != nil {
+				t.Fatal(err)
+			}
+			if code := s.finish(); code != 2 {
+				t.Errorf("exit %d, want 2", code)
+			}
+			b, err := os.ReadFile(filepath.Join(out, "evidence", "probe.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := string(b), "last line ***"; got != want {
 				t.Errorf("probe.log is %q, want %q", got, want)
 			}
 		})

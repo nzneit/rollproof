@@ -217,7 +217,7 @@ type runState struct {
 	removed    []string
 	probeFacts probe.Facts
 	probeStart probe.Started
-	// probeLog is probe.log once Cluster.Probe has returned a probe, until closeProbeLog closes it.
+	// probeLog is probe.log from startProbe until closeProbeLog closes it.
 	probeLog   io.Closer
 	settling   watch.Settling // the install window as watch reported it, for the record
 	stop       probeStop      // notAsked until the tool begins to stop the probe
@@ -419,13 +419,13 @@ func (s *runState) restartOnly() bool {
 // (section 6), and Stop is not asked. probe.log is closed at once when Cluster.Probe fails, and
 // otherwise kept open for closeProbeLog.
 func (s *runState) startProbe(ctx context.Context) bool {
-	raw := s.ev.file("probe.log")
+	raw := s.openProbeLog()
 	p, err := s.cluster.Probe(s.cfg, s.probeImage, raw)
 	if err != nil {
-		_ = raw.Close() // the evidence file warns when it cannot be closed
+		s.closeProbeLog()
 		return s.beforeFail(ctx, err)
 	}
-	s.probe, s.probeLog = p, raw
+	s.probe = p
 	s.readEvents(p.Events())
 	st, err := p.Start(ctx)
 	if err != nil {
@@ -768,10 +768,50 @@ func (s *runState) takeStop(ctx context.Context) {
 	}
 }
 
+// openProbeLog opens probe.log for the probe's raw lines and keeps it for closeProbeLog. What is
+// written to it after that close is dropped (probeLogFile).
+func (s *runState) openProbeLog() io.Writer {
+	f := &probeLogFile{w: s.ev.file("probe.log")}
+	s.probeLog = f
+	return f
+}
+
+// probeLogFile is probe.log as the probe is handed it. The probe's log follower outlives a signal:
+// a run that a signal ended never stops the probe, and the follower goes on writing after the run
+// has closed the file. A line written after the close is past the run's evidence, so it is dropped
+// and reported as written, with no warning. The close itself warns when it fails, as the evidence
+// file under it does.
+type probeLogFile struct {
+	mu     sync.Mutex
+	w      io.WriteCloser
+	closed bool
+}
+
+// Write writes p to the file, or drops it once the file is closed.
+func (f *probeLogFile) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return len(p), nil
+	}
+	return f.w.Write(p)
+}
+
+// Close closes the file once; a later call does nothing.
+func (f *probeLogFile) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return nil
+	}
+	f.closed = true
+	return f.w.Close()
+}
+
 // closeProbeLog closes probe.log once, so that the tail that the masker holds back reaches the file
-// (decision 3); a later call does nothing. takeStop calls it after the probe's Stop, and
-// completeEvidence on the paths where Stop was never asked or panicked. A line that the probe
-// writes after it is a write that the evidence file warns about once.
+// (decision 3); a later call does nothing. takeStop calls it after the probe's Stop,
+// completeEvidence on the paths where Stop was never asked or panicked, and finish when the final
+// write was refused. A line that the probe writes after it is dropped (probeLogFile).
 func (s *runState) closeProbeLog() {
 	c := s.probeLog
 	if c == nil {
@@ -949,8 +989,9 @@ func (s *runState) toolFailed(caught any) {
 // (and result.json written again when that added a warning), the console text,
 // the clean-up and the exit code. A panic here after the final
 // file was written is a warning: the verdict was decided already. A panic
-// before it is the refused write. The clean-up runs on every path, so that a
-// report that cannot be written does not leave a cluster behind.
+// before it is the refused write, which still closes probe.log. The clean-up
+// runs on every path, so that a report that cannot be written does not leave a
+// cluster behind.
 func (s *runState) finish() (code int) {
 	refused := false
 	written := false // the final result.json is in place
@@ -979,6 +1020,10 @@ func (s *runState) finish() (code int) {
 			code = 2
 		}
 	}()
+	// A refused final write, returned or panicked, comes before completeEvidence, which closes
+	// probe.log: it is closed here then, so that its held-back tail reaches the file all the same.
+	// On every other path completeEvidence has closed it, and this does nothing.
+	defer s.closeProbeLog()
 	rec, n := s.recordAndWarnings()
 	if err := s.writeFinal(rec, n); err != nil {
 		// The decided verdict keeps its exit code (section 8): a window that had

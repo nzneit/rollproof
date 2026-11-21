@@ -160,8 +160,10 @@ type fakeCluster struct {
 	target                                                  probe.Target
 	removed                                                 []string
 	kept                                                    string
-	// rawText is what Probe writes into the probe's raw lines, as the probe's log would.
+	// rawText is what Probe writes into the probe's raw lines, as the probe's log would; raw is the
+	// writer of those lines that Probe was handed, for a test that writes to it later.
 	rawText string
+	raw     io.Writer
 }
 
 // Store records "store", runs its hook and returns the scripted image and map.
@@ -210,10 +212,11 @@ func (c *fakeCluster) Target(ctx context.Context, cfg *config.Config) (probe.Tar
 	return c.target, c.targetErr
 }
 
-// Probe records "probe", runs its hook, writes rawText into raw when it is set, and gives the fake
-// probe and the scripted error.
+// Probe records "probe", keeps raw, runs its hook, writes rawText into raw when it is set, and gives
+// the fake probe and the scripted error.
 func (c *fakeCluster) Probe(cfg *config.Config, probeImage string, raw io.Writer) (probe.Probe, error) {
 	c.w.calls.add("probe")
+	c.raw = raw
 	c.w.hook("probe")
 	if c.rawText != "" {
 		if _, err := io.WriteString(raw, c.rawText); err != nil {
