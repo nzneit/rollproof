@@ -81,6 +81,11 @@ type PodOptions struct {
 	// observation or at the stop. A part that cannot be read holds the reason in its place;
 	// a file that cannot be opened is skipped. Nil writes nothing.
 	Evidence func(name string) (io.WriteCloser, error)
+	// MirrorNote names the mirror of an image's host for the text of a probe that never
+	// started: when the probe's container waits with ErrImagePull or ImagePullBackOff, the
+	// text gets "; " and the sentence for the container's image, when the sentence is not
+	// empty. Nil names none.
+	MirrorNote func(image string) string
 }
 
 // Pod is a probe that runs as a pod on the control-plane node. It implements Probe. Start and
@@ -220,8 +225,9 @@ func (x exit) beforeStart() verdict.Condition {
 
 // podStateText is the pod's state for the text of ProbeNotStarted. A pod that was never read is
 // in the phase Unknown. A waiting container named probe gives its reason, and its message when it
-// has one.
-func podStateText(pod *corev1.Pod) string {
+// has one. A container that waits with ErrImagePull or ImagePullBackOff gets "; " and the
+// sentence that note gives for its image, when note is not nil and gives one.
+func podStateText(pod *corev1.Pod, note func(string) string) string {
 	if pod == nil {
 		return "the pod is " + string(corev1.PodUnknown)
 	}
@@ -232,11 +238,29 @@ func podStateText(pod *corev1.Pod) string {
 		}
 	}
 	for _, c := range pod.Status.ContainerStatuses {
-		if c.Name == "probe" && c.State.Waiting != nil {
-			s += "; container probe is waiting: " + c.State.Waiting.Reason
-			if c.State.Waiting.Message != "" {
-				s += ": " + c.State.Waiting.Message
+		if c.Name != "probe" || c.State.Waiting == nil {
+			continue
+		}
+		s += "; container probe is waiting: " + c.State.Waiting.Reason
+		if c.State.Waiting.Message != "" {
+			s += ": " + c.State.Waiting.Message
+		}
+		if note == nil {
+			continue
+		}
+		switch c.State.Waiting.Reason {
+		case "ErrImagePull", "ImagePullBackOff":
+		default:
+			continue
+		}
+		for _, spec := range pod.Spec.Containers {
+			if spec.Name != "probe" {
+				continue
 			}
+			if sentence := note(spec.Image); sentence != "" {
+				s += "; " + sentence
+			}
+			break
 		}
 	}
 	return s
@@ -434,7 +458,7 @@ func (p *Pod) judgeStart(r *probeRun) error {
 		return r.exitFirst.beforeStart()
 	case !r.firstNoted:
 		return verdict.Condition{Code: verdict.ProbeNotStarted,
-			Text: "no observation within limits.timeout; " + podStateText(r.lastPod)}
+			Text: "no observation within limits.timeout; " + podStateText(r.lastPod, p.o.MirrorNote)}
 	}
 	r.clock = r.firstRead.Sub(r.first)
 	if r.clock.Abs() > ClockBound {

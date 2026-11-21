@@ -41,6 +41,9 @@ var update = flag.Bool("update", false, "rewrite the golden files")
 
 const probeImage = "rollproof.test/rollproof@sha256:1333aec6e2215a19bb2a7361377cf1cb27f1261bcf1ddae03e4ea086c8bab89c"
 
+// mirrorNote is the sentence that Config.MirrorNote gives for registry.example's mirror.
+const mirrorNote = "the nodes pull registry.example only from its mirror mirror.corp.example/registry-example, and a pull's error may name the image alone"
+
 func TestPodSpec(t *testing.T) {
 	o := PodOptions{
 		Image: probeImage,
@@ -478,24 +481,72 @@ func TestStartWhenTheProbeExitsFirst(t *testing.T) {
 	}
 }
 
+// TestPodStateTextNamesTheMirror checks the sentence that a container waiting for an image gives
+// the text of ProbeNotStarted, through the note of the image's host.
+func TestPodStateTextNamesTheMirror(t *testing.T) {
+	img := "registry.example/tools/busybox@sha256:" + strings.Repeat("b", 64)
+	waiting := func(reason, message string) *corev1.Pod {
+		return &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "probe", Image: img}}},
+			Status: corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{Name: "probe",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: message}}}}}}
+	}
+	noteOf := func(image string) string {
+		if image == img {
+			return mirrorNote
+		}
+		return ""
+	}
+	pod := waiting("ImagePullBackOff", "Back-off pulling image \""+img+"\"")
+	// podStateText(pod, noteOf) ==
+	//   "the pod is Pending; container probe is waiting: ImagePullBackOff: Back-off pulling image \"" + img + "\"; " + mirrorNote
+	want := "the pod is Pending; container probe is waiting: ImagePullBackOff: Back-off pulling image \"" + img + "\"; " + mirrorNote
+	if got := podStateText(pod, noteOf); got != want {
+		t.Errorf("podStateText = %q, want %q", got, want)
+	}
+	// podStateText(pod, nil) has no "; the nodes pull"; so for ErrImagePull with the note, and
+	// ContainerCreating gives no note.
+	if got := podStateText(pod, nil); strings.Contains(got, "; the nodes pull") {
+		t.Errorf("podStateText with a nil note = %q, want no sentence", got)
+	}
+	pull := waiting("ErrImagePull", "Failed to pull image")
+	want = "the pod is Pending; container probe is waiting: ErrImagePull: Failed to pull image; " + mirrorNote
+	if got := podStateText(pull, noteOf); got != want {
+		t.Errorf("podStateText = %q, want %q", got, want)
+	}
+	creating := waiting("ContainerCreating", "")
+	if got, want := podStateText(creating, noteOf), "the pod is Pending; container probe is waiting: ContainerCreating"; got != want {
+		t.Errorf("podStateText = %q, want %q", got, want)
+	}
+}
+
 func TestStartTimesOut(t *testing.T) {
 	for _, c := range []struct {
 		name   string
 		log    *fakeLog
 		status corev1.PodStatus
+		note   func(string) string
 		want   []string
 	}{
 		{"not scheduled", &fakeLog{}, corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
 			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "Unschedulable",
 			Message: "0/4 nodes are available: 1 node(s) had untolerated taint",
-		}}}, []string{"Pending", "0/4 nodes are available: 1 node(s) had untolerated taint"}},
+		}}}, nil, []string{"Pending", "0/4 nodes are available: 1 node(s) had untolerated taint"}},
 		{"image not pulled", &fakeLog{}, corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
 			Name: "probe", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
-		}}}, []string{"Pending", "ImagePullBackOff"}},
-		{"log text only", newFakeLog(logLine(logAt(100), "starting")), runningStatus(), []string{"Running"}},
+		}}}, nil, []string{"Pending", "ImagePullBackOff"}},
+		{"image not pulled, through a mirror", &fakeLog{}, corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "probe", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+		}}}, func(image string) string {
+			if image == probeImage {
+				return mirrorNote
+			}
+			return ""
+		}, []string{"Pending", "ImagePullBackOff; " + mirrorNote}},
+		{"log text only", newFakeLog(logLine(logAt(100), "starting")), runningStatus(), nil, []string{"Running"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := newProbe(t, c.log, c.status, 100*time.Millisecond, 300*time.Millisecond)
+			s.pod.o.MirrorNote = c.note
 			began := time.Now()
 			_, err := s.pod.Start(context.Background())
 			got := condition(err)
@@ -506,6 +557,9 @@ func TestStartTimesOut(t *testing.T) {
 				if !strings.Contains(got.Text, w) {
 					t.Errorf("text %q has no %q", got.Text, w)
 				}
+			}
+			if c.note == nil && strings.Contains(got.Text, "; the nodes pull") {
+				t.Errorf("text %q names a mirror, want none", got.Text)
 			}
 			if time.Since(began) < 300*time.Millisecond {
 				t.Error("Start gave up before StartTimeout")

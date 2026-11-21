@@ -122,6 +122,19 @@ func stallRun() Run {
 	return r
 }
 
+// stallMirrorRun is a deploy that stalled because the nodes could not pull the candidate's image
+// from its mirror: the pod's sentence names the mirror, and the last event names the image alone.
+func stallMirrorRun() Run {
+	r := stallRun()
+	r.Reasons = r.Reasons[:1]
+	r.Reasons[0].Detail = []string{
+		`deployment/orders: Waiting for deployment "orders" rollout to finish: 1 out of 2 new replicas have been updated...`,
+		"pod orders-7c9d8b-q8w2n: phase Pending, container orders waiting (ImagePullBackOff); the nodes pull registry.example only from its mirror mirror.corp.example/registry-example, and a pull's error may name the image alone",
+		`the last event: Failed to pull image "registry.example/team/orders@sha256:…": rpc error: code = NotFound desc = … not found`,
+	}
+	return r
+}
+
 // changedRun is a pass with four workers, a steady window of five minutes,
 // a rate of 100, and a second watched workload that the probe does not reach.
 func changedRun() Run {
@@ -196,6 +209,7 @@ func TestConsoleExamples(t *testing.T) {
 		run  Run
 	}{
 		{"testdata/console-stall.golden.txt", stallRun()},
+		{"testdata/console-stall-mirror.golden.txt", stallMirrorRun()},
 		{"testdata/console-changed.golden.txt", changedRun()},
 		{"testdata/console-before-first-observation.golden.txt", beforeFirstRun()},
 		{"testdata/console-in-install-window.golden.txt", inInstallRun()},
