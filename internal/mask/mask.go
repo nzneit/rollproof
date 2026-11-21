@@ -9,6 +9,7 @@ import (
 	"cmp"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"slices"
 	"strconv"
@@ -78,7 +79,11 @@ func jsonSpelling(s string, html bool) string {
 
 // String returns s with each complete form replaced by Replacement, read left
 // to right, taking the longest form that begins at each place; what was put in
-// is not read again. A nil Masker, or one with no form, returns s.
+// is not read again. So when a form of one credential overlaps the start of a
+// form of another and the two sit side by side, the longest form at the first
+// place is masked and the rest of the second is written as it is: passwords xa
+// and abcdef in xabcdef give ***bcdef. Strong passwords make this negligible.
+// A nil Masker, or one with no form, returns s.
 func (m *Masker) String(s string) string {
 	if m.empty() {
 		return s
@@ -90,7 +95,8 @@ func (m *Masker) String(s string) string {
 // Writer returns a writer that masks what passes through it into w, a form
 // split across writes included. It holds back fewer bytes than the longest
 // form until more come; Close writes them, masked where a form is whole, and
-// then closes w. An error of w is returned by the call that met it. A nil
+// then closes w. An error of w is returned by the call that met it, and a
+// write of w that is short with no error counts as io.ErrShortWrite. A nil
 // Masker returns w itself.
 func (m *Masker) Writer(w io.WriteCloser) io.WriteCloser {
 	if m.empty() {
@@ -140,26 +146,29 @@ func (x *writer) Write(p []byte) (int, error) {
 	var next int
 	x.out, next = x.m.scan(x.out[:0], x.held, len(x.held)-len(x.m.forms[0])+1)
 	x.held = x.held[:copy(x.held, x.held[next:])]
-	if len(x.out) > 0 {
-		if _, err := x.w.Write(x.out); err != nil {
-			return 0, err
-		}
+	if err := x.put(x.out); err != nil {
+		return 0, err
 	}
 	return len(p), nil
 }
 
+// put writes b to w whole: a short write with no error is io.ErrShortWrite.
+func (x *writer) put(b []byte) error {
+	if len(b) == 0 {
+		return nil
+	}
+	n, err := x.w.Write(b)
+	if err == nil && n < len(b) {
+		err = io.ErrShortWrite
+	}
+	return err
+}
+
 // Close decides what it holds to the end, as String would, writes it to w and
-// closes w. It closes w also when that write fails, and returns the write's
-// error then.
+// closes w. It closes w also when that write fails, and returns the error of
+// each that failed, both when both did.
 func (x *writer) Close() error {
 	out, _ := x.m.scan(x.out[:0], x.held, len(x.held))
 	x.held = x.held[:0]
-	var err error
-	if len(out) > 0 {
-		_, err = x.w.Write(out)
-	}
-	if cerr := x.w.Close(); err == nil {
-		err = cerr
-	}
-	return err
+	return errors.Join(x.put(out), x.w.Close())
 }
