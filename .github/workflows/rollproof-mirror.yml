@@ -14,7 +14,7 @@ defaults:
 jobs:
   mirror:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       CGO_ENABLED: "0"
     steps:
