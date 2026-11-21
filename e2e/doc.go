@@ -16,4 +16,14 @@
 // the suite runs one test at a time:
 //
 //	go test -tags e2e -p 1 ./e2e/ -v -timeout 360m
+//
+// The mirror job carries the build tag mirror, shares harness_test.go with
+// the suite, and runs, one test at a time, with its own command, not the
+// suite's:
+//
+//	go test -tags mirror -p 1 ./e2e/ -run TestMirror -v -timeout 60m
+//
+// with `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0` before it on
+// nerdctl, and `CGO_ENABLED=0` in the environment on Docker, as the workflow
+// sets it.
 package e2e
