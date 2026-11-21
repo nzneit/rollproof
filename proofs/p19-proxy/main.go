@@ -136,7 +136,8 @@ func main() {
 	serviceSubnet = "10.96.0.0/16"  // kind's default
 	podSubnet     = "10.244.0.0/16" // kind's default
 
-	// configTemplate is the e2e suite's run description (e2e/config_test.go), unchanged.
+	// configTemplate is the e2e suite's run description (e2e/config_test.go) as it was when this
+	// proof ran; the suite's has gained a registries block since.
 	configTemplate = `version: 1
 cluster: {{.Cluster}}
 images: {{.Images}}
