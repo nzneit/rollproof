@@ -3,6 +3,7 @@ package watch
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -249,6 +250,105 @@ func TestStallDetails(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStallDetailsNameTheMirror(t *testing.T) {
+	img := "registry.example/team/orders@sha256:" + strings.Repeat("a", 64)
+	const note = "the nodes pull registry.example only from its mirror mirror.corp.example/registry-example, and a pull's error may name the image alone"
+	o := options()
+	o.MirrorNote = func(image string) string {
+		if image == img {
+			return note
+		}
+		return ""
+	}
+	waiting := func(reason string) *corev1.Pod {
+		p := pod("orders-b-1", "b1", "ReplicaSet", "orders-b", false, false)
+		p.Status.Phase = corev1.PodPending
+		p.Spec.Containers = []corev1.Container{{Name: "app", Image: img}}
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "app",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}}}}
+		return p
+	}
+	// The events of TestStallDetails' "a pod in CrashLoopBackOff", with waiting(reason) in place of
+	// the crashing pod.
+	events := func(p *corev1.Pod) []ev {
+		return []ev{set(0.2, inc), exited(0.5), set(2, replicaSet("orders-b", "orders")),
+			set(2, p), set(3, deployment("orders", 2, 2, 2, 1, 1, 3))}
+	}
+	const notUpdated = `deployment/orders: Waiting for deployment "orders" rollout to finish: 1 out of 2 new replicas have been updated...`
+	const line = "pod orders-b-1: phase Pending, container app waiting "
+	for _, r := range []struct {
+		name  string
+		opts  TrackerOptions
+		pod   *corev1.Pod
+		lines []string
+	}{
+		{name: "ImagePullBackOff", opts: o, pod: waiting("ImagePullBackOff"),
+			lines: []string{notUpdated, line + "(ImagePullBackOff); " + note}},
+		{name: "ErrImagePull", opts: o, pod: waiting("ErrImagePull"),
+			lines: []string{notUpdated, line + "(ErrImagePull); " + note}},
+		{name: "ContainerCreating", opts: o, pod: waiting("ContainerCreating"),
+			lines: []string{notUpdated, line + "(ContainerCreating)"}},
+		{name: "no MirrorNote", opts: options(), pod: waiting("ImagePullBackOff"),
+			lines: []string{notUpdated, line + "(ImagePullBackOff)"}},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			s, ended := feed(r.opts, base(), events(r.pod)).State(at(300))
+			if !ended || !s.Stalled {
+				t.Fatalf("State(+300 s): ended %v, stalled %v; want a stall", ended, s.Stalled)
+			}
+			if diff := cmp.Diff(r.lines, s.Incomplete); diff != "" {
+				t.Errorf("Incomplete (-want +got):\n%s", diff)
+			}
+		})
+	}
+	t.Run("a running container after the waiting one", func(t *testing.T) {
+		p := waiting("ImagePullBackOff")
+		p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: "side", Image: "busybox"})
+		p.Status.ContainerStatuses = append(p.Status.ContainerStatuses, corev1.ContainerStatus{Name: "side",
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}})
+		s, _ := feed(o, base(), events(p)).State(at(300))
+		want := []string{notUpdated, line + "(ImagePullBackOff); " + note + ", container side running"}
+		if diff := cmp.Diff(want, s.Incomplete); diff != "" {
+			t.Errorf("Incomplete (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestInstallTextNamesTheMirror(t *testing.T) {
+	img := "registry.example/team/orders@sha256:" + strings.Repeat("a", 64)
+	const note = "the nodes pull registry.example only from its mirror mirror.corp.example/registry-example, and a pull's error may name the image alone"
+	o := options()
+	o.MirrorNote = func(image string) string {
+		if image == img {
+			return note
+		}
+		return ""
+	}
+	p := pod("orders-b-1", "b1", "ReplicaSet", "orders-b", false, false)
+	p.Status.Phase = corev1.PodPending
+	p.Spec.Containers = []corev1.Container{{Name: "app", Image: img}}
+	p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "app",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}}}
+	tr := NewTracker(o)
+	for _, obj := range []runtime.Object{
+		deployment("orders", 2, 1, 1, 0, 0, 0), replicaSet("orders-b", "orders"), p,
+	} {
+		tr.Set(obj, at(1))
+	}
+	_, ready, err := tr.InstallState(t0, at(2), at(300))
+	if ready {
+		t.Fatalf("InstallState(+300 s) is ready, want the timeout")
+	}
+	want := verdict.Condition{Code: verdict.InstallFailed,
+		Text: "the install was not ready within limits.timeout\n" +
+			"deployment/orders: Waiting for deployment spec update to be observed...\n" +
+			"pod orders-b-1: phase Pending, container app waiting (ImagePullBackOff); " + note}
+	var c verdict.Condition
+	if !errors.As(err, &c) || c != want {
+		t.Errorf("InstallState(+300 s) err = %v, want %v", err, want)
 	}
 }
 

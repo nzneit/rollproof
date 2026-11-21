@@ -232,7 +232,7 @@ func (t *Tracker) incomplete(ws []Workload, at time.Time) ([]string, map[string]
 		named[w.String()] = true
 		for _, p := range mine {
 			if !podReady(p.obj) {
-				out = append(out, podSentence(p.obj))
+				out = append(out, podSentence(p.obj, t.o.MirrorNote))
 				named["pod/"+p.name] = true
 			}
 		}
@@ -248,8 +248,10 @@ func (t *Tracker) incomplete(ws []Workload, at time.Time) ([]string, map[string]
 }
 
 // podSentence says a pod's phase, why it is not scheduled, and the state of each of its
-// containers and how each last ended.
-func podSentence(p *corev1.Pod) string {
+// containers and how each last ended. A container that waits with ErrImagePull or
+// ImagePullBackOff gets "; " and the sentence that note gives for its image, when note is not nil
+// and gives one.
+func podSentence(p *corev1.Pod, note func(image string) string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "pod %s: phase %s", p.Name, p.Status.Phase)
 	if c, ok := scheduled(p); ok && c.Status == corev1.ConditionFalse {
@@ -259,6 +261,23 @@ func podSentence(p *corev1.Pod) string {
 		fmt.Fprintf(&b, ", container %s %s", s.Name, containerState(s.State))
 		if last := s.LastTerminationState.Terminated; last != nil {
 			fmt.Fprintf(&b, " and last ended (%s, exit code %d)", last.Reason, last.ExitCode)
+		}
+		if note == nil || s.State.Waiting == nil {
+			continue
+		}
+		switch s.State.Waiting.Reason {
+		case "ErrImagePull", "ImagePullBackOff":
+		default:
+			continue
+		}
+		for _, c := range p.Spec.Containers {
+			if c.Name != s.Name {
+				continue
+			}
+			if sentence := note(c.Image); sentence != "" {
+				b.WriteString("; " + sentence)
+			}
+			break
 		}
 	}
 	return b.String()
