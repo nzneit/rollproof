@@ -14,6 +14,7 @@ import (
 
 	"rollproof/internal/config"
 	"rollproof/internal/deploy"
+	"rollproof/internal/mask"
 	"rollproof/internal/probe"
 	"rollproof/internal/report"
 	"rollproof/internal/verdict"
@@ -134,7 +135,7 @@ func Run(ctx context.Context, o Options, u Units) int {
 	// anything else, so that even a rejected configuration leaves a final file.
 	w, err := report.Open(o.Out, o.Getenv)
 	if err != nil {
-		fmt.Fprintln(o.Stderr, "rollproof: cannot write results: "+err.Error())
+		s.println(o.Stderr, "rollproof: cannot write results: "+err.Error())
 		return 2
 	}
 	s.w = w
@@ -174,14 +175,15 @@ func Run(ctx context.Context, o Options, u Units) int {
 	return s.finish()
 }
 
-// writer is what a run asks of the results folder: the final result.json, an evidence file, an
-// evidence file replaced whole, and the folder's path. report.Writer is the real one, and a test
-// replaces it.
+// writer is what a run asks of the results folder: the final result.json, evidence files, a file
+// replaced whole, the folder's path, and the masker that the folder applies to all of it from then
+// on. report.Writer is the real one.
 type writer interface {
 	Final(report.Run) error
 	Evidence(name string) (io.WriteCloser, error)
 	ReplaceEvidence(name string, b []byte) error
 	Dir() string
+	SetMasker(m *mask.Masker)
 }
 
 // runState is everything one run knows: the units it has, what each returned,
@@ -198,6 +200,9 @@ type runState struct {
 	ev       *evidence
 	marks    *marks // windows.json: set at each change of a window's start or end
 	warnings *warnings
+	// mask hides the configuration's registry passwords in every line the run prints; the results
+	// folder holds the same masker. It is nil, which masks nothing, until the configuration loads.
+	mask *mask.Masker
 
 	cfg        *config.Config
 	cluster    Cluster
@@ -212,6 +217,8 @@ type runState struct {
 	removed    []string
 	probeFacts probe.Facts
 	probeStart probe.Started
+	// probeLog is probe.log once Cluster.Probe has returned a probe, until closeProbeLog closes it.
+	probeLog   io.Closer
 	settling   watch.Settling // the install window as watch reported it, for the record
 	stop       probeStop      // notAsked until the tool begins to stop the probe
 	countsSeen *[2]int        // the probe's lines and JSON text lines from Counts, read once
@@ -256,6 +263,10 @@ func (s *runState) setUp(ctx context.Context) bool {
 		return s.beforeFail(ctx, err)
 	}
 	s.cfg = cfg
+	// The masker comes before anything that may hold a password is opened, written or printed: an
+	// evidence file opened before it would write unmasked (decision 4).
+	s.mask = mask.New(credentialsOf(cfg))
+	s.w.SetMasker(s.mask)
 	if s.interrupted(ctx) {
 		return false
 	}
@@ -352,6 +363,15 @@ func (s *runState) setUp(ctx context.Context) bool {
 	return s.startProbe(ctx)
 }
 
+// credentialsOf gives each registries entry's username and password, for the masker.
+func credentialsOf(cfg *config.Config) []mask.Credential {
+	creds := make([]mask.Credential, 0, len(cfg.Registries))
+	for _, r := range cfg.Registries {
+		creds = append(creds, mask.Credential{Username: r.Username, Password: r.Password})
+	}
+	return creds
+}
+
 // installStep performs step 7: the install and the wait for it to be ready.
 func (s *runState) installStep(ctx context.Context) bool {
 	began := s.u.Clock.Now()
@@ -396,7 +416,8 @@ func (s *runState) restartOnly() bool {
 // for a reader; it is the only reader of them until the probe is stopped. A start that failed
 // other than by its context has ended the probe itself, and Stop gives the Facts and the error
 // that it kept, also after a signal; a start that gave its context's error left the pod as it is
-// (section 6), and Stop is not asked.
+// (section 6), and Stop is not asked. probe.log is closed at once when Cluster.Probe fails, and
+// otherwise kept open for closeProbeLog.
 func (s *runState) startProbe(ctx context.Context) bool {
 	raw := s.ev.file("probe.log")
 	p, err := s.cluster.Probe(s.cfg, s.probeImage, raw)
@@ -404,7 +425,7 @@ func (s *runState) startProbe(ctx context.Context) bool {
 		_ = raw.Close() // the evidence file warns when it cannot be closed
 		return s.beforeFail(ctx, err)
 	}
-	s.probe = p
+	s.probe, s.probeLog = p, raw
 	s.readEvents(p.Events())
 	st, err := p.Start(ctx)
 	if err != nil {
@@ -727,10 +748,12 @@ const (
 // stop counts as the tool's failure from the moment the probe was asked until Stop returns, so
 // that a Stop that panicked is recorded as one and is not asked again. An error of Stop after its
 // context ended is a signal's doing (cutBySignal); any other, a refused or timed-out delete or a
-// start that panicked before its log was followed, is the tool's failure (stopFailed).
+// start that panicked before its log was followed, is the tool's failure (stopFailed). probe.log
+// is closed as soon as Stop returns, whatever it gave: the probe's last lines are in by then.
 func (s *runState) takeStop(ctx context.Context) {
 	s.stop = stopFailed
 	f, err := s.probe.Stop(ctx)
+	s.closeProbeLog()
 	s.probeFacts = f
 	switch {
 	case err == nil:
@@ -743,6 +766,19 @@ func (s *runState) takeStop(ctx context.Context) {
 		// its log was followed: the probe's pod may still run.
 		s.warnings.add("the probe could not be stopped: " + err.Error() + "; its pod may still be there")
 	}
+}
+
+// closeProbeLog closes probe.log once, so that the tail that the masker holds back reaches the file
+// (decision 3); a later call does nothing. takeStop calls it after the probe's Stop, and
+// completeEvidence on the paths where Stop was never asked or panicked. A line that the probe
+// writes after it is a write that the evidence file warns about once.
+func (s *runState) closeProbeLog() {
+	c := s.probeLog
+	if c == nil {
+		return
+	}
+	s.probeLog = nil
+	_ = c.Close() // the evidence file warns when it cannot be closed
 }
 
 // beforeFail places the condition of a step that failed before the install
@@ -936,7 +972,7 @@ func (s *runState) finish() (code int) {
 		// A panic before the final file was written leaves the first file, which says that the run
 		// did not finish. That is the refused write (section 8): exit 1 only for a decided fail.
 		refused = true
-		fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+panicText(p))
+		s.println(s.o.Stderr, "rollproof: cannot write results: "+panicText(p))
 		if s.decision.Verdict == verdict.Fail {
 			code = 1
 		} else {
@@ -950,7 +986,7 @@ func (s *runState) finish() (code int) {
 		// pass whose result.json could not be written cannot be vouched for. The
 		// console is not printed: it would claim more than the folder holds.
 		refused = true
-		fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
+		s.println(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
 		if s.decision.Verdict == verdict.Fail {
 			return 1
 		}
@@ -962,14 +998,14 @@ func (s *runState) finish() (code int) {
 	if len(s.warnings.all()) != s.warningsWritten {
 		next, n := s.recordAndWarnings()
 		if err := s.writeFinal(next, n); err != nil {
-			fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
+			s.println(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
 		} else {
 			rec = next
 		}
 	}
 	// The console prints the record last written, so that lateWarnings tells every warning that
-	// came after it.
-	fmt.Fprint(s.o.Stdout, report.Console(rec))
+	// came after it, masked as result.json is.
+	fmt.Fprint(s.o.Stdout, report.Console(report.Mask(rec, s.mask)))
 	return s.decision.Verdict.ExitCode()
 }
 
@@ -1056,7 +1092,7 @@ func (s *runState) cleanUp() {
 	switch {
 	case s.o.KeepCluster:
 		if s.cluster != nil {
-			fmt.Fprintln(s.o.Stdout, s.cluster.Kept())
+			s.println(s.o.Stdout, s.cluster.Kept())
 		}
 		// A kept cluster does not end the search for a signal.
 		if s.parent.Err() != nil {
@@ -1101,7 +1137,7 @@ func (s *runState) signalAfterTheVerdict() {
 // function.
 func (s *runState) warnAfterConsole(text string) {
 	s.warnings.add(text)
-	fmt.Fprintln(s.o.Stdout, "warning: "+text)
+	s.println(s.o.Stdout, "warning: "+text)
 	s.rewriteFinal()
 }
 
@@ -1117,7 +1153,7 @@ func (s *runState) lateWarnings() {
 		return
 	}
 	for _, text := range all[s.warningsWritten:] {
-		fmt.Fprintln(s.o.Stdout, "warning: "+text)
+		s.println(s.o.Stdout, "warning: "+text)
 	}
 	s.rewriteFinal()
 }
@@ -1127,8 +1163,14 @@ func (s *runState) lateWarnings() {
 func (s *runState) rewriteFinal() {
 	defer func() { _ = recover() }()
 	if err := s.writeFinal(s.recordAndWarnings()); err != nil {
-		fmt.Fprintln(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
+		s.println(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
 	}
+}
+
+// println writes line and a line end to out, masked by the run's masker, which leaves it as it is
+// before the configuration has loaded. Every line the run prints but the console's goes through it.
+func (s *runState) println(out io.Writer, line string) {
+	fmt.Fprintln(out, s.mask.String(line))
 }
 
 // readerPanic gives the value of a panic that stopped the event reader, once.

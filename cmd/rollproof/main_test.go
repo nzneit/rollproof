@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"rollproof/internal/cluster"
@@ -188,7 +190,7 @@ deploy:
     release: orders
     previous: { chart: ./chart }
     candidate: { chart: ./chart }
-registries: [{ host: registry.example }]
+images: { orders: { local: orders:candidate, as: registry.example/team/orders } }
 probe:
   http:
     url: http://orders.orders.svc/
@@ -203,7 +205,7 @@ probe:
 			t.Fatalf("%s: exit %d, want 2\n%s", flag, code, stderr.String())
 		}
 		final, codes, texts := readResult(t, out)
-		if !final || len(codes) != 1 || codes[0] != "config-rejected" || texts[0] != "not built yet: registries" {
+		if !final || len(codes) != 1 || codes[0] != "config-rejected" || texts[0] != "not built yet: images.orders.as" {
 			t.Errorf("%s: final %v, reasons %q %q", flag, final, codes, texts)
 		}
 	}
@@ -553,6 +555,61 @@ func TestPodOptions(t *testing.T) {
 
 	_, err = podOptions(badEnvConfig(), probeImage)
 	envRejected(t, err)
+
+	// Both probes name the mirror of an image's host as the configuration does (decision 12).
+	image := "registry.example/x@sha256:" + strings.Repeat("0", 64)
+	for name, cfg := range map[string]*config.Config{"custom": customConfig(), "built-in": httpConfig()} {
+		cfg.Registries = []config.Registry{{Host: "registry.example", Mirror: "mirror.corp.example/r"}}
+		o, err := podOptions(cfg, probeImage)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		want := cfg.MirrorNote(image)
+		if want == "" {
+			t.Fatalf("%s: the configuration names no mirror for %s", name, image)
+		}
+		if o.MirrorNote == nil {
+			t.Errorf("%s: MirrorNote is nil, want the configuration's", name)
+			continue
+		}
+		if got := o.MirrorNote(image); got != want {
+			t.Errorf("%s: MirrorNote gives %q, want %q", name, got, want)
+		}
+	}
+}
+
+// clusterSpec gives Create the fields of the configuration that it needs, the cluster's full name
+// and its folder, keep, the evidence opener, and the configuration's registries.
+func TestClusterSpec(t *testing.T) {
+	ev := func(string) (io.WriteCloser, error) { return nil, nil }
+	cfg := &config.Config{
+		Cluster: config.Cluster{NodeImage: "kindest/node:v1.37.0@sha256:" + strings.Repeat("d", 64),
+			RegistryImage: "registry:3@sha256:" + strings.Repeat("e", 64), Workers: 2},
+		Deploy: config.Deploy{Namespace: "orders"},
+		Limits: config.Limits{Timeout: 3 * time.Minute},
+		Registries: []config.Registry{
+			{Host: "registry.example", Username: "ci", Password: "s3cret-pass", Mirror: "mirror.corp.example/r"},
+			{Host: "docker.io", CA: "/etc/rollproof/corp-ca.pem"},
+		},
+	}
+	s := clusterSpec(cfg, "rollproof-x", true, ev)
+	want := cluster.Spec{
+		Name:          "rollproof-x",
+		RunDir:        cluster.RunDir("rollproof-x"),
+		NodeImage:     cfg.Cluster.NodeImage,
+		RegistryImage: cfg.Cluster.RegistryImage,
+		Workers:       2,
+		Namespace:     "orders",
+		Timeout:       3 * time.Minute,
+		Keep:          true,
+		Registries:    cfg.Registries,
+	}
+	if diff := cmp.Diff(want, s, cmpopts.IgnoreFields(cluster.Spec{}, "Evidence")); diff != "" {
+		t.Errorf("Spec (-want +got):\n%s", diff)
+	}
+	if reflect.ValueOf(s.Evidence).Pointer() != reflect.ValueOf(ev).Pointer() {
+		t.Error("Evidence is not the opener that create was given")
+	}
 }
 
 // A custom env that a pod cannot hold is rejected by check, before a cluster
