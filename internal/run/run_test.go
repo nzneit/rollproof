@@ -297,17 +297,16 @@ func TestSetupFailureNamesTheCommand(t *testing.T) {
 	}
 }
 
-func TestNotBuilt(t *testing.T) {
+// An image with as is stored under its repository's path and pulled like any other once every
+// node's settings route its host: nothing stops the run, and it reaches the cluster's creation.
+func TestAnImageWithAsIsRun(t *testing.T) {
 	w := newWorld(t)
 	w.cfg.Images = map[string]config.Image{"orders": {Local: "orders:candidate", As: "registry.example/team/orders"}}
-	if code := w.run(context.Background()); code != 2 {
-		t.Fatalf("exit %d, want 2", code)
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
 	}
-	if diff := cmp.Diff([]string{"load"}, w.calls.list()); diff != "" {
-		t.Errorf("calls (-want +got):\n%s", diff)
-	}
-	if window, text := w.result().windowOf("config-rejected"); window != "" || text != "not built yet: images.orders.as" {
-		t.Errorf("config-rejected in window %q with text %q", window, text)
+	if calls := w.calls.list(); !slices.Contains(calls, "create") {
+		t.Errorf("calls %q, want them to hold create", calls)
 	}
 }
 

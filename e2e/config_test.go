@@ -482,9 +482,6 @@ func TestConfigOfEachShapeLoads(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%v\n%s", err, text)
 			}
-			if nb := cfg.NotBuilt(); len(nb) != 0 {
-				t.Errorf("NotBuilt = %v, want none", nb)
-			}
 			tc.check(t, text, cfg)
 		})
 	}

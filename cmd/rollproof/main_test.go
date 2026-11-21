@@ -177,40 +177,6 @@ func TestRunWithoutAFileFlag(t *testing.T) {
 	}
 }
 
-func TestRunNotBuilt(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(dir, "chart"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	file := filepath.Join(dir, "rollproof.yaml")
-	text := `version: 1
-deploy:
-  namespace: orders
-  helm:
-    release: orders
-    previous: { chart: ./chart }
-    candidate: { chart: ./chart }
-images: { orders: { local: orders:candidate, as: registry.example/team/orders } }
-probe:
-  http:
-    url: http://orders.orders.svc/
-`
-	if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, flag := range []string{"-keep-cluster", "--keep-cluster"} {
-		out := t.TempDir()
-		var stdout, stderr bytes.Buffer
-		if code := realMain([]string{"run", "-f", file, "--out", out, flag}, &stdout, &stderr, noEnv); code != 2 {
-			t.Fatalf("%s: exit %d, want 2\n%s", flag, code, stderr.String())
-		}
-		final, codes, texts := readResult(t, out)
-		if !final || len(codes) != 1 || codes[0] != "config-rejected" || texts[0] != "not built yet: images.orders.as" {
-			t.Errorf("%s: final %v, reasons %q %q", flag, final, codes, texts)
-		}
-	}
-}
-
 func TestFailedClientError(t *testing.T) {
 	clientErr := errors.New("no route to the API server")
 	reached := "the cluster's API server cannot be reached: no route to the API server"
@@ -579,7 +545,8 @@ func TestPodOptions(t *testing.T) {
 }
 
 // clusterSpec gives Create the fields of the configuration that it needs, the cluster's full name
-// and its folder, keep, the evidence opener, and the configuration's registries.
+// and its folder, keep, the evidence opener, the configuration's registries, and the hosts that an
+// entry of images names in as.
 func TestClusterSpec(t *testing.T) {
 	ev := func(string) (io.WriteCloser, error) { return nil, nil }
 	cfg := &config.Config{
@@ -590,6 +557,9 @@ func TestClusterSpec(t *testing.T) {
 		Registries: []config.Registry{
 			{Host: "registry.example", Username: "ci", Password: "s3cret-pass", Mirror: "mirror.corp.example/r"},
 			{Host: "docker.io", CA: "/etc/rollproof/corp-ca.pem"},
+		},
+		Images: map[string]config.Image{
+			"orders": {Local: "orders:candidate", As: "registry.example/team/orders"},
 		},
 	}
 	s := clusterSpec(cfg, "rollproof-x", true, ev)
@@ -603,6 +573,7 @@ func TestClusterSpec(t *testing.T) {
 		Timeout:       3 * time.Minute,
 		Keep:          true,
 		Registries:    cfg.Registries,
+		AsHosts:       cfg.AsHosts(),
 	}
 	if diff := cmp.Diff(want, s, cmpopts.IgnoreFields(cluster.Spec{}, "Evidence")); diff != "" {
 		t.Errorf("Spec (-want +got):\n%s", diff)

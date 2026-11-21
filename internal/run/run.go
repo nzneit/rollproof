@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -268,11 +267,6 @@ func (s *runState) setUp(ctx context.Context) bool {
 	s.mask = mask.New(credentialsOf(cfg))
 	s.w.SetMasker(s.mask)
 	if s.interrupted(ctx) {
-		return false
-	}
-	if keys := cfg.NotBuilt(); len(keys) > 0 {
-		s.tl.Before = append(s.tl.Before, verdict.Condition{Code: verdict.ConfigRejected,
-			Text: "not built yet: " + strings.Join(keys, ", ")})
 		return false
 	}
 	if err := s.u.Check(ctx, cfg); err != nil {

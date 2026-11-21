@@ -12,6 +12,6 @@ Every fixture of the design's section 12 gives its expected verdict under Helm 3
 
 To run the suite: `go run ./hack/fetchhelm` fetches under `.tools/` the Helm binaries and, for linux/amd64 only, kubectl 1.37.0, which the suite needs; the suite's first run pulls busybox 1.37.0 by its digest into `.tools/`; `go test -tags e2e -p 1 ./e2e/ -timeout 360m` runs the suite in about two and a half hours.
 
-Not built yet: `registries` and `as` in `images`. A configuration that names one of them ends as `config-rejected`, with the text "not built yet" and the key's name.
+Every key of version 1 is built: `registries` and `as` in `images` came with step 5.
 
 Run the unit tests with `go test ./...`.
