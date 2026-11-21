@@ -247,7 +247,8 @@ func passwordForms(user, password string) []string {
 }
 
 // findForms walks every regular file under root and returns, sorted, "PATH holds form I" for each
-// file that holds a form, PATH relative to root; none is empty.
+// file that holds a form, PATH relative to root; none is empty. I is the form's 0-based index in
+// forms, never its text, and an empty form is skipped rather than searched.
 func findForms(root string, forms []string) ([]string, error) {
 	var found []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -263,9 +264,12 @@ func findForms(root string, forms []string) ([]string, error) {
 			return err
 		}
 		content := string(b)
-		for _, form := range forms {
+		for i, form := range forms {
+			if form == "" {
+				continue
+			}
 			if strings.Contains(content, form) {
-				found = append(found, rel+" holds form "+form)
+				found = append(found, rel+" holds form "+strconv.Itoa(i))
 			}
 		}
 		return nil
@@ -449,28 +453,58 @@ func TestPasswordForms(t *testing.T) {
 }
 
 func TestFindForms(t *testing.T) {
-	// Under a temporary folder, a/b.log holds form 1 and c.txt holds none:
-	// findForms gives []string{"a/b.log holds form 1"}.
-	dir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(dir, "a"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for path, text := range map[string]string{
-		filepath.Join("a", "b.log"): "before 1 after",
-		"c.txt":                     "nothing to find",
-	} {
-		if err := os.WriteFile(filepath.Join(dir, path), []byte(text), 0o644); err != nil {
+	// A finding names the form's 0-based index, never its text, and an empty form is never
+	// searched. With forms {"alpha", "bravo", ""}, a/b.log holding "before bravo after" and c.txt
+	// holding none, findForms gives exactly {"a/b.log holds form 1"}: a finding that printed the
+	// text would say "holds form bravo", and an empty form searched would add both files.
+	//
+	// The second case pins the sort and every file and form: with forms {"alpha", "bravo"}, z.txt
+	// holding "alpha" and a/b.log holding "bravo and alpha", findForms gives exactly
+	// {"a/b.log holds form 0", "a/b.log holds form 1", "z.txt holds form 0"}.
+	t.Run("names the index and skips an empty form", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, "a"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-	}
-	got, err := findForms(dir, []string{"1", "2"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"a/b.log holds form 1"}
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("findForms (-want +got):\n%s", diff)
-	}
+		for path, text := range map[string]string{
+			filepath.Join("a", "b.log"): "before bravo after",
+			"c.txt":                     "nothing to find",
+		} {
+			if err := os.WriteFile(filepath.Join(dir, path), []byte(text), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := findForms(dir, []string{"alpha", "bravo", ""})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"a/b.log holds form 1"}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("findForms (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("sorts every file and form", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, "a"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for path, text := range map[string]string{
+			"z.txt":                     "alpha",
+			filepath.Join("a", "b.log"): "bravo and alpha",
+		} {
+			if err := os.WriteFile(filepath.Join(dir, path), []byte(text), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := findForms(dir, []string{"alpha", "bravo"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"a/b.log holds form 0", "a/b.log holds form 1", "z.txt holds form 0"}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("findForms (-want +got):\n%s", diff)
+		}
+	})
 }
 
 func TestParseStandinLog(t *testing.T) {
