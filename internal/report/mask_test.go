@@ -391,8 +391,9 @@ func TestNoMaskerChangesNothing(t *testing.T) {
 	}
 }
 
-// TestEvidenceIsSafeForManyGoroutines writes one evidence file from several
-// goroutines with a masker set: the file holds every line and no password.
+// TestEvidenceOpenedBeforeSetMaskerIsNotMasked checks that a file Evidence
+// opened after SetMasker is masked, and that one opened before it keeps
+// writing unmasked.
 func TestEvidenceOpenedBeforeSetMaskerIsNotMasked(t *testing.T) {
 	const pw = "s3cret-pass"
 	w, err := Open(t.TempDir(), func(string) string { return "" })
@@ -427,6 +428,8 @@ func TestEvidenceOpenedBeforeSetMaskerIsNotMasked(t *testing.T) {
 	}
 }
 
+// TestEvidenceIsSafeForManyGoroutines writes one evidence file from several
+// goroutines with a masker set: the file holds every line and no password.
 func TestEvidenceIsSafeForManyGoroutines(t *testing.T) {
 	const (
 		pw      = "s3cret-pass"

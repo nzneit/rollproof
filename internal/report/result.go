@@ -148,8 +148,9 @@ func First() Run {
 	}
 }
 
-// Writer writes the files of one results folder. After SetMasker, everything it
-// writes is masked by that masker.
+// Writer writes the files of one results folder. After SetMasker, what it
+// writes is masked by that masker, except what goes into an evidence file
+// opened before.
 type Writer struct {
 	dir    string
 	masker atomic.Pointer[mask.Masker]

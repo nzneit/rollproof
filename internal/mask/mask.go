@@ -33,7 +33,8 @@ type Masker struct {
 // New returns the masker of creds. A credential with an empty password is
 // skipped; with none left, the masker masks nothing. Each password has the
 // forms of decision 2: plain, its two JSON spellings, its Go spelling, and
-// the base64 of USERNAME:PASSWORD without padding; equal spellings count once.
+// the base64 of USERNAME:PASSWORD without padding, which also masks the padded
+// form, its padding left after Replacement; equal spellings count once.
 func New(creds []Credential) *Masker {
 	seen := map[string]bool{}
 	m := &Masker{}
@@ -165,8 +166,8 @@ func (x *writer) put(b []byte) error {
 }
 
 // Close decides what it holds to the end, as String would, writes it to w and
-// closes w. It closes w also when that write fails, and returns the error of
-// each that failed, both when both did.
+// closes w. It closes w also when that write fails, so that w is released
+// either way, and returns the error of each that failed, both when both did.
 func (x *writer) Close() error {
 	out, _ := x.m.scan(x.out[:0], x.held, len(x.held))
 	x.held = x.held[:0]
