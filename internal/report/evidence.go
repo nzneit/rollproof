@@ -15,8 +15,9 @@ import (
 // name that is already taken gets a number after it. A name that is empty,
 // absolute, holds a NUL byte or a .. element, or would leave the evidence
 // folder, by its text or by a link inside the folder, is refused, and nothing
-// is written. After SetMasker, what is written to the file is masked: the file
-// may be written from several goroutines.
+// is written. A file opened after SetMasker masks what is written to it, and
+// may be written from several goroutines; a file opened before SetMasker keeps
+// writing unmasked.
 func (w *Writer) Evidence(name string) (io.WriteCloser, error) {
 	root, err := w.evidenceRoot(name)
 	if err != nil {

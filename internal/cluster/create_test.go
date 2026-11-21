@@ -357,8 +357,10 @@ func TestCreateWritesTheCredentialsFileBeforeKind(t *testing.T) {
 					if want := Credentials(s.Registries); !bytes.Equal(b, want) {
 						t.Errorf("the credentials file holds %q, want %q", b, want)
 					}
-					if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
-						t.Errorf("the credentials file's mode: %v, %v; want 0600", fi.Mode().Perm(), err)
+					if fi, err := os.Stat(path); err != nil {
+						t.Errorf("the credentials file's mode could not be read: %v", err)
+					} else if perm := fi.Mode().Perm(); perm != 0o600 {
+						t.Errorf("the credentials file's mode is %v, want 0600", perm)
 					}
 				}
 				return errors.New("exit status 125")

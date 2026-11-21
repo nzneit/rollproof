@@ -62,7 +62,8 @@ func Store(ctx context.Context, c *cluster.Cluster, binary string, images map[st
 		var ref config.ImageRef
 		var err error
 		im := images[n]
-		if at := placeOf(n, im); im.Archive != "" {
+		at := placeOf(n, im)
+		if im.Archive != "" {
 			ref, err = storeArchive(ctx, c, n, at, im.Archive, "the archive")
 		} else {
 			ref, err = storeLocal(ctx, c, n, at, im.Local)

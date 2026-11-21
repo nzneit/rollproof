@@ -5,9 +5,9 @@
 //
 // Its flags are -listen ADDR (TLS), -cert FILE, -key FILE, -user NAME, -prefix PATH and
 // -load REPOSITORY=ARCHIVE, each of the last two repeated, and -check URL. The password comes from
-// STANDIN_PASSWORD, and an empty one is an error. With -check the program asks URL until any HTTP
-// answer comes, for at most 30 s, and exits 0 or 1; otherwise it loads every archive into the
-// registry, serves it on the TLS listener, and writes READY.
+// STANDIN_PASSWORD, and an empty one is an error while serving; -check reads none. With -check the
+// program asks URL until any HTTP answer comes, for at most 30 s, and exits 0 or 1; otherwise it
+// loads every archive into the registry, serves it on the TLS listener, and writes READY.
 package main
 
 import (

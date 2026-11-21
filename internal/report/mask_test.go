@@ -3,6 +3,7 @@ package report
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -392,6 +393,40 @@ func TestNoMaskerChangesNothing(t *testing.T) {
 
 // TestEvidenceIsSafeForManyGoroutines writes one evidence file from several
 // goroutines with a masker set: the file holds every line and no password.
+func TestEvidenceOpenedBeforeSetMaskerIsNotMasked(t *testing.T) {
+	const pw = "s3cret-pass"
+	w, err := Open(t.TempDir(), func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := w.Evidence("before.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.SetMasker(mask.New([]mask.Credential{{Username: "ci", Password: pw}}))
+	after, err := w.Evidence("after.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		f          io.WriteCloser
+		name, want string
+	}{
+		{before, "before.log", "a " + pw + " b"},
+		{after, "after.log", "a *** b"},
+	} {
+		if _, err := c.f.Write([]byte("a " + pw + " b")); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if b, err := os.ReadFile(filepath.Join(w.Dir(), "evidence", c.name)); err != nil || string(b) != c.want {
+			t.Errorf("%s is %q, %v; want %q", c.name, b, err, c.want)
+		}
+	}
+}
+
 func TestEvidenceIsSafeForManyGoroutines(t *testing.T) {
 	const (
 		pw      = "s3cret-pass"
