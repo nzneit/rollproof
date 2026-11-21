@@ -8,9 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 // underBothHelms runs f once with each Helm major, as two subtests, and hands
@@ -22,14 +19,6 @@ func underBothHelms(t *testing.T, f fixture, check func(t *testing.T, r result))
 			g.helm = helm
 			check(t, runFixture(t, g))
 		})
-	}
-}
-
-// expect compares what a run gave with what its row of section 12 expects.
-func expect(t *testing.T, got, want result) {
-	t.Helper()
-	if diff := cmp.Diff(want, got, cmp.AllowUnexported(result{}), cmpopts.EquateEmpty()); diff != "" {
-		t.Errorf("result (-want +got):\n%s", diff)
 	}
 }
 
