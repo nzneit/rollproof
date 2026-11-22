@@ -1,0 +1,21 @@
+# The action's own test, its first run: the suite's first fixture, whose Helm release is named by
+# a variable that only env: on the action's step sets (design, section 12, "The action"). The job
+# builds the two images as the suite's harness does.
+version: 1
+images:
+  previous: { local: "rollproof-fixture:previous" }
+  candidate: { local: "rollproof-fixture:candidate" }
+deploy:
+  namespace: orders
+  helm:
+    release: "${env.ROLLPROOF_ACTION_TEST_RELEASE}"
+    previous:
+      chart: ../../../fixtures/chart
+      values:
+        - image: { repository: "${images.previous.repository}", digest: "${images.previous.digest}" }
+    candidate:
+      chart: ../../../fixtures/chart
+      values:
+        - image: { repository: "${images.candidate.repository}", digest: "${images.candidate.digest}" }
+probe:
+  http: { url: "http://orders.orders.svc/work?ms=20" }
