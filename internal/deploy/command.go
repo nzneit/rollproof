@@ -230,9 +230,10 @@ func (w stream) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// finish passes on each stream's partial line, standard output's first, then
-// writes the closing line, after a newline if the evidence's last byte was
-// none, and closes the evidence.
+// finish passes on each stream's partial line, standard output's first, with a
+// line end between them when both hold one, then writes the closing line,
+// after a newline if the evidence's last byte was none, and closes the
+// evidence.
 func (s *sink) finish(e Ending, code int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -240,6 +241,9 @@ func (s *sink) finish(e Ending, code int) {
 		return
 	}
 	s.put(s.stdout)
+	if len(s.stdout) > 0 && len(s.stderr) > 0 {
+		s.put([]byte("\n"))
+	}
 	s.put(s.stderr)
 	s.stdout, s.stderr = nil, nil
 	if s.last != '\n' {

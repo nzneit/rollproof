@@ -255,11 +255,19 @@ func TestMaskSharesNoMemoryWithTheRecord(t *testing.T) {
 	*got.Transitions[0].Command = "changed"
 	*got.Transitions[0].Restart = "changed"
 	if c := filled.Transitions[0].Command; c == nil || *c != pw {
-		t.Errorf("the record's Command is %v, want %q", c, pw)
+		t.Errorf("the record's Command is %v, want %q", text(c), pw)
 	}
 	if c := filled.Transitions[0].Restart; c == nil || *c != pw {
-		t.Errorf("the record's Restart is %v, want %q", c, pw)
+		t.Errorf("the record's Restart is %v, want %q", text(c), pw)
 	}
+}
+
+// text is *p quoted, or <nil>, for a message.
+func text(p *string) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%q", *p)
 }
 
 // noSharedMemory walks the copy got and the record want in step and reports

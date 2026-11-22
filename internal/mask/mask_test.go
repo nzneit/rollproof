@@ -52,6 +52,9 @@ func TestNilMasker(t *testing.T) {
 	if got := m.Writer(w); got != w {
 		t.Errorf("a nil Masker's Writer gives %T, want the writer it was given", got)
 	}
+	if got := New(nil).Writer(w); got != w {
+		t.Errorf("New(nil).Writer gives %T, want the writer it was given", got)
+	}
 	if got := New(nil).String("a pw"); got != "a pw" {
 		t.Errorf("New(nil).String gives %q, want %q", got, "a pw")
 	}
@@ -63,6 +66,7 @@ func TestNilMasker(t *testing.T) {
 func TestWriterAcrossWrites(t *testing.T) {
 	const user, pw = "ci", "s3cret-pass"
 	m := New([]Credential{{Username: user, Password: pw}})
+	longest := max(len(pw), len(base64.RawStdEncoding.EncodeToString([]byte(user+":"+pw))))
 	text := "log: " + pw + " and " + base64.StdEncoding.EncodeToString([]byte(user+":"+pw)) + "\n"
 	want := m.String(text)
 	if strings.Count(want, Replacement) != 2 || strings.Contains(want, "s3cret") {
@@ -87,6 +91,20 @@ func TestWriterAcrossWrites(t *testing.T) {
 		if r.closes != 1 {
 			t.Errorf("size %d: the writer was closed %d times, want once", size, r.closes)
 		}
+	}
+
+	// One write of 1,000 bytes with no form: the writer passes on all but fewer
+	// than longest bytes and closes nothing before Close.
+	r := &recorder{}
+	w := m.Writer(r)
+	if _, err := io.WriteString(w, strings.Repeat("x", 1000)); err != nil {
+		t.Fatalf("Write of 1,000 bytes: %v", err)
+	}
+	if got, least := r.Len(), 1000-(longest-1); got < least {
+		t.Errorf("after 1,000 bytes with no form the writer holds %d, want at least %d", got, least)
+	}
+	if r.closes != 0 {
+		t.Errorf("the writer was closed before Close")
 	}
 }
 
