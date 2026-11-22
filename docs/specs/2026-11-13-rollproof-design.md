@@ -2168,8 +2168,11 @@ results: /tmp/rollproof-results-7f3a
   - Text from the cluster, from commands and from the configuration is cleaned before it is
     printed: a line end, every other control character, the line and paragraph separators and
     the bidirectional controls each become a space, so that none of it can redraw or split a
-    line. That holds for the console's blocks and for every other line that the run prints, a
-    warning after the console's text among them.
+    line. That holds for the console's blocks and for every other line that the tool itself
+    prints, a warning after the console's text among them. It does not hold for the two things
+    on standard error that the tool does not print itself (below): the log of the Kubernetes
+    client library, which quotes such text on one line, and the trace of a crash that escapes
+    the run.
   - On GitHub Actions the line that stops the runner's workflow commands comes first on
     standard output and on standard error, and the line that resumes them comes last on
     standard output, after everything else that the run prints there, unless a signal or a
@@ -3866,11 +3869,12 @@ of kind's node image when no alias names its registry, and whether kind pulls a 
 again that the tool pulled under another name. Left by section 14, point 33: that the runner,
 after the action's stop line, reads no command for the rest of the step, which the hosted run of
 the action's own test can show only in its log, by the stop line and by the tool's own lines
-standing after it as plain text, since no run plants a command; that the runner masks the
-token in that line; the order in which the runner reads the lines of the two streams, on which
-both things that section 8 leaves open depend; and the tool's resume line in a step of the
-caller's own script, which no workflow of the project runs. What is known of these is reasoned
-from the
+standing after it as plain text, since no run plants a command; that a stop lasts for one
+step, which that run shows when it lists as an annotation the notice that the step after the
+action's first run prints (section 12); that the runner masks the token in that line; the
+order in which the runner reads the lines of the two streams, on which both things that
+section 8 leaves open depend; and the tool's resume line in a step of the caller's own
+script, which no workflow of the project runs. What is known of these is reasoned from the
 sources above or is the drafting session's own knowledge, and section 14 lists those of them
 that need a test.
 

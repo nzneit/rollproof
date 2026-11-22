@@ -12,7 +12,7 @@ Read section 8 ("The command line", the exit after a signal; "The action", the o
 **Interfaces:**
 - Consumes: `report.GitHub`, `report.GitHubFrom`, `report.Output`, `(report.GitHub).WriteOutputs`, `(report.GitHub).AppendSummary`, `(report.GitHub).Summarizes` (Task 4); `report.Summary`, `report.SummaryLine`, `report.ConsoleLine` (Task 5).
 - Produces: `type gitHubFiles interface { WriteOutputs(outs ...report.Output) error; AppendSummary(text string) error; Summarizes() bool }`
-  What a run asks of GitHub's files: the step's outputs and its job summary.
+  gitHubFiles is what a run asks of GitHub's files: the step's outputs and its job summary.
   report.GitHub is the real one.
 - Produces: `var gitHubOf = func(getenv func(string) string) gitHubFiles { return report.GitHubFrom(getenv) }`
   gitHubOf gives the run's GitHub files from the environment. A test replaces it,

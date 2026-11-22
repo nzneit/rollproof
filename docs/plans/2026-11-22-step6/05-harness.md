@@ -6,7 +6,7 @@ Read section 12 ("The suite's matrix", "The suite's workflow", "The mirror job",
 
 **Files:**
 - Create: `e2e/runenv_test.go` (no build tag, so that `go test ./...` runs its tests)
-- Modify: `e2e/harness_test.go` (`majors`; `TestMain`; `runFixture`; new `checkGitHubFiles`), `e2e/config_test.go` (`fixture.github`), `e2e/fixtures_test.go` (`underBothHelms` becomes `underEachHelm`; `TestFirstFixture`; the comment of `TestChartDeniesTrafficByDefault`), `e2e/custom_test.go` and `e2e/commands_test.go` (the calls of `underEachHelm`), `e2e/mirror_helpers_test.go` (`throughTheMirror`), `e2e/mirror_test.go` (`TestMirror`; `holdRunImages`)
+- Modify: `e2e/harness_test.go` (`majors`; `TestMain`; `runFixture`; new `checkGitHubFiles`), `e2e/config_test.go` (`fixture.github`), `e2e/fixtures_test.go` (`underBothHelms` becomes `underEachHelm`; `TestFirstFixture`; the comment of `TestChartDeniesTrafficByDefault`), `e2e/custom_test.go` and `e2e/commands_test.go` (the calls of `underEachHelm`), `e2e/mirror_helpers_test.go` (`throughTheMirror`), `e2e/mirror_test.go` (`TestMirror`; `holdRunImages`; new `inspectImage`)
 
 **Interfaces:**
 - Consumes: the outputs file and the summary file as the README's "Interfaces between tasks" gives them (Tasks 4 to 6).
