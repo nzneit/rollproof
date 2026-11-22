@@ -394,7 +394,7 @@ func settingsPath(host string) string {
 // kubeconfig, whatever the options say about keeping nodes, and tries again, createAttempts
 // times in all. The error is that of the last attempt, its text unchanged; a delete that fails
 // ends the attempts, and its error is joined, after "; ", to that of the attempt before it.
-// kind's Create and Delete run through untilDone: when ctx ends during one, its error is ctx's.
+// kind's Create and Delete run through untilDone: when ctx ends first during one, its error is ctx's.
 func createKind(ctx context.Context, p *kindcluster.Provider, name, kubeconfig string, options ...kindcluster.CreateOption) error {
 	for attempt := 1; ; attempt++ {
 		err := untilDone(ctx, func() error { return kindCreate(p, name, options...) })

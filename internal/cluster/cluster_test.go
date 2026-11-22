@@ -504,13 +504,16 @@ func TestCreateWritesRegistrySettings(t *testing.T) {
 }
 
 // A signal during kind's creation: Create returns at once, kind's abandoned call runs to its end,
-// and the next run's first step removes what it left (section 10, "On a signal").
+// and the next run's first step removes what it left (section 10, "On a signal"). The test checks
+// that no attempt of kind's Create has ended at the cancel, so that the result it then waits for
+// is the one of the call that the signal abandoned, not an earlier attempt's.
 func TestAnAbandonedCreateIsRemovedByTheNextRun(t *testing.T) {
 	e := testEngine(t)
 	s := testSpec("abandoned", 1)
 	t.Cleanup(func() { remove(context.Background(), e, s.Name, s.RunDir) })
 
-	began, ended := make(chan struct{}), make(chan error, 1)
+	// ended has room for every attempt that createKind makes, so that no send of the wrapper waits.
+	began, ended := make(chan struct{}), make(chan error, createAttempts)
 	var once sync.Once
 	wrapped := kindCreate
 	t.Cleanup(func() { kindCreate = wrapped })
@@ -536,6 +539,11 @@ func TestAnAbandonedCreateIsRemovedByTheNextRun(t *testing.T) {
 		t.Fatal("kind's Create did not begin within 5 minutes")
 	}
 	time.Sleep(10 * time.Second)
+	select {
+	case err := <-ended:
+		t.Fatalf("kind's Create ended before the signal (%v), so no call was abandoned", err)
+	default:
+	}
 	cancel()
 	cancelled := time.Now()
 
