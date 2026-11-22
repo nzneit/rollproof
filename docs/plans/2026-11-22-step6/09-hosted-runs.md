@@ -1,6 +1,6 @@
 # Task 13: the runs on GitHub, and their record
 
-Read section 12 ("The suite's workflow", "The mirror job", "The action"), section 13 ("During incubation", "Graduation"), section 16 (the last list, of what no run or page has shown), `docs/proofs/README.md` ("The form of a record"), and the README's section "The runs on GitHub, and what they cost", before this task.
+Read section 12 ("The suite's workflow", "The mirror job", "The action"), section 13 ("During incubation", "Graduation"), section 14, point 33, section 16 (the last list, of what no run or page has shown), `docs/proofs/README.md` ("The form of a record"), and the README's section "The runs on GitHub, and what they cost", before this task.
 
 This task needs the maintainer's word before its Step 3. Until that word, it stops at Step 2, and its state is: everything built and checked on this machine; every check that only a hosted runner can make unverified, by name.
 
@@ -11,7 +11,7 @@ This task needs the maintainer's word before its Step 3. Until that word, it sto
 - Modify: `docs/proofs/README.md` (a row in its list; its "Still unproved"), `README.md` (its sentence on Docker, only when the runs passed)
 
 **Interfaces:**
-- Consumes: every task before it; Task 1 merged and taken in.
+- Consumes: every task before it, and Task 14, which comes before it; Task 1 merged and taken in.
 - Produces: the record of the first runs of `rollproof-action.yml`, `rollproof-mirror.yml` and `rollproof-e2e.yml` on GitHub's hosted runners.
 
 - [ ] **Step 1: Run everything that this machine can run, once**
@@ -50,6 +50,8 @@ gh run list --workflow rollproof-mirror.yml --branch rollproof-step6-design --li
 
 With each run's ID from the listing, in place of ID, each alone: `gh run watch ID --exit-status`, then `gh run view ID --log > LOG`, LOG a file of the system's temporary folder named after the workflow, never a file of the repository. For a failed run of the action's test, also `gh run download ID --dir DIR`, DIR a new folder of the system's temporary folder, for its uploaded results. The mirror job uploads nothing: its failure is read from its log.
 
+In the action's test's LOG, find for each of its three steps that call the action: the script's stop line, `::stop-commands::` and its token, where the runner's source has it masked as `***` (`ActionCommandManager.cs`, lines 116 to 121; where the masker is applied to a line of the log was not read), on both streams; after it the tool's own `::stop-commands::` and a token of 26 characters, as plain lines; and, at the end of the pass's and the fail's steps, `::`, the tool's token and `::`, as a plain line. The run cut short ends by a signal and has no such last line. In the mirror job's LOG and, in Step 4, the suite's, each run's output that the harness logs holds the tool's lines too; the first of them stops the runner's commands for the rest of that `go test` step, which runs no command, so this changes nothing there. The record quotes one example of each, with its time stamp.
+
 When either run did not pass: stop; report to the maintainer with both logs and, for the action's test, the downloaded results; do not start the suite. A fix is a task of its own, and its run a new word. The record (Step 5) is written all the same, with `Holds: no` where a belief failed.
 
 - [ ] **Step 4: When both passed, start the suite**
@@ -84,9 +86,10 @@ Plan assumed: "The runner keeps the masked copy of the action's inner step's job
 Plan assumed: "The mirror job passes on Docker: the nodes resolve the mirror's container name through Docker's DNS, and the cut of the nodes' route holds."
 Plan assumed: "The suite passes under Helm 3 on ubuntu-24.04 and under Helm 4 on ubuntu-26.04 with Docker 29, the fourteenth row's control passing in both jobs."
 Plan assumed: "One run of rollproof-e2e.yml takes 172 to 205 billed minutes, and one of rollproof-action.yml about 11."
+Plan assumed: "In each step that calls the action, the runner's log shows the script's stop line, its token masked, and after it the tool's own stop lines and, unless a signal ended the run, its resume line, which name another token, as plain lines; the step reads no command after the script's stop line."
 ```
 
-Then `docs/proofs/README.md`: a row in its list for point 32, filled from the record as its other rows are; in "Still unproved", the items the runs showed are taken out, and what they left (Podman, a runner that persists, `always()` on a cancelled step, a job's time limit through a composite action) stays or is added. When all three workflows passed, the README's sentence "On Docker, on GitHub's hosted runners, the tests under the build tag `cluster` of four packages and the suite's first fixture under both Helm majors have run (`docs/proofs/p24-hosted-runner.md`)." becomes "On Docker, on GitHub's hosted runners, the tests under the build tag `cluster` of five packages, the whole suite under both Helm majors, the mirror job and the action's own test have run (`docs/proofs/p24-hosted-runner.md`, `docs/proofs/p32-step6-workflows.md`)."
+Then `docs/proofs/README.md`: a row in its list for point 32, filled from the record as its other rows are; in "Still unproved", the items the runs showed are taken out, and what they left (Podman, a runner that persists, `always()` on a cancelled step, a job's time limit through a composite action, a workflow command printed after the stop line, which no run plants, and the order in which the runner reads the lines of a step's two streams) stays or is added. When all three workflows passed, the README's sentence "On Docker, on GitHub's hosted runners, the tests under the build tag `cluster` of four packages and the suite's first fixture under both Helm majors have run (`docs/proofs/p24-hosted-runner.md`)." becomes "On Docker, on GitHub's hosted runners, the tests under the build tag `cluster` of five packages, the whole suite under both Helm majors, the mirror job and the action's own test have run (`docs/proofs/p24-hosted-runner.md`, `docs/proofs/p32-step6-workflows.md`)."
 
 - [ ] **Step 6: Commit**
 
