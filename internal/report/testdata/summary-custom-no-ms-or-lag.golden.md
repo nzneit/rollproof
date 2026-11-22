@@ -1,0 +1,43 @@
+### rollproof: PASS `orders (Helm) on Kubernetes v1.37.0 in kind`
+
+```
+releases    previous   orders 1.4.2, oci://registry.example/charts/orders; chart defaults
+            candidate  orders 1.5.0, ./chart; values: inline (image)
+images      orders     run by deployment/orders, in pods the deploy created
+probe       custom: registry.example/tools/busybox@sha256:6d9ac9237a84afe1516540f40a0fafdc86859b2141954b4d643af7066d598b74
+            a custom probe judged this run; the tool does not know what it checks
+            command: 3 items; args: 0 items; env: TARGET
+install     settled after 15.0 s under the probe; failures not judged
+            3,000 checks, 6 failed (refused 5, timeout 1), the last 14.9 s before the steady window
+            slowest -, behind -
+```
+
+| window | length | checks | failed | after finish | slowest | behind | result |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| steady | 10.0 s | 2,000 | 0 | - | - | - | pass |
+| deploy | 33.4 s | 6,680 | 0 | 0 | - | - | pass |
+| rollback | 33.9 s | 6,780 | 0 | 0 | - | - | pass |
+
+| transition | workload | probed | pods replaced | quickest stop |
+| --- | --- | --- | --- | --- |
+| deploy | `deployment/orders` | not known | 2 of 2 | 5.3 s |
+| rollback | `deployment/orders` | not known | 2 of 2 | 5.2 s |
+
+exercised
+
+- deploy: the candidate's start-up and the previous release's shutdown
+- rollback: the previous release's start-up and the candidate's shutdown
+
+not exercised
+
+- the delay before a larger cluster stops routing to a stopping pod
+- whatever the custom probe does not check
+- routing that depends on where the client is
+- capacity while pods are down, and autoscaling
+- storage that attaches to one node at a time
+- data migrations
+- a node drain
+
+```
+results: /tmp/rollproof-results-7f3a
+```
