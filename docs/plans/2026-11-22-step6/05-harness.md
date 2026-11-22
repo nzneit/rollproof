@@ -40,8 +40,10 @@ Read section 12 ("The suite's matrix", "The suite's workflow", "The mirror job",
     run whose verdict is value (pass, fail or not-verified), and whose first line
     writes word (PASS, FAIL or NOT VERIFIED), writes: the output out once, as out,
     and verdict as not-verified and then value; and a summary whose first line
-    begins "### rollproof: " + word and which ends with the line "results: " + out
-    and the fence that closes its block. It returns the summary.
+    begins "### rollproof: " + word and which holds the line "results: " + out
+    followed by the fence that closes its block, not necessarily at its end: a
+    warning after the console is appended after that block. It returns the
+    summary.
 - Produces, in `config_test.go`: the field `github bool` of `fixture`, with the comment "github gives the run its own files for GitHub's outputs and job summary, github-output and github-summary in its results folder, with GITHUB_ACTIONS true; every other run gets none (section 12)."
 - Produces, in `fixtures_test.go`: `func underEachHelm(t *testing.T, f fixture, check func(t *testing.T, r result))`
   underEachHelm runs f once with each Helm major that ROLLPROOF_E2E_HELM selects
@@ -97,7 +99,7 @@ Expected: FAIL to compile: `helmMajors`, `runEnv`, `githubFiles` and `readGitHub
 
 - `runenv_test.go`: the five names above.
 - `harness_test.go`: `TestMain` first sets `majors`, before anything else it does; a `helmMajors` error prints `e2e: ` and the error to standard error and exits 1. It still checks both Helm binaries and both majors, with the comment "Both, whatever ROLLPROOF_E2E_HELM selects: the fourteenth row's control runs under Helm 3 in every run of the suite." `runFixture`, once the results folder is made: for a fixture with `github`, `gh := &githubFiles{filepath.Join(out, "github-output"), filepath.Join(out, "github-summary")}`, both written empty with mode 0644, a failure being `t.Fatalf`; then `env := runEnv(os.Environ(), helmDir, gh)` in place of `helmEnv(helmDir)` (gh is nil for every other fixture). `helmEnv` stays for `checkHelmMajor`. `runFixture`'s comment gains: "The tool never sees the job's GITHUB_OUTPUT or GITHUB_STEP_SUMMARY; a fixture with github gets files of its own."
-- `checkGitHubFiles`: reads both files with `readGitHubOutputs` and `os.ReadFile`; wants the outputs exactly `{"out": [out], "verdict": ["not-verified", value]}`; wants the summary's first line to begin `"### rollproof: " + word` and the summary to end `"results: " + out + "\n```\n"`.
+- `checkGitHubFiles`: reads both files with `readGitHubOutputs` and `os.ReadFile`; wants the outputs exactly `{"out": [out], "verdict": ["not-verified", value]}`; wants the summary's first line to begin `"### rollproof: " + word` and the summary to hold `"results: " + out + "\n```\n"`, contained and not necessarily last, with the comment "A warning after the console is appended after the results block, so the summary need not end with it."
 - `fixtures_test.go`: `underBothHelms` becomes `underEachHelm`, over `majors`; every call in `fixtures_test.go`, `custom_test.go` and `commands_test.go` follows (32 calls; `grep -rn underBothHelms e2e` prints nothing afterwards). In the comment of `TestChartDeniesTrafficByDefault`, the sentence "The control runs once, under Helm 3: it tests the cluster's network plugin, not Helm." becomes, exactly: "The control runs in every run of this test, under Helm 3, whatever ROLLPROOF_E2E_HELM selects: it tests the cluster's network plugin, not Helm, and each job of the suite's workflow runs on its own runner image and shows there that the plugin enforces the policy." Its code does not change.
 - `mirror_helpers_test.go`: `throughTheMirror` sets `github: true` (and so `mirrorReplacesItsHost`, which starts from it); its comment adds "with files of its own for GitHub's outputs and summary, which the search for the password reads".
 - `mirror_test.go`: the checks of Step 1; and `holdRunImages` runs the engine's `image inspect` under a limit of 1 minute and its `pull` under a limit of 10 minutes (`exec.CommandContext` with `context.WithTimeout`), a pull cut at its limit failing the test with "ENGINE pull REF did not end within 10m0s" (a leftover of step 5, its Task 13's m5; see Task 12's table).

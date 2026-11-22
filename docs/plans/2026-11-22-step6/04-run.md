@@ -120,9 +120,9 @@ func (s *runState) lateWarnings() {
 ```go
 // warnAfterConsole adds a warning that arose once the console text was printed, and tells it as
 // lateWarnings tells one. When the final result.json was refused, so that no console was printed
-// and no summary written, it prints the warning as a line of its own and tries result.json once
-// more. A failure of that write is not allowed to escape: it would panic inside a deferred
-// function.
+// and no summary written, it prints the warning as a line of its own and does not write
+// result.json again: the first result.json, which says that the run did not finish, stays, so
+// that the file, the step's output and the exit code say the same.
 func (s *runState) warnAfterConsole(text string) {
 	s.warnings.add(text)
 	if s.finalWritten {
@@ -130,9 +130,10 @@ func (s *runState) warnAfterConsole(text string) {
 		return
 	}
 	s.println(s.o.Stdout, "warning: "+text)
-	s.rewriteFinal()
 }
 ```
+
+Today's `warnAfterConsole` (`internal/run/run.go:1177-1181`) calls `rewriteFinal` on every path, so, with this step's outputs, a later warning after a refused final write could write a final `result.json` that the exit code and the step's output contradict, once the folder could be written again. The existing tests of a refused write, read at `58c1cbf`, and what each needs: none asserts that second try, and none changes. `TestARefusedFinalKeepsTheVerdictsClass` (`internal/run/run_test.go:1653`) refuses the write at the probe's stop, and its cluster's delete succeeds, so no warning comes after the refused write, and it wants stdout empty; `TestAPanicInTheFinalWriteIsARefusedWrite` (`:1775`) and `TestARefusedFinalWriteClosesTheProbeLog` (`:3339`) call `finish` with no cluster, no watcher and no signal, so `warnAfterConsole` is never reached; `TestResultsFolderCannotBeWritten` (`:370`) ends before `finish`, when `report.Open` fails. The new `TestAWarningAfterARefusedFinalWriteLeavesTheFirstFile` (Step 1) is the first test to reach `warnAfterConsole` after a refused write.
 
 - New:
 
@@ -250,6 +251,18 @@ func TestTheResultsComeBeforeTheEvidence(t *testing.T) {
 	// w.watcher.eventsCalls (the log when the events were listed, the last step of the evidence)
 	// ends with "console".
 }
+
+// A warning after a refused final write is a line of its own, and result.json is not written
+// again: the file, the step's output and the exit code say the same (decision 6).
+func TestAWarningAfterARefusedFinalWriteLeavesTheFirstFile(t *testing.T) {
+	// w.gitHubFiles; the hook "end-commands" removes w.out, so that the final write is refused, as
+	// in the refused rows of TestWhatVerdictSaysAfterEachEnding; the hook "delete" makes w.out
+	// again (os.MkdirAll, mode 0o700), before the clean-up's warning arises;
+	// w.cluster.deleteErr = errors.New("the engine did not answer").
+	// Exit 2; stdout holds the line "warning: the cluster was not deleted: the engine did not
+	// answer"; the outputs' verdict values are [not-verified not-verified]; w.out holds no final
+	// result.json (none, or one that is not final).
+}
 ```
 
 `TestPasswordsAreMaskedEverywhere` calls `w.gitHubFiles(t)` before the run, adds the contents of both files to `texts` under the names `GITHUB_OUTPUT` and `GITHUB_STEP_SUMMARY`, so that no form of either password may be in them, and wants the summary to hold "warning: the cluster was not deleted: the engine said ***".
@@ -267,7 +280,7 @@ func TestASignalEndsTheToolByItAfterARefusedWrite(t *testing.T) {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go test ./internal/run/ ./cmd/rollproof/ -run 'TestTheOutputsAtBothMoments|TestWhatVerdictSaysAfterEachEnding|TestNothingIsWrittenForGitHubWithoutItsVariables|TestAGitHubFileThatCannotBeWrittenIsAWarning|TestTheSummaryIsAppendedOnce|TestALateWarningIsALineOfTheSummary|TestTheResultsComeBeforeTheEvidence|TestPasswordsAreMaskedEverywhere|TestASignalEndsTheToolByItAfterARefusedWrite' -v`
+Run: `go test ./internal/run/ ./cmd/rollproof/ -run 'TestTheOutputsAtBothMoments|TestWhatVerdictSaysAfterEachEnding|TestNothingIsWrittenForGitHubWithoutItsVariables|TestAGitHubFileThatCannotBeWrittenIsAWarning|TestTheSummaryIsAppendedOnce|TestALateWarningIsALineOfTheSummary|TestTheResultsComeBeforeTheEvidence|TestAWarningAfterARefusedFinalWriteLeavesTheFirstFile|TestPasswordsAreMaskedEverywhere|TestASignalEndsTheToolByItAfterARefusedWrite' -v`
 Expected: FAIL: `gitHubOf` and `gitHubFiles` are not defined in `internal/run`. `TestASignalEndsTheToolByItAfterARefusedWrite` passes already: it pins `endProcess`'s rule for this case.
 
 - [ ] **Step 3: Implement the changes above, each named one with its interface comment**

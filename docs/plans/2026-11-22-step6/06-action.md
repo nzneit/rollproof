@@ -118,8 +118,12 @@ func TestTheScriptsImageReference(t *testing.T) {
 	//   IMAGE "r.example/rollproof", DIGEST "sha256:bbb"                 -> "r.example/rollproof@sha256:bbb", 0
 	//   IMAGE "r.example/rollproof:v1", DIGEST "sha256:bbb"              -> "r.example/rollproof:v1@sha256:bbb", 0
 	//   IMAGE "", REPOSITORY "ghcr.io/o/rollproof", DIGEST "sha256:bbb"  -> "ghcr.io/o/rollproof@sha256:bbb", 0
-	//   nothing set                                                      -> "", 2, stderr the text "No image"
-	//   IMAGE "r.example/rollproof", no DIGEST                           -> "", 2, stderr the text "No digest"
+	//   nothing set                                                      -> "", 2, stderr
+	//     "rollproof: no image to pull: before its first release this action carries no repository and no digest, so give the input image a reference with @sha256:\n"
+	//     (the table's text of the row "No image")
+	//   IMAGE "r.example/rollproof", no DIGEST                           -> "", 2, stderr
+	//     "rollproof: the image r.example/rollproof carries no digest, and before its first release this action carries none: give the input image a reference with @sha256:\n"
+	//     (the table's text of the row "No digest", with r.example/rollproof for IMAGE)
 	// (IMAGE, REPOSITORY and DIGEST stand for ROLLPROOF_ACTION_IMAGE, _REPOSITORY and _DIGEST; each
 	// output ends with a line end.)
 }
@@ -129,11 +133,19 @@ func TestTheScriptFailsWithExit2AndWritesNoOutput(t *testing.T) {
 	// GITHUB_OUTPUT still empty. REF as in TestTheScriptStartsTheToolInItsPlace.
 	//   "not Linux": a fake uname that prints "Darwin"; the log stays empty.
 	//   "no engine": no fake engine.
+	//   "no image": ROLLPROOF_ACTION_IMAGE, ROLLPROOF_ACTION_REPOSITORY and ROLLPROOF_ACTION_DIGEST
+	//     empty; the log holds "docker -v" only.
+	//   "no digest": ROLLPROOF_ACTION_IMAGE "r.example/rollproof", ROLLPROOF_ACTION_DIGEST empty;
+	//     the text's IMAGE is r.example/rollproof.
 	//   "a pull that fails": docker's pull exits 1.
+	//   "no folder for the binary": the PATH folder's mktemp is a fake that exits 1; the log ends
+	//     with "docker pull " + REF; the text's DIR is the run's RUNNER_TEMP.
 	//   "a create that fails": docker's create exits 125.
 	//   "an export that fails": docker's export exits 1; the log ends "docker rm fake-id".
 	//   "an image without the binary": export gives toolTar("other", 0o755, fakeTool); the log ends
 	//     "docker rm fake-id".
+	//   "a workspace that cannot be entered": GITHUB_WORKSPACE names a path that does not exist; the
+	//     log ends "docker rm fake-id"; the text's DIR is that path.
 	//   "a binary that cannot start": export gives toolTar("rollproof", 0o755, CONTENT), CONTENT the
 	//     seven bytes "\x7fELF\x02\x01\x01" and 57 zero bytes, which execve refuses.
 }
@@ -198,8 +210,8 @@ inputs:
 outputs:
   verdict:
     description: >-
-      pass, fail or not-verified; empty when the tool never started or could not open its results
-      folder, which a caller treats as not verified.
+      pass, fail or not-verified; empty when the tool never started, could not open its results
+      folder or could not write the outputs, which a caller treats as not verified.
     value: ${{ steps.run.outputs.verdict }}
   out:
     description: The folder that holds result.json and the evidence.
@@ -335,8 +347,7 @@ main() {
   unset ROLLPROOF_ACTION_CONFIG ROLLPROOF_ACTION_IMAGE ROLLPROOF_ACTION_OUT \
     ROLLPROOF_ACTION_VERSION ROLLPROOF_ACTION_REPOSITORY ROLLPROOF_ACTION_DIGEST
   export KIND_EXPERIMENTAL_PROVIDER=$engine
-  exec "$dir/rollproof" "${args[@]}"
-  fail "the binary taken out of $ref could not be started"
+  exec "$dir/rollproof" "${args[@]}" || fail "the binary taken out of $ref could not be started"
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
@@ -377,6 +388,13 @@ git commit -m "Add the tool's image, the composite action and its script, which 
   the verdict's word. GitHub does not promise the folder or the copy, so a folder
   that is not there is a fault that names it, never a pass.
 - Produces: `type options struct { verdict, out, wantVerdict, wantOut, wantDecided, stepFiles string }` and the command line `go run ./hack/actioncheck -verdict V -out PATH -want-verdict WORD -want-out PATH [-want-decided CODE] -step-files DIR`; exit 0 with no output when `check` gives none, 1 with one fault a line on standard error, 2 for a flag it cannot read.
+- Produces: `func run(args []string, stdout, stderr io.Writer) int` in `hack/actioncheck`
+  run is the command: it reads args, the command line without the program's
+  name, into options, and returns the exit code. A flag it cannot read gives 2,
+  with the flag package's message on stderr. Otherwise it runs check and gives 0
+  when check gives no fault, and 1 when it gives any, each fault a line on
+  stderr. It writes nothing to stdout. main is
+  os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)).
 
 The fixed files, exactly. `hack/action/testdata/pass.yaml`:
 
@@ -474,6 +492,15 @@ func TestCheckWordsOfEachVerdict(t *testing.T) {
 	// The heading wanted for wantVerdict "pass", "fail" and "not-verified" is "### rollproof: PASS",
 	// "### rollproof: FAIL" and "### rollproof: NOT VERIFIED".
 }
+
+func TestTheCommandsExitCodes(t *testing.T) {
+	// run with the flags of the whole run of TestCheckAcceptsAWholeRun ("-verdict", "pass",
+	// "-out", OUT, "-want-verdict", "pass", "-want-out", OUT, "-step-files", STEPS): 0, and stdout
+	// and stderr empty.
+	// The same with "-verdict", "fail": 1; stdout empty; stderr exactly one line, the fault,
+	//   `verdict is "fail"; want "pass"` and a line end.
+	// The same with a flag it does not know added, "-no-such-flag": 2; stdout empty.
+}
 ```
 
 In `action_cluster_test.go` (`//go:build cluster`):
@@ -495,10 +522,11 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 	//    cluster.DefaultRegistryImage, PORT a free port (net.Listen on 127.0.0.1:0, then closed);
 	//    GET http://127.0.0.1:PORT/v2/ answers 200 within 30 s; remote.Write of the image to
 	//    127.0.0.1:PORT/rollproof-action-test@D with name.Insecure.
-	// 5. bash ../../action.sh, started in a temporary folder, under a limit of 5 minutes, with this
-	//    process's environment without its GITHUB_ variables, and GITHUB_ACTIONS=true,
-	//    GITHUB_OUTPUT and GITHUB_STEP_SUMMARY naming two empty files of the test, GITHUB_WORKSPACE
-	//    a folder WS that holds rejected.yaml ("version: 99\n"), RUNNER_TEMP a folder RT,
+	// 5. bash with the absolute path of ../../action.sh, its working folder a temporary one, under
+	//    a limit of 5 minutes, with this process's environment without its GITHUB_ variables, and
+	//    GITHUB_ACTIONS=true, GITHUB_OUTPUT and GITHUB_STEP_SUMMARY naming two empty files of the
+	//    test, GITHUB_WORKSPACE a folder WS that holds rejected.yaml ("version: 99\n"), RUNNER_TEMP
+	//    a folder RT,
 	//    ROLLPROOF_ACTION_CONFIG=rejected.yaml, ROLLPROOF_ACTION_IMAGE=127.0.0.1:PORT/rollproof-action-test@D,
 	//    ROLLPROOF_ACTION_OUT=results and KIND_EXPERIMENTAL_PROVIDER=ENGINE.
 	// It exits 2. WS/results/result.json is final, its verdict not-verified, its one reason
@@ -517,7 +545,7 @@ The outputs are read by a copy, in `action_cluster_test.go`, of `e2e`'s `readGit
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `go test ./hack/action/ ./hack/actioncheck/ -v`, then `go vet -tags cluster ./...`
-Expected: FAIL: `testdata/pass.yaml` does not exist; `check` and `options` are not defined.
+Expected: FAIL: `testdata/pass.yaml` does not exist; `check`, `options` and `run` are not defined.
 
 - [ ] **Step 3: Write the files, each named one with its interface comment from the Interfaces block**
 
@@ -531,6 +559,8 @@ Expected: FAIL: `testdata/pass.yaml` does not exist; `check` and `options` are n
 // read exits 2.
 package main
 ```
+
+Its `main` is one line, `os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))`, so that the tests reach every exit code through `run`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 

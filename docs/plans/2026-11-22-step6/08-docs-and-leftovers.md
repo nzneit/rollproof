@@ -13,7 +13,7 @@ Read section 8 ("The action", whole), section 11 (its first bullet), section 12 
 
 - [ ] **Step 1: Write `README.md`**
 
-The whole file becomes, exactly (the paragraph on `registries` and the one on the mirror job are today's, unchanged):
+The whole file becomes, exactly (only the paragraph on `registries` is today's, unchanged):
 
 ````markdown
 # rollproof
@@ -24,7 +24,7 @@ It tests, in a CI job or on a laptop, whether deploying a new version of a Kuber
 
 Nothing is released; the design is docs/specs/2026-11-13-rollproof-design.md.
 
-What works now, on Linux: `rollproof run` creates its own kind cluster; deploys through Helm, with or without a previous release (a run with none tests a restart), or through the commands driver; runs the `setup` commands; judges with the built-in HTTP probe or with a custom probe that `docs/probe-contract.md` describes; takes images from the engine or from an archive; and writes `result.json`, the console report and the evidence folder, and, on GitHub Actions, the step's outputs and its job summary. The whole suite has run on rootless nerdctl. On Docker, on GitHub's hosted runners, the tests that need an engine and the suite's first fixture under both Helm majors have run (`docs/proofs/p24-hosted-runner.md`). Podman is not promised: one test has run through it.
+What works now, on Linux: `rollproof run` creates its own kind cluster; deploys through Helm, with or without a previous release (a run with none tests a restart), or through the commands driver; runs the `setup` commands; judges with the built-in HTTP probe or with a custom probe that `docs/probe-contract.md` describes; takes images from the engine or from an archive; and writes `result.json`, the console report and the evidence folder, and, on GitHub Actions, the step's outputs and its job summary. The whole suite has run on rootless nerdctl. On Docker, on GitHub's hosted runners, the tests under the build tag `cluster` of four packages and the suite's first fixture under both Helm majors have run (`docs/proofs/p24-hosted-runner.md`). Podman is not promised: one test has run through it.
 
 `registries` tells the cluster's nodes how to pull from a host. A `mirror` replaces the host: the nodes pull its images from the mirror alone, and a mirror that lacks an image fails the pull. A `ca` adds a certificate authority for the place the nodes pull from. `username` and `password` go into a credentials file that every node mounts; any pod that mounts that path of its node can therefore read it, so give credentials that can only read and expire soon. Write Docker Hub as `docker.io`. `as` in `images` stores an image under the repository that the real manifests name, so the manifest under test is the one that deploys. A registry password is masked as `***` in the console, in `result.json` and in the evidence folder, in its plain form, its JSON spellings (with and without HTML escaping), its Go-quoted spelling, and the base64 of `USERNAME:PASSWORD` (padded and not); nothing else is masked. A mirror that the nodes must reach without a proxy goes into the caller's own `NO_PROXY`, which kind passes into the nodes (read in kind's source, not run).
 
@@ -45,11 +45,11 @@ It cannot yet be used from another repository: nothing is released, so the actio
         name: rollproof-results
         path: ${{ steps.rollproof.outputs.out }}
 
-Two outputs. `verdict` is `pass`, `fail` or `not-verified`, the verdict that decides the step's exit code (0, 1 or 2); a run that was killed before it finished leaves `not-verified`. An empty `verdict` means that the action stopped before the tool started (the runner is not Linux, it has no container engine, or the image could not be pulled) or that the tool could not open its results folder: read it as not verified. `out` is the folder that holds `result.json` and the evidence.
+Two outputs. `verdict` is `pass`, `fail` or `not-verified`, the verdict that decides the step's exit code (0, 1 or 2); a run that was killed before it finished leaves `not-verified`. An empty `verdict` means that the action stopped before the tool started (the runner is not Linux, it has no container engine, or the image could not be pulled) or that the tool could not open its results folder, or that the step's outputs file could not be written, which a warning on the console says: read it as not verified. `out` is the folder that holds `result.json` and the evidence.
 
 The action uploads nothing. The step above uploads the folder, with `if: always()` so that it runs after a fail, after a run that was not verified and after a cancel. The evidence holds the chart's values and the probe's header values as they were given; only a registry password is masked. Keep the uploaded folder to yourself when those values are secret.
 
-The step that calls the action must not carry `if: always()`: GitHub's runner does not cancel a running step whose condition still holds after a cancel, so the tool would not learn of it (read in the runner's source, not run). A cancel, the job's time limit and a `timeout-minutes` on the step reach the tool as SIGINT; it then writes its final `result.json`, its outputs and its job summary, and prints its report, within the 7.5 s before GitHub's SIGTERM ends it, and leaves the cluster for the next run to remove.
+The step that calls the action must not carry `if: always()`: GitHub's runner does not cancel a running step whose condition still holds after a cancel, so the tool would not learn of it (read in the runner's source, not run). A cancel, the job's time limit and a `timeout-minutes` on the step reach the tool as SIGINT; it then writes its final `result.json`, its outputs and its job summary and prints its report before anything else, because GitHub's SIGTERM ends it 7.5 s later, and leaves the cluster for the next run to remove.
 
 The tool writes the outputs and the job summary itself, when `GITHUB_ACTIONS` is `true`, each to the file that `GITHUB_OUTPUT` or `GITHUB_STEP_SUMMARY` names. So a runner that already holds the binary needs no action: a step whose script is `exec rollproof run` gives the same outputs and the same summary, and the same caution about `if: always()` holds. Without `exec`, the step's shell gets GitHub's signals and the tool does not. The job summary holds the console's report as Markdown, with every text from the cluster, the commands and the configuration inside code.
 
@@ -63,7 +63,7 @@ To run the suite: `go run ./hack/fetchhelm` fetches under `.tools/` the Helm bin
 
 The mirror job, `go test -tags mirror -p 1 ./e2e/ -run TestMirror -v -timeout 60m` (with `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0` before it on nerdctl), runs the first fixture through a mirror that needs a login, sits under a path and serves TLS from a private authority, with the nodes' route to public registries cut, and then a run whose candidate the mirror lacks.
 
-The project's workflows sit in the host repository, and all but the unit tests start by hand only: `rollproof-e2e.yml` runs the tests under the build tag `cluster`, and then the suite under Helm 3 on `ubuntu-24.04` and under Helm 4 on `ubuntu-26.04`, side by side, in about one and a half to two hours (about 170 to 205 billed minutes); `rollproof-mirror.yml` runs the mirror job; `rollproof-action.yml` runs the action's own test: a pass, a fail, and a run cut short by a time limit. `rollproof-unit.yml` runs the unit tests on every pull request that touches the project.
+The project's workflows sit in the host repository, and all but the unit tests start by hand only: `rollproof-e2e.yml` runs the tests under the build tag `cluster`, and then the suite under Helm 3 on `ubuntu-24.04` and under Helm 4 on `ubuntu-26.04`, side by side, in about one and a half to two hours (about 172 to 205 billed minutes); `rollproof-mirror.yml` runs the mirror job; `rollproof-action.yml` runs the action's own test: a pass, a fail, and a run cut short by a time limit. `rollproof-unit.yml` runs the unit tests on every pull request that touches the project.
 
 Every key of version 1 is built: `registries` and `as` in `images` came with step 5.
 

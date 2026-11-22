@@ -54,15 +54,17 @@ jobs:
 
 - [ ] **Step 3: Check them**
 
-Run, from the root of the new worktree:
+Run, from the root of the new worktree, each command alone:
 
 ```
+grep -nE '[DGO]-[0-9]{3}' .github/workflows/rollproof-e2e.yml .github/workflows/rollproof-action.yml
+python3 -c 'import sys, yaml; [yaml.safe_load(open(p)) for p in sys.argv[1:]]' .github/workflows/rollproof-e2e.yml .github/workflows/rollproof-action.yml
 bun tools/citations/cli.ts repo
 ```
 
-Expected: exit 0. An exit code of 2 means the check did not run: report it as unchecked, never as a pass.
+Expected: the search prints nothing and exits 1, which is the pass: the files hold nothing that looks like one of the host's row IDs, which the citation check does not read for them, since it reads tracked Markdown only. The parse prints nothing and exits 0; when `python3` or its `yaml` module is missing, the parse is reported as unchecked, never as a pass. The citation check exits 0, as the host asks for any change. For the search and the citation check, an exit code of 2 means the check did not run: report it as unchecked, never as a pass.
 
-Then read both files back and compare them with Step 2, line by line: the same text, two spaces for each level of indentation, no tab. A file that differs is fixed before the commit. Nothing on this machine runs a workflow; GitHub reads them only when the pull request is opened, which needs the maintainer's word (Step 6).
+Then read both files back and compare them with Step 2, line by line: the same text, two spaces for each level of indentation, no tab. A file that differs is fixed before the commit. The parse shows the YAML's syntax and nothing more. Nothing on this machine runs a workflow or parses one as GitHub does; GitHub reads them only when the pull request is opened, which needs the maintainer's word (Step 6).
 
 - [ ] **Step 4: Commit**
 
@@ -79,7 +81,7 @@ Write this text into a file outside both worktrees, in the system's temporary fo
 
 > Adds `.github/workflows/rollproof-e2e.yml` and `.github/workflows/rollproof-action.yml` as placeholders whose one job never runs (`if: false`).
 >
-> GitHub starts a workflow by hand only when the default branch holds a file of its name. rollproof's build-order step 6 writes both workflows on the branch `rollproof-step6-design` and has to run them there before that branch is merged; with these files on `main`, `gh workflow run FILE --ref rollproof-step6-design` starts the branch's version, as it did for `rollproof-proofs.yml`.
+> GitHub's documentation says that a workflow is started by hand only when the default branch holds a file of its name. rollproof's build-order step 6 writes both workflows on the branch `rollproof-step6-design` and has to run them there before that branch is merged; with these files on `main`, `gh workflow run FILE --ref rollproof-step6-design` starts the branch's version, as it did for `rollproof-proofs.yml`.
 >
 > Nothing runs: the workflows start only by hand, and their job is skipped. When step 6 is merged, its own versions replace these.
 

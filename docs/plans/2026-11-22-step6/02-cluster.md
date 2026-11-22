@@ -65,16 +65,16 @@ func TestNodeImageNameUnderEachEngine(t *testing.T) {
 }
 
 func TestNodeImageAsksTheEngineByItsName(t *testing.T) {
-	// With fakeEngine (below) as podman: nodeImage(ctx, Engine{Binary: "podman"},
+	// With fakeEngineOnPath (below) as podman: nodeImage(ctx, Engine{Binary: "podman"},
 	// "kindest/node:v1.37.0") returns "kindest/node:v1.37.0@sha256:abc", and the fake's log holds
 	// exactly one line, "image inspect --format {{json .RepoDigests}} docker.io/kindest/node:v1.37.0".
-	// With fakeEngine as nerdctl: the same call with Binary "nerdctl" returns the same, and the line
+	// With fakeEngineOnPath as nerdctl: the same call with Binary "nerdctl" returns the same, and the line
 	// ends "kindest/node:v1.37.0" with nothing in front of kindest.
 	// A name with a digest, under either: returned as it is, and the log is empty.
 }
 ```
 
-`fakeEngine(t *testing.T, name string) (log string)`, a helper in `engine_test.go`: it writes into `t.TempDir()` an executable file named `name` with this text, LOG replaced by the path of a log file in the same folder, and puts that folder first on the `PATH` with `t.Setenv`:
+`fakeEngineOnPath(t *testing.T, name string) (log string)`, a helper in `engine_test.go` beside its `fakeEngine`, which it does not replace: it writes into `t.TempDir()` an executable file named `name` with this text, LOG replaced by the path of a log file in the same folder, and puts that folder first on the `PATH` with `t.Setenv`:
 
 ```sh
 #!/bin/sh
@@ -91,7 +91,7 @@ In `create_test.go`:
 
 ```go
 func TestCreatePullsTheNodeImageByTheEnginesName(t *testing.T) {
-	// Rows, each with fakeEngine for its engine, kindDelete replaced by one that returns nil,
+	// Rows, each with fakeEngineOnPath for its engine, kindDelete replaced by one that returns nil,
 	// pullImage replaced by one that records the image it is given and returns
 	// errors.New("stop here"), and Spec{Name: "rollproof-test-unit", RunDir:
 	// filepath.Join(t.TempDir(), "rollproof-test-unit"), Workers: 1, Namespace: "app",
@@ -158,7 +158,7 @@ git commit -m "Ask Podman for a node image by the name kind's Podman provider us
 
 **Files:**
 - Create: `internal/cluster/kind.go`, `internal/cluster/kind_test.go`
-- Modify: `internal/cluster/cluster.go` (the seams; `Create`'s node settings into `writeNodeSettings`; `createKind`; `remove`; `writeRegistryFiles`; `byRole`; `fail`), `internal/cluster/logs.go` (`collectLogs`), `internal/cluster/create_test.go` (`TestCreateKindRetries`' row "ctx has ended"), `internal/cluster/cluster_test.go` (tag `cluster`: one new test, one line of `TestCreateWritesRegistrySettings`)
+- Modify: `internal/cluster/cluster.go` (the seams; `Create`'s node settings into `writeNodeSettings`; `createKind`; `remove`; `writeRegistryFiles`; `byRole`; `fail`), `internal/cluster/logs.go` (`collectLogs`), `internal/cluster/create_test.go` (`TestCreateKindRetries`' row "ctx has ended"; the stubs of `TestCreateKindRetries` and `TestCreateFailureTexts`, Step 2), `internal/cluster/logs_test.go` (`writeLogFile`; the stubs of `TestCollectLogsCopiesEveryFile` and `TestCollectLogsWithNoRegistry`, Step 2), `internal/cluster/cluster_test.go` (tag `cluster`: one new test, one line of `TestCreateWritesRegistrySettings`)
 - Modify: `cmd/rollproof/main_test.go` (`TestFailedClientError`, `TestStoreFailedTakesTheLogs`), `internal/run/run_test.go` (two new tests)
 
 **Interfaces:**
@@ -242,9 +242,13 @@ func TestASignalDuringEachCallIntoKind(t *testing.T) {
 	//     The text begins "create the kind cluster: " + missedLine(1).Error() +
 	//     "; delete the failed attempt 1: context canceled"; kindCreate was called once.
 	//   "the log collection of a failed set-up": kindCreate returns errors.New("exit status 125");
-	//     Spec.Evidence writes into a folder of its own (evidenceDir); kindCollectLogs blocks.
-	//     The text begins "create the kind cluster: exit status 125"; kindDelete was called once
-	//     (the leftovers'); the evidence folder holds no file.
+	//     Spec.Evidence writes into a folder of its own (evidenceDir); kindCollectLogs is the call
+	//     that blocks: it first makes its folder dir (RunDir/kind-logs) with one file in it,
+	//     kind-version.txt holding "v0.33.0" (written with writeLogFile, Step 2), then closes
+	//     entered and blocks; containerLogs is replaced by a stub that records its calls.
+	//     The text begins "create the kind cluster: exit status 125"; RunDir/kind-logs still holds
+	//     kind-version.txt; the evidence folder holds no file; the containerLogs stub was not
+	//     called; kindDelete was called once (the leftovers').
 	//   "the removal of a cluster whose set-up failed": as the row before, but kindCollectLogs
 	//     returns nil, and kindDelete returns nil on its first call and blocks on its second.
 	//     The text begins "create the kind cluster: exit status 125" and ends with LeftBehind.
@@ -329,12 +333,30 @@ func TestASignalWhileTheImagesAreStored(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 2: Keep `t.Fatal` out of the stubs of kind's calls**
+
+From this task on, kind's calls run on `untilDone`'s goroutine, not on the test's, and `testing` does not allow `t.Fatal`, `t.Fatalf` or `t.FailNow` from another goroutine than the test's. So in every test file of `internal/cluster` that replaces `kindCreate`, `kindDelete`, `kindCollectLogs` or one of the three new seams, a stub calls none of them, nor a helper that does: such a call becomes `t.Errorf` and a return. The new stubs of Task 2 and of this task follow the rule. The places in the existing tests, read at `58c1cbf`:
+
+- `internal/cluster/logs_test.go:81-82`, in the `kindCollectLogs` stub of `TestCollectLogsCopiesEveryFile` (lines 77-84), and `:164`, in that of `TestCollectLogsWithNoRegistry` (lines 163-166): each calls `writeTestFile` (lines 30-39), which calls `t.Fatal`. Beside `writeTestFile` comes a variant that returns its error:
+
+  ```go
+  // writeLogFile writes text to path, making its folders, and returns the error. A stub of kind's
+  // calls runs on another goroutine than the test's, where t.Fatal is not allowed: it reports the
+  // error with t.Errorf and returns it.
+  func writeLogFile(path, text string) error
+  ```
+
+  The two stubs call it, and on an error call `t.Errorf` with the error and return it. `writeTestFile` stays for the test's own goroutine (`TestCopyLogsClosesEachFile`, line 140).
+- `internal/cluster/create_test.go:65`, in the `kindCreate` stub of `TestCreateKindRetries`: `t.Fatalf("attempt %d of kind's Create, want at most %d", …)` becomes `t.Errorf` with the same text and `return errors.New("an attempt too many")`.
+- `internal/cluster/create_test.go:261` and `:266`, in the `kindCreate` stub of `TestCreateFailureTexts`: `t.Fatalf("attempt %d of kind's Create, want %d", …)`, and `t.Fatal(err)` after the kubeconfig's write; and `:273`, in its `kindDelete` stub: `t.Fatalf("delete %d of kind's Delete, want %d", …)`. Each becomes `t.Errorf` (the first and the last with the same text, the second as `t.Errorf("write the kubeconfig: %v", err)`) and a return: of `errors.New("an attempt too many")`, of the write's error, and of `errors.New("a delete too many")`. The returns for lines 261 and 273 come before the index into `tc.creates` or `tc.deletes`, which would otherwise run past its end.
+- Read, and left as they are, since no stub there calls `t.Fatal` or a helper that does: `internal/cluster/remove_test.go:38-41` (the `kindDelete` stub of `TestRemoveRefuses` counts and returns nil); `internal/cluster/cluster_test.go:50-61` (`TestMain`'s wrapper of `kindCreate`, which has no `t`); in `create_test.go`, the `kindDelete` stub of `TestCreateKindRetries` (lines 77-83), the `kindCollectLogs` stub of `TestCreateFailureTexts` (line 282) and the stubs of `TestCreateWritesTheCredentialsFileBeforeKind` (lines 346-370), which report with `t.Errorf`; in `logs_test.go`, the `kindCollectLogs` stubs at lines 182-184 and 204-207, which call no `t` method, or `t.Error` only.
+
+- [ ] **Step 3: Run the tests to verify they fail**
 
 Run: `go test ./internal/cluster/ ./cmd/rollproof/ ./internal/run/ -run 'TestUntilDone|TestASignalDuringEachCallIntoKind|TestWriteNodeSettingsFailures|TestCreateKindRetries|TestFailedClientError|TestStoreFailedTakesTheLogs|TestASignalWhileTheClusterIsMade|TestASignalWhileTheImagesAreStored' -v`
 Expected: FAIL to compile in `internal/cluster`: `untilDone`, `writeNodeSettings` and the three seams are not defined. The `cmd` and `run` rows pass already, since their fakes return as the real calls will: they pin the paths that the real calls now reach.
 
-- [ ] **Step 3: Implement, each named one with its interface comment from the Interfaces block**
+- [ ] **Step 4: Implement, each named one with its interface comment from the Interfaces block**
 
 `kind.go` (`//go:build linux`) holds `untilDone`:
 
@@ -380,21 +402,21 @@ In `cluster.go`:
 
 In `logs.go`, `collectLogs`: `collectErr := untilDone(ctx, func() error { return kindCollectLogs(p, name, dir) })`; when `ctx.Err() != nil` after it, return `ctx.Err()` at once: nothing is copied, the folder is not removed (kind may still be writing it), and the registry's log is not taken. Otherwise `collectErr` joins the copy's and the removal's errors as today. Its comment says what a signal leaves: "the half-written folder stays in the run's folder, which the next run removes."
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `go test ./internal/cluster/ ./cmd/rollproof/ ./internal/run/ -v -run 'TestUntilDone|TestASignalDuringEachCallIntoKind|TestWriteNodeSettingsFailures|TestCreateKindRetries|TestCreateFailureTexts|TestCollectLogs|TestFailedClientError|TestStoreFailedTakesTheLogs|TestASignalWhileTheClusterIsMade|TestASignalWhileTheImagesAreStored'`, then `go test -race ./internal/cluster/ ./cmd/rollproof/ ./internal/run/`, `gofmt -l .`, `go test ./...` and the four vets.
 Expected: PASS, no race, no output from `gofmt` and the vets.
 
-- [ ] **Step 5: Run the cluster tests on this machine**
+- [ ] **Step 6: Run the cluster tests on this machine**
 
 Run: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 ./internal/cluster/ -run 'TestAnAbandonedCreateIsRemovedByTheNextRun|TestCreateWritesRegistrySettings|TestCreateAndDelete' -v -timeout 30m`
 Expected: PASS for the three. Then `nerdctl ps -a --format "{{.Names}}"` prints no name that begins `rollproof-test-`.
 
-**Stop rule.** When `TestAnAbandonedCreateIsRemovedByTheNextRun` fails because kind's abandoned call did not end within 5 minutes, or because a container is left after `remove`, stop and report to the maintainer with the test's output and `nerdctl ps -a`; remove only the containers whose names begin `rollproof-test-abandoned-`. A failure of kind's creation at its log line (`could not find a log line that matches`) inside the abandoned call is not a failure of the test: the call ended, and its nodes are kept and removed all the same.
+**Stop rule.** When `TestAnAbandonedCreateIsRemovedByTheNextRun` fails because kind's abandoned call did not end within 5 minutes, or because a container is left after `remove`, stop and report to the maintainer with the test's output and `nerdctl ps -a`; remove only the containers whose names begin `rollproof-test-abandoned-`. A failure of kind's creation at its log line (`could not find a log line that matches`) inside the abandoned call is not a failure of the test: the call ended, and its nodes are kept and removed all the same. When kind's abandoned call ends with another error and leaves no container whose name begins `rollproof-test-abandoned-`, the test fails at its assertion that kind left nodes: stop and report, with kind's error (under `-v`, `TestMain`'s line "kind Create of rollproof-test-abandoned, attempt N: failed: …" in the test's output); it is not a failure of the change.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```
-git add internal/cluster/kind.go internal/cluster/kind_test.go internal/cluster/cluster.go internal/cluster/logs.go internal/cluster/create_test.go internal/cluster/cluster_test.go cmd/rollproof/main_test.go internal/run/run_test.go
+git add internal/cluster/kind.go internal/cluster/kind_test.go internal/cluster/cluster.go internal/cluster/logs.go internal/cluster/create_test.go internal/cluster/logs_test.go internal/cluster/cluster_test.go cmd/rollproof/main_test.go internal/run/run_test.go
 git commit -m "Stop waiting for kind at a signal in every call into kind before the verdict, and leave what kind made to the next run"
 ```

@@ -48,9 +48,9 @@ gh run list --workflow rollproof-action.yml --branch rollproof-step6-design --li
 gh run list --workflow rollproof-mirror.yml --branch rollproof-step6-design --limit 1
 ```
 
-With each run's ID from the listing, in place of ID, each alone: `gh run watch ID --exit-status`, then `gh run view ID --log > LOG`, LOG a file of the system's temporary folder named after the workflow, never a file of the repository. For a run that failed, also `gh run download ID --dir DIR`, DIR a new folder of the system's temporary folder, for its uploaded results.
+With each run's ID from the listing, in place of ID, each alone: `gh run watch ID --exit-status`, then `gh run view ID --log > LOG`, LOG a file of the system's temporary folder named after the workflow, never a file of the repository. For a failed run of the action's test, also `gh run download ID --dir DIR`, DIR a new folder of the system's temporary folder, for its uploaded results. The mirror job uploads nothing: its failure is read from its log.
 
-When either run did not pass: stop; report to the maintainer with both logs and the downloaded results; do not start the suite. A fix is a task of its own, and its run a new word. The record (Step 5) is written all the same, with `Holds: no` where a belief failed.
+When either run did not pass: stop; report to the maintainer with both logs and, for the action's test, the downloaded results; do not start the suite. A fix is a task of its own, and its run a new word. The record (Step 5) is written all the same, with `Holds: no` where a belief failed.
 
 - [ ] **Step 4: When both passed, start the suite**
 
@@ -61,7 +61,7 @@ gh workflow run rollproof-e2e.yml --ref rollproof-step6-design
 gh run list --workflow rollproof-e2e.yml --branch rollproof-step6-design --limit 1
 ```
 
-Then `gh run watch ID --exit-status` and `gh run view ID --log > LOG`, as in Step 3; for a failed job, `gh run download ID --dir DIR`. A job that fails is reported as in Step 3.
+Then `gh run watch ID --exit-status` and `gh run view ID --log > LOG`, as in Step 3; for a failed Helm job, `gh run download ID --dir DIR`. The `cluster` job uploads nothing: its failure is read from the log. A job that fails is reported as in Step 3.
 
 - [ ] **Step 5: Write the record**
 
@@ -70,7 +70,7 @@ Then `gh run watch ID --exit-status` and `gh run view ID --log > LOG`, as in Ste
 - **Question:** do the three workflows pass on GitHub's hosted runners, and what does each show of the beliefs of the plan for step 6 (below)?
 - **Machine and versions:** for each job, from its log: the runner's version and the image's name and version (`Current runner version`, `Image`, `Version`), the region, Go as `actions/setup-go` found it; Docker's version where a log shows it, else the image's software list (`actions/runner-images`, read) with its commit; Helm and kubectl as `fetchhelm` printed them.
 - **Method:** the three files at the commit that ran (`git rev-parse HEAD`, alone, before the push), the commands of Steps 3 and 4, the runs' and jobs' IDs, and each job's times from its first to its last log line.
-- **Result:** for each job, its outcome and its time, and its billed minutes (each job's time rounded up to a whole minute, as GitHub bills it; GitHub's own bill is not read). For the action's test: each check step's output; for the run cut short, the time of the step's start, of the runner's line "has timed out", and of the moment `result.json` was final (its windows' end, or the evidence's `windows.json`), as the logs and the uploaded results show them. For the mirror job and the suite: each test's and subtest's `--- PASS` or `--- FAIL` lines and times, and the lines of the fourteenth row's control in both Helm jobs.
+- **Result:** for each job, its outcome and its time, and its billed minutes (each job's time rounded up to a whole minute, as GitHub bills it; GitHub's own bill is not read). For the action's test: each check step's output; for the run cut short, the time of the step's start and of the runner's line "has timed out", from the log, and the moment of `result.json`'s last write, from the lines that the step "Check the run cut short" prints first (`stat` of `result.json`, `ls -l` of the evidence). That moment is the last write of `result.json`, which a later warning's rewrite moves, so it is an upper bound for the moment the final file was written; the record says so. For the mirror job and the suite: each test's and subtest's `--- PASS` or `--- FAIL` lines and times, and the lines of the fourteenth row's control in both Helm jobs.
 - **Decision:** what the plan or the design does because of the result; a belief that did not hold is a finding for the maintainer.
 - The pairs, one for each belief, each `Holds:` followed by `yes`, `no` or `not measured here`:
 
@@ -79,13 +79,14 @@ Plan assumed: "Docker's export of the tool's image names its one file rollproof,
 Plan assumed: "Docker pulls the tool's image by digest from a registry on 127.0.0.1 in the job without TLS and with no setting of the daemon."
 Plan assumed: "The action starts the tool in the workspace, so that a relative config and a relative out are read from there."
 Plan assumed: "A timeout-minutes of 2 on the action's step sends SIGINT while cut.yaml's run is in its steady window or in set-up, and the tool writes its final result.json with the reason interrupted, its outputs and its job summary before SIGTERM, 7.5 s later."
+Plan assumed: "A step that timeout-minutes cut, under continue-on-error, lets the next step run with its outcome failure, and does not fail the job."
 Plan assumed: "The runner keeps the masked copy of the action's inner step's job summary under $RUNNER_TEMP/_runner_file_commands/ with the suffix -scrubbed, and a later step of the job reads it."
 Plan assumed: "The mirror job passes on Docker: the nodes resolve the mirror's container name through Docker's DNS, and the cut of the nodes' route holds."
 Plan assumed: "The suite passes under Helm 3 on ubuntu-24.04 and under Helm 4 on ubuntu-26.04 with Docker 29, the fourteenth row's control passing in both jobs."
 Plan assumed: "One run of rollproof-e2e.yml takes 172 to 205 billed minutes, and one of rollproof-action.yml about 11."
 ```
 
-Then `docs/proofs/README.md`: a row in its list for point 32, filled from the record as its other rows are; in "Still unproved", the items the runs showed are taken out, and what they left (Podman, a runner that persists, `always()` on a cancelled step, a job's time limit through a composite action) stays or is added. When all three workflows passed, the README's sentence "On Docker, on GitHub's hosted runners, the tests that need an engine and the suite's first fixture under both Helm majors have run (`docs/proofs/p24-hosted-runner.md`)." becomes "On Docker, on GitHub's hosted runners, the whole suite under both Helm majors, the mirror job and the action's own test have run (`docs/proofs/p24-hosted-runner.md`, `docs/proofs/p32-step6-workflows.md`)."
+Then `docs/proofs/README.md`: a row in its list for point 32, filled from the record as its other rows are; in "Still unproved", the items the runs showed are taken out, and what they left (Podman, a runner that persists, `always()` on a cancelled step, a job's time limit through a composite action) stays or is added. When all three workflows passed, the README's sentence "On Docker, on GitHub's hosted runners, the tests under the build tag `cluster` of four packages and the suite's first fixture under both Helm majors have run (`docs/proofs/p24-hosted-runner.md`)." becomes "On Docker, on GitHub's hosted runners, the tests under the build tag `cluster` of five packages, the whole suite under both Helm majors, the mirror job and the action's own test have run (`docs/proofs/p24-hosted-runner.md`, `docs/proofs/p32-step6-workflows.md`)."
 
 - [ ] **Step 6: Commit**
 

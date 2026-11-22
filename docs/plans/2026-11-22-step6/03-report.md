@@ -85,6 +85,8 @@ func TestAZeroGitHubWritesNothing(t *testing.T) {
 }
 ```
 
+Each test that replaces `newDelimiter` (`TestGitHubFrom`, `TestOutputsInTheDelimiterForm`, `TestADelimiterThatTheValueHoldsIsDrawnAgain`) restores the real one with `t.Cleanup`, so that `TestTheRealDelimiter` meets the real one in any order.
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `go test ./internal/report/ -run 'TestGitHubFrom|TestOutputsInTheDelimiterForm|TestADelimiterThatTheValueHoldsIsDrawnAgain|TestTheRealDelimiter|TestGitHubsFilesAreNeverMade|TestAppendSummaryAppends|TestAZeroGitHubWritesNothing' -v`
@@ -267,7 +269,7 @@ func outsideCode(md string) (string, error)
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `go test ./internal/report/ -run 'TestSummary|TestFence|TestCodeSpan|TestMarkdownTable' -v`
-Expected: FAIL to compile: `Summary`, `fenced`, `codeSpan` and `markdownTable` are not defined.
+Expected: FAIL to compile: `Summary`, `SummaryLine`, `fenced`, `codeSpan` and `markdownTable` are not defined.
 
 - [ ] **Step 3: Implement, each named one with its interface comment from the Interfaces block and from the comments above**
 

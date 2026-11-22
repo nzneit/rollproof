@@ -235,6 +235,8 @@ jobs:
           VERDICT: ${{ steps.cut.outputs.verdict }}
           OUT: ${{ steps.cut.outputs.out }}
         run: |
+          stat -c '%n was last written at %y' "$OUT/result.json" || true
+          ls -l --time-style=full-iso "$OUT/evidence" || true
           if [ "$OUTCOME" != failure ]; then echo "the step's outcome is $OUTCOME; want failure" >&2; exit 1; fi
           go run ./hack/actioncheck -verdict "$VERDICT" -out "$OUT" -want-verdict not-verified -want-decided interrupted -want-out "$RUNNER_TEMP/results-cut" -step-files "$RUNNER_TEMP/_runner_file_commands"
 
@@ -250,7 +252,7 @@ jobs:
           if-no-files-found: warn
 ```
 
-The `config` inputs are relative to the workspace, which the action enters before it starts the tool (decision 16); the pass run shows it. The outcome of a step that a time limit on its `uses:` cut short is `failure` (`docs/proofs/p03-p04-p20-github-runner.md`, the `stcomp` row).
+The `config` inputs are relative to the workspace, which the action enters before it starts the tool (decision 16); the pass run shows it. The outcome of a step that a time limit on its `uses:` cut short is `failure` (`docs/proofs/p03-p04-p20-github-runner.md`, the `stcomp` row). Under `continue-on-error`, such a step lets the next step run with its outcome `failure`, and does not fail the job: GitHub's runner (`actions/runner`) gives a step that timed out the result Failed (`src/Runner.Worker/StepsRunner.cs`), and `ExecutionContext.ApplyContinueOnError` applies to a Failed result, setting the outcome to failure and the conclusion to success (source read at `7e211dc` on 2026-11-22, not run). Task 13's record holds the belief as a pair. The step "Check the run cut short" prints the moment `result.json` and the evidence's files were last written before it checks the outcome, so that the log of a job that passed keeps them.
 
 - [ ] **Step 3: Add the new checks to `.github/workflows/rollproof-unit.yml`**
 
@@ -296,10 +298,19 @@ file bin/rollproof-arm64
 
 Expected: the build succeeds, and `file` names an ARM aarch64 executable, statically linked. `bin/` is ignored by git.
 
-Then read each workflow back against Steps 1 to 3, line by line: the same text, two spaces for each level of indentation, no tab. Nothing on this machine parses a workflow as GitHub does; GitHub's own parse comes when Task 13 starts the runs, and a fault it reports is fixed in these files.
+Then read each workflow back against Steps 1 to 3, line by line: the same text, two spaces for each level of indentation, no tab.
 
-Run, from the repository root: `bun tools/citations/cli.ts repo`.
-Expected: exit 0. An exit code of 2 means the check did not run: report it as unchecked, never as a pass.
+Run, from the repository root, each command alone:
+
+```
+grep -nE '[DGO]-[0-9]{3}' .github/workflows/rollproof-e2e.yml .github/workflows/rollproof-action.yml .github/workflows/rollproof-unit.yml
+python3 -c 'import sys, yaml; [yaml.safe_load(open(p)) for p in sys.argv[1:]]' .github/workflows/rollproof-e2e.yml .github/workflows/rollproof-action.yml .github/workflows/rollproof-unit.yml
+bun tools/citations/cli.ts repo
+```
+
+Expected: the search prints nothing and exits 1, which is the pass: the files hold nothing that looks like one of the host's row IDs, which the citation check does not read for them, since it reads tracked Markdown only. The parse prints nothing and exits 0; when `python3` or its `yaml` module is missing, the parse is reported as unchecked, never as a pass. The citation check exits 0, as the host asks for any change. For the search and the citation check, an exit code of 2 means the check did not run: report it as unchecked, never as a pass.
+
+The parse shows the YAML's syntax and nothing more. Nothing on this machine parses a workflow as GitHub does; GitHub's own parse comes when Task 13 starts the runs, and a fault it reports is fixed in these files.
 
 Then, from `projects/rollproof/`: `gofmt -l .`, `go test ./...` and the four vets.
 
