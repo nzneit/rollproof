@@ -1,7 +1,9 @@
 package e2e
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -239,6 +241,46 @@ func streamLines(s string) []string {
 	return strings.Split(s, "\n")
 }
 
+// commandLog is the end of one command's evidence file: its name under evidence/commands and its
+// last lines.
+type commandLog struct {
+	name  string
+	lines []string
+}
+
+// failedCommands reads the evidence of a run's commands, the files of dir, and returns, in the
+// order of their names, each file whose last line is not "rollproof: ok, exit code 0", with its
+// last max lines: a command that failed, was stopped or has not ended. A folder that does not
+// exist gives none: a run that stopped before its first command has no such folder.
+func failedCommands(dir string, max int) ([]commandLog, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var logs []commandLog
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, err
+		}
+		lines := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+		if lines[len(lines)-1] == "rollproof: ok, exit code 0" {
+			continue
+		}
+		if len(lines) > max {
+			lines = lines[len(lines)-max:]
+		}
+		logs = append(logs, commandLog{e.Name(), lines})
+	}
+	return logs, nil
+}
+
 // countLine gives how many of lines are exactly line.
 func countLine(lines []string, line string) int {
 	n := 0
@@ -400,6 +442,56 @@ func TestWorkflowCommandFaults(t *testing.T) {
 				t.Errorf("workflowCommandFaults (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestFailedCommands(t *testing.T) {
+	// A folder that holds:
+	// - setup: "nerdctl run x\nabc\nrollproof: ok, exit code 0\n", which is not listed;
+	// - setup-11: "nerdctl exec n getent hosts real\nrollproof: exit-nonzero, exit code 2\n",
+	//   listed with both lines;
+	// - install: the 50 lines "line 1" to "line 50", each with a line end, and no closing line
+	//   (a command that has not ended), listed with "line 11" to "line 50";
+	// - a folder named sub, which is skipped.
+	// failedCommands(dir, 40) gives []commandLog{{"install", …}, {"setup-11", …}} in that order,
+	// compared with cmp.Diff and cmp.AllowUnexported(commandLog{}), and no error.
+	// failedCommands of a folder that does not exist gives nil and no error.
+	dir := t.TempDir()
+	var install strings.Builder
+	var installTail []string
+	for i := 1; i <= 50; i++ {
+		fmt.Fprintf(&install, "line %d\n", i)
+		if i >= 11 {
+			installTail = append(installTail, fmt.Sprintf("line %d", i))
+		}
+	}
+	for name, text := range map[string]string{
+		"setup":    "nerdctl run x\nabc\nrollproof: ok, exit code 0\n",
+		"setup-11": "nerdctl exec n getent hosts real\nrollproof: exit-nonzero, exit code 2\n",
+		"install":  install.String(),
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := failedCommands(dir, 40)
+	if err != nil {
+		t.Fatalf("failedCommands: %v", err)
+	}
+	want := []commandLog{
+		{"install", installTail},
+		{"setup-11", []string{"nerdctl exec n getent hosts real", "rollproof: exit-nonzero, exit code 2"}},
+	}
+	if diff := cmp.Diff(want, got, cmp.AllowUnexported(commandLog{})); diff != "" {
+		t.Errorf("failedCommands (-want +got):\n%s", diff)
+	}
+
+	missing, err := failedCommands(filepath.Join(dir, "missing"), 40)
+	if missing != nil || err != nil {
+		t.Errorf("failedCommands of a folder that does not exist gave %v and the error %v, want nil and no error", missing, err)
 	}
 }
 

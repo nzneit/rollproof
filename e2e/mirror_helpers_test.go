@@ -112,7 +112,10 @@ func mirrorSetup(in mirrorInputs) [][]string {
 // subnets, kind's pod and service subnets, loopback, and IPv6 link-local and multicast; it fails
 // when it finds no IPv4 subnet or when its chain is missing afterwards. It uses iptables-nft, as
 // p02b does: the node's iptables uses the legacy backend, whose filter table a rootless node
-// cannot make.
+// cannot make. Loopback passes by the output interface and, for IPv4, by the destination
+// 127.0.0.0/8 too: on Docker a node asks the engine's DNS at the network's gateway, and the
+// node's nat rules send the query on to 127.0.0.11, where the filter chain still sees it leave by
+// eth0; without that rule a node resolves no container's name after the cut.
 const cutScript = `set -e
 v4=$(ip -4 -o route show dev eth0 scope link | cut -d' ' -f1)
 v6=$(ip -6 -o route show dev eth0 | cut -d' ' -f1)
@@ -120,6 +123,7 @@ v6=$(ip -6 -o route show dev eth0 | cut -d' ' -f1)
 iptables-nft -N ROLLPROOF-CUT
 iptables-nft -A ROLLPROOF-CUT -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
 iptables-nft -A ROLLPROOF-CUT -o lo -j RETURN
+iptables-nft -A ROLLPROOF-CUT -d 127.0.0.0/8 -j RETURN
 for net in $v4 10.244.0.0/16 10.96.0.0/16; do
   case "$net" in */*) iptables-nft -A ROLLPROOF-CUT -d "$net" -j RETURN;; esac
 done
@@ -382,6 +386,13 @@ func TestCutScript(t *testing.T) {
 	lines := strings.Split(strings.TrimSuffix(cutScript, "\n"), "\n")
 	if last := lines[len(lines)-1]; last != "ip6tables-nft -S ROLLPROOF-CUT >/dev/null" {
 		t.Errorf("the cut's last line is %q, want the IPv6 chain's check", last)
+	}
+	// The nodes' queries to Docker's DNS reach 127.0.0.11 by a nat rule and still leave by eth0
+	// for the filter chain, so loopback passes by its destination too, before the chain rejects.
+	pass := "iptables-nft -A ROLLPROOF-CUT -d 127.0.0.0/8 -j RETURN"
+	reject := "iptables-nft -A ROLLPROOF-CUT -p tcp -j REJECT --reject-with tcp-reset"
+	if i, j := strings.Index(cutScript, pass), strings.Index(cutScript, reject); i < 0 || j < 0 || i > j {
+		t.Errorf("the cut holds %q at %d and %q at %d; want the first before the second", pass, i, reject, j)
 	}
 }
 

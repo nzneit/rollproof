@@ -338,6 +338,15 @@ func runFixture(t *testing.T, f fixture) result {
 			return
 		}
 		t.Logf("%s: the results folder is %s", f.name, out)
+		// A command that failed, was stopped or has not ended: what it printed is in its
+		// evidence, which a hosted run whose job uploads nothing keeps nowhere else.
+		logs, err := failedCommands(filepath.Join(out, "evidence", "commands"), 40)
+		if err != nil {
+			t.Logf("%s: evidence/commands: %v", f.name, err)
+		}
+		for _, c := range logs {
+			t.Logf("%s: the last %d lines of evidence/commands/%s:\n%s", f.name, len(c.lines), c.name, strings.Join(c.lines, "\n"))
+		}
 		b, err := os.ReadFile(filepath.Join(out, "evidence", "probe.log"))
 		if err != nil {
 			t.Logf("%s: evidence/probe.log: %v", f.name, err)
