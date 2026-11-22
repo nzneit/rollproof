@@ -1,0 +1,18 @@
+name: rollproof e2e suite
+
+# A placeholder. The default branch holds a file of this name so that the workflow can be started
+# by hand on the branch of rollproof's build-order step 6, which writes its jobs. Its one job never
+# runs.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  placeholder:
+    if: false
+    runs-on: ubuntu-24.04
+    steps:
+      - run: "true"
