@@ -66,9 +66,9 @@ cold reading of this text and a reading of the source of GitHub's runner left mo
 build order gives to that step, and runs on GitHub's hosted runners on 2026-11-22 settled points
 3, 4 and 20. The maintainer ruled on four choices that day. The drafting session made the smaller
 ones, and the maintainer may strike any of them (point 32). A cold re-read of that amendment
-found 24 places, and a check of their corrections found 12 more. This text carries the
-corrections that are the text's. Point 32 holds the choice that is left to the maintainer, and
-the rest are the plan's.
+found 24 places, a check of their corrections found 12 more, and the writing of the plan found
+11. This text carries the corrections that are the text's. Point 32 holds the choice that is
+left to the maintainer, and the rest are the plan's, which lists them.
 
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
 Fable model wrote each of the first two reviews. AI agents on an Opus model gathered the evidence,
@@ -1420,7 +1420,10 @@ empty string, and a workflow started from a fork gets no secrets at all.
 be a single `${env.NAME}`; a password written in the file is rejected, and the text that rejects
 any configuration never quotes a value. The tool masks every such password in everything it
 writes, in its plain form and in the encoded form in which the nodes' credentials file holds it.
-That includes the output of commands and the pod logs that it copies into the evidence.
+That includes the output of commands and the pod logs that it copies into the evidence. The
+step's outputs on GitHub are the one thing it does not mask: they hold a word of the verdict's
+vocabulary and the results folder's path as the caller gave it, and the first of them is written
+before the configuration is read.
 
 The tool masks nothing else. A chart value or a probe header's value is written as it was given,
 so a caller who passes a real secret there keeps the evidence to themselves. GitHub's own masking
@@ -1497,7 +1500,7 @@ one action, and a lockfile pins one.
 
 | Output | Meaning |
 | --- | --- |
-| `verdict` | `pass`, `fail` or `not-verified`; empty when the tool never started or could not open its results folder |
+| `verdict` | `pass`, `fail` or `not-verified`; empty when the tool never started, could not open its results folder or could not write the outputs |
 | `out` | The folder that holds `result.json` and the evidence |
 
 The output is not named `outcome`, because GitHub gives every step an `outcome` of its own, with
@@ -1516,7 +1519,8 @@ signal then too. A run that is killed before it writes `verdict` the second time
 the tool could not open the results folder, or never started: the action stopped before it, on a
 runner that is not Linux or has no engine, or on an image that could not be pulled. A caller
 treats an empty `verdict` as not verified. An output that cannot be written is a warning and
-changes no verdict (section 10, rule 10).
+changes no verdict (section 10, rule 10); when the outputs' file cannot be written at all,
+`verdict` stays empty although the tool ran, and the console's warning says so.
 
 How the tool reaches the runner: the action checks that the runner is Linux, finds the container
 engine, pulls the tool's image by digest and copies the binary out of it. It finds the engine as
@@ -2203,10 +2207,10 @@ results: /tmp/rollproof-results-7f3a
   running (section 7). A call into kind it cannot cut short. Where such a call comes before the
   verdict, it stops waiting for kind instead: while kind creates a cluster, while it deletes an
   earlier run's before that, and while it takes the logs of a set-up that failed and deletes
-  that cluster. The next run removes what kind left. The tool writes the final `result.json`,
-  the outputs and the job summary and prints the console's text first, and then completes what
-  evidence it can. It leaves the cluster, with the probe's pod in it, for the next run to
-  delete (section 9).
+  that cluster; and in the short calls by which it lists the nodes and writes their settings.
+  The next run removes what kind left. The tool writes the final `result.json`, the outputs and
+  the job summary and prints the console's text first, and then completes what evidence it can.
+  It leaves the cluster, with the probe's pod in it, for the next run to delete (section 9).
 
   On GitHub a step that is cancelled, or that runs into a time limit, gets SIGINT, and SIGTERM
   7.5 s later. That is a second signal, which ends the tool at once (below). So the tool has
@@ -2234,11 +2238,11 @@ results: /tmp/rollproof-results-7f3a
   once, right after the final `result.json` and the outputs, before the console's text is
   printed and before it completes the evidence, so that a run that is cancelled has one. A
   warning that arises later is appended as a line. The summary is masked as the console is
-  (section 8), and text that came from outside the tool is escaped, so that it cannot change
-  how the page reads. A run whose final `result.json` could not be written prints no console
-  block and writes no summary. A summary that cannot be written is a warning (rule 10). GitHub
-  shows no summary for a step whose file is larger than 1 MiB, and the step stays green; the
-  console's blocks are far below that.
+  (section 8), and text that came from outside the tool is written so that it cannot change
+  how the page reads: inside code that it cannot close, or escaped. A run whose final
+  `result.json` could not be written prints no console block and writes no summary. A summary
+  that cannot be written is a warning (rule 10). GitHub shows no summary for a step whose file
+  is larger than 1 MiB, and the step stays green; the console's blocks are far below that.
 - **Evidence folder.**
   - The probe's raw lines; the window boundaries and the moment each transition finished, each
     written when it happens; a per-second timeline that puts failure counts beside pod events
@@ -2546,12 +2550,13 @@ major from a variable, and runs both when the variable is not set, as a develope
 `-run` pattern must not choose it: the fourteenth row's control is a subtest of its own, and a
 pattern for one Helm major skips it without a word. The harness keeps GitHub's variables for the
 outputs and the summary out of the runs it starts, so that a job's summary is not the sum of its
-runs' summaries; the first fixture's test alone sets the three variables of section 8 for its
-run, with files of its own for both, and reads them. Each job gives `go test` a time limit below
-its own, so that the test's report is not cut off. A job that fails uploads the results folders
-of its runs, kept for three days; a job that passes uploads nothing. From the first fixture's
-time on a hosted runner, one run of the workflow is about 170 to 200 billed minutes, and about
-1 hour 30 minutes to 1 hour 50 minutes from its start to its end (section 14, point 32).
+runs' summaries; of the suite's runs, the first fixture's alone gets the three variables of
+section 8, with files of its own for both, which its test reads. Each job gives `go test` a time
+limit below its own, so that the test's report is not cut off. A job that fails uploads the
+results folders of its runs, kept for three days; a job that passes uploads nothing. From the
+first fixture's time on a hosted runner, one run of the workflow is about 170 to 200 billed
+minutes, and about 1 hour 30 minutes to 1 hour 50 minutes from its start to its end (section
+14, point 32).
 
 **The mirror job.** A registry inside the job stands for an organization's mirror. It needs a
 login, it sits under a path of its host, and it serves TLS from a private authority. The previous
@@ -2563,9 +2568,10 @@ registry fails; a public pull that passes before the cut and fails after it show
 holds. The engine's route is not cut: before the run, the job makes sure that the engine holds
 the node image and the registry image, so the run asks the engine for no pull (section 14, point
 31). This is the proof of the mirror, certificate and credential settings. The job ends with the
-search for the password, in both forms, in everything the run wrote. It is a test of the suite
-under a build tag of its own, so it runs on a developer's machine as well; its workflow starts
-only by hand until the maintainer says otherwise.
+search for the password, in both forms, in everything the run wrote; its runs get files of their
+own for GitHub's outputs and summary, as the first fixture's does, so that the search reads
+those too. It is a test of the suite under a build tag of its own, so it runs on a developer's
+machine as well; its workflow starts only by hand until the maintainer says otherwise.
 
 **The action.** A workflow uses the action from its own repository, in three runs. It builds the
 tool's image in the job, pushes it to a registry container there, and passes it as `image` with
@@ -3295,10 +3301,10 @@ proves which point.
       first. The maintainer chose two moments: `out`, and `verdict` as `not-verified`, with the
       first `result.json`, and `verdict` again with the final one (section 8). A run that is
       killed then leaves an answer, and an empty `verdict` means only that the tool never
-      started or could not open its results folder. The rule rests on the runner keeping the
-      last of two values, which was read in its source; the maintainer had one more job show it
-      before the plan (point 4). What lost: **once, at the end**, under which a killed run and
-      an action that failed look the same to a caller.
+      started, could not open its results folder or could not write the outputs. The rule rests
+      on the runner keeping the last of two values, which was read in its source; the
+      maintainer had one more job show it before the plan (point 4). What lost: **once, at the
+      end**, under which a killed run and an action that failed look the same to a caller.
     - **The action's own test.** Section 12 had two runs, none that was cancelled, none that
       passed a variable through `env:`, and no way for a workflow to read a summary. The
       maintainer chose three runs, the third cut short by a time limit on the action's step, and
