@@ -149,7 +149,10 @@ func TestTheScriptFailsWithExit2AndWritesNoOutput(t *testing.T) {
 	//   "a workspace that cannot be entered": GITHUB_WORKSPACE names a path that does not exist; the
 	//     log ends "docker rm fake-id"; the text's DIR is that path.
 	//   "a binary that cannot start": export gives toolTar("rollproof", 0o755, CONTENT), CONTENT the
-	//     seven bytes "\x7fELF\x02\x01\x01" and 57 zero bytes, which execve refuses.
+	//     seven bytes "\x7fELF\x02\x01\x01" and 57 zero bytes, which execve refuses as a file of the
+	//     wrong format. (A file that is missing or not executable never reaches the exec: take_binary
+	//     stops it. So this row passes with or without the script's "set +e"; decision 17 says why
+	//     the line is there all the same.)
 }
 
 func TestActionYAML(t *testing.T) {
@@ -349,7 +352,12 @@ main() {
   unset ROLLPROOF_ACTION_CONFIG ROLLPROOF_ACTION_IMAGE ROLLPROOF_ACTION_OUT \
     ROLLPROOF_ACTION_VERSION ROLLPROOF_ACTION_REPOSITORY ROLLPROOF_ACTION_DIGEST
   export KIND_EXPERIMENTAL_PROVIDER=$engine
-  exec "$dir/rollproof" "${args[@]}" || fail "the binary taken out of $ref could not be started"
+  # With set -e on, bash itself ends the script at most execs that fail, also before ||, with its
+  # own code. With it off, execfail lets a failed exec return, and the next line fails as the
+  # other failures do.
+  set +e
+  exec "$dir/rollproof" "${args[@]}"
+  fail "the binary taken out of $ref could not be started"
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

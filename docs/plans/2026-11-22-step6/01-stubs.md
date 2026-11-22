@@ -2,7 +2,7 @@
 
 Read section 13 ("During incubation", the paragraph on the workflows), section 14, point 32 (its last bullet) and section 16 (the row on GitHub Docs of 2026-11-22, and the list of what is not shown), and decision 1 of the README, before this task.
 
-This task writes the first of the three ways of decision 1. The maintainer has not yet chosen among them. When the maintainer chooses the second or the third way, this task is not done, and Task 10 and Task 13 change as decision 1 says. No other task waits for this one: only Task 13's runs on GitHub depend on it.
+This task writes the first of the three ways of decision 1, which the maintainer chose on 2026-11-22. No other task waits for this one: only Task 13's runs on GitHub depend on it.
 
 ### Task 1: a pull request to `main` that adds `rollproof-e2e.yml` and `rollproof-action.yml` as files that do nothing yet
 

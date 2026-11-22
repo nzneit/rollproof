@@ -133,7 +133,7 @@ func (s *runState) warnAfterConsole(text string) {
 }
 ```
 
-Today's `warnAfterConsole` (`internal/run/run.go:1177-1181`) calls `rewriteFinal` on every path, so, with this step's outputs, a later warning after a refused final write could write a final `result.json` that the exit code and the step's output contradict, once the folder could be written again. The existing tests of a refused write, read at `58c1cbf`, and what each needs: none asserts that second try, and none changes. `TestARefusedFinalKeepsTheVerdictsClass` (`internal/run/run_test.go:1653`) refuses the write at the probe's stop, and its cluster's delete succeeds, so no warning comes after the refused write, and it wants stdout empty; `TestAPanicInTheFinalWriteIsARefusedWrite` (`:1775`) and `TestARefusedFinalWriteClosesTheProbeLog` (`:3339`) call `finish` with no cluster, no watcher and no signal, so `warnAfterConsole` is never reached; `TestResultsFolderCannotBeWritten` (`:370`) ends before `finish`, when `report.Open` fails. The new `TestAWarningAfterARefusedFinalWriteLeavesTheFirstFile` (Step 1) is the first test to reach `warnAfterConsole` after a refused write.
+Today's `warnAfterConsole` (`internal/run/run.go:1177-1181`) calls `rewriteFinal` on every path, so, with this step's outputs, a later warning after a refused final write could write a final `result.json` that the exit code and the step's output contradict, once the folder could be written again. The existing tests of a refused write, read at `58c1cbf`, and what each needs: none asserts that second try, and none changes. `TestARefusedFinalKeepsTheVerdictsClass` (`internal/run/run_test.go:1653`) refuses the write at the probe's stop, and its cluster's delete succeeds, so no warning comes after the refused write, and it wants stdout empty; `TestAPanicInTheFinalWriteIsARefusedWrite` (`:1775`) and `TestARefusedFinalWriteClosesTheProbeLog` (`:3339`) call `finish` with no cluster, no watcher and no signal, so `warnAfterConsole` is never reached; `TestResultsFolderCannotBeWritten` (`:370`) ends before `finish`, when `report.Open` fails. The new `TestAWarningAfterARefusedFinalWriteWritesNoFinalFile` (Step 1) is the first test to reach `warnAfterConsole` after a refused write.
 
 - New:
 
@@ -255,7 +255,7 @@ func TestTheResultsComeBeforeTheEvidence(t *testing.T) {
 
 // A warning after a refused final write is a line of its own, and result.json is not written
 // again: the file, the step's output and the exit code say the same (decision 6).
-func TestAWarningAfterARefusedFinalWriteLeavesTheFirstFile(t *testing.T) {
+func TestAWarningAfterARefusedFinalWriteWritesNoFinalFile(t *testing.T) {
 	// w.gitHubFiles; the hook "end-commands" removes w.out, so that the final write is refused, as
 	// in the refused rows of TestWhatVerdictSaysAfterEachEnding; the hook "delete" makes w.out
 	// again (os.MkdirAll, mode 0o700), before the clean-up's warning arises;
@@ -281,7 +281,7 @@ func TestASignalEndsTheToolByItAfterARefusedWrite(t *testing.T) {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go test ./internal/run/ ./cmd/rollproof/ -run 'TestTheOutputsAtBothMoments|TestWhatVerdictSaysAfterEachEnding|TestNothingIsWrittenForGitHubWithoutItsVariables|TestAGitHubFileThatCannotBeWrittenIsAWarning|TestTheSummaryIsAppendedOnce|TestALateWarningIsALineOfTheSummary|TestTheResultsComeBeforeTheEvidence|TestAWarningAfterARefusedFinalWriteLeavesTheFirstFile|TestPasswordsAreMaskedEverywhere|TestASignalEndsTheToolByItAfterARefusedWrite' -v`
+Run: `go test ./internal/run/ ./cmd/rollproof/ -run 'TestTheOutputsAtBothMoments|TestWhatVerdictSaysAfterEachEnding|TestNothingIsWrittenForGitHubWithoutItsVariables|TestAGitHubFileThatCannotBeWrittenIsAWarning|TestTheSummaryIsAppendedOnce|TestALateWarningIsALineOfTheSummary|TestTheResultsComeBeforeTheEvidence|TestAWarningAfterARefusedFinalWriteWritesNoFinalFile|TestPasswordsAreMaskedEverywhere|TestASignalEndsTheToolByItAfterARefusedWrite' -v`
 Expected: FAIL: `gitHubOf` and `gitHubFiles` are not defined in `internal/run`. `TestASignalEndsTheToolByItAfterARefusedWrite` passes already: it pins `endProcess`'s rule for this case.
 
 - [ ] **Step 3: Implement the changes above, each named one with its interface comment**

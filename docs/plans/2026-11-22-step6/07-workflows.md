@@ -280,9 +280,9 @@ After the step "The binary is statically linked", append:
 
 Nothing else in the file changes. The arm64 binary is built and never run (section 8: the first release is built for amd64 and arm64).
 
-- [ ] **Step 4: When the maintainer chose another way in decision 1**
+- [ ] **Step 4: Nothing to do: the maintainer chose the first way of decision 1**
 
-Only then; with the first way, nothing here.
+The maintainer chose the first way on 2026-11-22, so this step changes nothing. What the other two ways would have changed here:
 
 - **The second way:** `.github/workflows/rollproof-proofs.yml` gains the values `e2e` and `action` of its input `part`, and jobs `e2e-cluster`, `e2e-helm-3`, `e2e-helm-4` (`if: inputs.part == 'e2e'`, with the `needs:` of Step 1) and `action` (`if: inputs.part == 'action'`), each a copy of its job above; the two new files stay as written, unrun until after the merge.
 - **The third way:** both new files gain, under `on:`, `push: { branches: [rollproof-step6-design] }`, and every job `if: github.event_name == 'workflow_dispatch'`; Task 13's last commit takes both out again before the merge.
