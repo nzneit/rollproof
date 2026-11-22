@@ -70,7 +70,9 @@ found 24 places, a check of their corrections found 12 more, the writing of the 
 and a last read of those corrections found 6 in this text. This text carries the corrections
 that are the text's, and the rest are the plan's, which lists them. Once the plan was written,
 the maintainer made the choice that point 32 had left open, and kept one choice of the plan
-that costs minutes (point 32).
+that costs minutes (point 32). While the plan was built, a reading of the runner's source found
+that the runner reads workflow commands in every line that a step prints, which this text had
+not considered; the maintainer approved a defence the same day (section 8; point 33).
 
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
 Fable model wrote each of the first two reviews. AI agents on an Opus model gathered the evidence,
@@ -1422,10 +1424,13 @@ empty string, and a workflow started from a fork gets no secrets at all.
 be a single `${env.NAME}`; a password written in the file is rejected, and the text that rejects
 any configuration never quotes a value. The tool masks every such password in everything it
 writes, in its plain form and in the encoded form in which the nodes' credentials file holds it.
-That includes the output of commands and the pod logs that it copies into the evidence. The
-step's outputs on GitHub are the one thing it does not mask: they hold a word of the verdict's
-vocabulary and the results folder's absolute path, which the tool makes from the caller's
-`--out` or chooses itself, and the first of them is written before the configuration is read.
+That includes the output of commands and the pod logs that it copies into the evidence. Two
+things it does not mask. The step's outputs on GitHub hold a word of the verdict's vocabulary
+and the results folder's absolute path, which the tool makes from the caller's `--out` or
+chooses itself, and the first of them is written before the configuration is read. And the log
+that the Kubernetes client library writes on standard error (section 10, "Console") does not
+pass through the tool's masker: it holds the API server's warnings, and nothing that the tool
+sends to the API server holds the password, which goes to the nodes in a file.
 
 The tool masks nothing else. A chart value or a probe header's value is written as it was given,
 so a caller who passes a real secret there keeps the evidence to themselves. GitHub's own masking
@@ -1561,6 +1566,31 @@ signals reach the step's shell and not the tool, as they would in the action, an
 caution about `if: always()` holds. The tool detects GitHub Actions by the variable
 `GITHUB_ACTIONS` being `true`, which a caller's `env:` cannot change there. It then writes the
 outputs when `GITHUB_OUTPUT` names a file, and the summary when `GITHUB_STEP_SUMMARY` does.
+
+**Workflow commands.** GitHub's runner reads every line that a step prints, on standard output
+and on standard error, for workflow commands: a line that begins with `::` after its leading
+white space, and the older form `##[`, anywhere in a line. Such a line can add an annotation,
+add a mask that hides later text in the log, set an output or fold the log. The tool prints text
+from outside it, such as a pod's message in a reason's detail, a command's error or a warning,
+and a line of it could be read as a command. So, when the tool detects GitHub Actions,
+`rollproof run` prints `::stop-commands::TOKEN` as its first line on standard output and as its
+first line on standard error, before anything else, a usage error included, with a token drawn
+anew for each run from the system's random source. The runner then reads no command until a
+line `::TOKEN::`. The tool prints that line last on standard output when it ends by itself,
+whatever its exit code, so that a step that calls the tool from a script of its own can use
+commands again afterwards. It does not print it when it ends by a signal, and elsewhere than on
+GitHub Actions it prints neither line. The runner reads the two streams each in its own order,
+so each needs its own first line; the second that the runner meets is a plain line. The action's
+script prints the same line on both streams with a token of its own, once it knows that the
+runner is Linux and before any line that can hold an input or an engine's output, and never
+resumes: after its `exec` the step is the tool, whose own lines the runner then shows as plain
+text. Two things stay open, both because the runner reads the two streams apart. A line that
+the tool writes on standard error just before it ends can reach the runner after the resume
+line, and is then read for commands; section 10 says what can stand there ("Console"). And
+when a run ends within a moment of its start, as a usage error does, the stop line of standard
+error can reach the runner after the resume line: the runner then stops its commands again and
+reads none for the rest of the step, a later one of the caller's own script included. Section
+14, point 33, gives the reading and the choices that lost.
 
 Two things in this section rested on open points, and a run on 2026-11-22 settled both
 (`docs/proofs/p03-p04-p20-github-runner.md`). `env:` on the step that calls the action reaches
@@ -2134,6 +2164,22 @@ results: /tmp/rollproof-results-7f3a
     (section 6), or, when the tool did not judge the probe's stop, why not. The console names
     each variable that the tool took out of its commands' environment (section 7), and prints
     every warning.
+  - On GitHub Actions the line that stops the runner's workflow commands comes first on
+    standard output and on standard error, and the line that resumes them comes last on
+    standard output, after the results line and any warning after it, unless a signal ended the
+    run (section 8, "Workflow commands"). Neither is part of the console's blocks, and the
+    summary holds neither.
+  - Standard error holds what is not the console: the usage text and the command line's errors,
+    before a run; the line `rollproof: cannot write results: …` when the results folder cannot
+    be opened, when the final `result.json` cannot be written, and when it cannot be written
+    again after a warning that came later; and the log of the Kubernetes client library, which
+    writes there a warning that the API server sends with a response, its text quoted on one
+    line (section 16). After the verdict the tool's own line is the only one of its own, and its
+    text is the results folder's path and the system's error. A line of the library's log can
+    come while the evidence is completed and the watcher stops, and its text is the API
+    server's: it cannot begin with `::`, but it can hold `##[`. Either can reach GitHub's runner
+    after the line that resumes its commands (section 14, point 33). Whether the library's
+    watch code writes there at its default level of detail was not read.
 - **`result.json`.** The same facts for machines. It is the stable contract for wrappers. It
   holds:
   - a schema version, and whether the file is final;
@@ -2353,6 +2399,10 @@ A line leaves the list when a fixture shows the tool catching what it names.
   and its encoded form, in everything the tool writes but the step's outputs on GitHub, which
   hold no value of the configuration. Nothing else is masked (section 8). This rule has not had
   a security review (section 14).
+- On GitHub the tool's first lines, and the action's, stop the runner from reading a workflow
+  command in what they print, so that text from a chart, a command or the API server cannot
+  become one (section 8). A line on standard error just before the tool's end can still be read
+  (section 10). This has not had a security review either (section 14, point 13).
 - The credentials file mounted into the nodes holds only the hosts the configuration lists. It
   lives in the run's folder and is removed with the cluster. While the cluster lives, every pod
   in it can read the file (section 9), so the credentials should be able to read only, and
@@ -2448,6 +2498,14 @@ A line leaves the list when a fixture shows the tool catching what it names.
   cannot be written;
   and the order of the final `result.json`, the outputs, the summary, the console's text and
   the evidence.
+- The lines for GitHub's workflow commands: on GitHub Actions the stop line first on both
+  streams and the resume line last on standard output, a usage error, a rejected configuration
+  and a results folder that cannot be opened among the endings; no resume line after a signal,
+  in a child process, nor after a crash; neither line elsewhere, nor for `version` and `probe`;
+  a new token for each run. The action's script with fake engines: its stop line first on both
+  streams, after the check for Linux and never before it, no resume line, and exit 2 when it
+  gets no token. The suite's harness checks both lines in the console and the standard error of
+  every run, by the run's own `GITHUB_ACTIONS`.
 - A signal during each call into kind that comes before the verdict (section 10, "On a
   signal"), with kind's calls replaced by ones that do not return: the run returns all the
   same, with a final `result.json` and the reason `interrupted`.
@@ -2603,7 +2661,10 @@ step cannot read an earlier step's summary through anything GitHub documents. Th
 each step's summary, after masking, in a file under its own temporary directory until the job
 ends, and the workflow reads that copy. Because GitHub does not promise the folder, the workflow
 fails with a message that names it when the copy is not there, and never passes without having
-read a summary. The golden files of the unit tests pin the summary's exact text.
+read a summary. The golden files of the unit tests pin the summary's exact text. The job's log
+is expected to show, at the start of each run's step, the script's stop line with its token
+masked, and the tool's own lines after it as plain text; the record of the runs says what it
+showed. No run plants a command, so none shows one that is ignored (section 16).
 
 The action's test starts by hand only, as the suite and the mirror job do (section 13).
 
@@ -2724,7 +2785,8 @@ the next plan reads them: `docs/plans/2026-11-16-first-plan/README.md` and
 keeps no such list; its rulings are in section 14, point 24 (the node setting under Docker and
 Podman, and a `limits.settle` under about 7 s) and points 26 to 28. The plan for step 4 keeps its
 list in `docs/plans/2026-11-19-step4/README.md`, and its rulings are in point 29. Step 5's
-rulings before its plan are in points 30 and 31, and step 6's in point 32.
+rulings before its plan are in points 30 and 31, and step 6's in point 32, with point 33 for a
+ruling made while its plan was built.
 
 ## 14. Open points for the plan
 
@@ -2742,8 +2804,9 @@ and rulings of 2026-11-18 and 2026-11-19, and point 29 the rulings of 2026-11-19
 step 4. The proofs of step 5 settled points 2 and 19, and points 30 and 31 record the rulings of
 2026-11-20 before the plan for step 5. The runs of step 6, on 2026-11-22, settled points 3, 4 and
 20, point 8 for Docker, and what point 24 left open for Docker and Podman; point 32 records the
-rulings of that day before the plan for step 6. The build order of section 13 says which step
-proves which point.
+rulings of that day before the plan for step 6, and point 33 the ruling on the runner's workflow
+commands, made while that plan was built. The build order of section 13 says which step proves
+which point.
 
 1. **Registry order in the nodes.** That a node tries the run's registry first for a host and then
    falls back to the real registry is what the container runtime's documentation and source say
@@ -2856,7 +2919,9 @@ proves which point.
 13. **Masking, and what leaves the runner.** The rule of section 8 needs a security reviewer's eye
     before the first release. So does the way the job summary keeps text that came from
     outside the tool from changing a run's page, which renders it as Markdown with some HTML
-    (section 10; the plan for step 6 gives the rule in one of its decisions). So do
+    (section 10; the plan for step 6 gives the rule in one of its decisions). So does the way
+    the tool and the action keep GitHub's runner from reading a workflow command in what they
+    print, and the line that can still be read (point 33). So do
     five facts of section 11: the change under test runs with the
     job's power, every pod in the cluster can read the nodes' credentials, a registry entry's
     credentials reach its mirror and the token service that a challenge names, a chart's own pull
@@ -3397,6 +3462,73 @@ proves which point.
       unrun; and **a trigger other than by hand for the time of the step**, which spends
       minutes on every push while it stays, unless one run by it is enough for a start by hand
       afterwards, which is the untried case.
+33. **Workflow commands in what the tool prints, a ruling of 2026-11-22.** While the plan for
+    step 6 was built, a reading of the runner's source at `7e211dc` found that the runner reads
+    every line that a step prints for workflow commands, a thing this text had not considered:
+    - Every line of a `run` step's standard output and standard error goes to the runner's
+      parser of commands (`src/Runner.Worker/Handlers/ScriptHandler.cs`, lines 332 to 336;
+      `src/Runner.Worker/Handlers/OutputManager.cs`, lines 77 to 87).
+    - A line is a command when, after its leading white space, it begins with `::` and names a
+      command that the runner knows. The older form `##[name …]` is found anywhere in a line
+      (`src/Runner.Common/ActionCommand.cs`, lines 62, 63 and 86, and 132 and 156).
+    - The commands it knows include `error`, `warning`, `notice`, `add-mask`, `set-output`, which
+      still sets an output, `group`, `endgroup`, `add-matcher`, `debug`, `echo` and
+      `save-state`. `set-env` and `add-path` are refused unless the job allows them, and a
+      command that fails marks the step failed (`src/Runner.Worker/ActionCommandManager.cs`,
+      lines 125 to 143, 259 and 478). A job output whose value the log's masker changes is
+      dropped (`src/Runner.Worker/JobExtension.cs`, lines 820 to 825).
+    - After `::stop-commands::TOKEN` no command is read until a line `::TOKEN::`, or `##[TOKEN]`
+      anywhere in a line. The token is matched without regard to case, is added to the log's
+      masker when it is longer than 6 characters, and may not be empty, the name of a command or
+      `pause-logging` (`ActionCommandManager.cs`, lines 83 to 123 and 156 to 186). A resume
+      forgets the token (line 94), so the same stop line, read after it, is a stop again.
+    - Each step's handler makes a parser of its own, which the step's two streams share
+      (`src/Runner.Worker/Handlers/Handler.cs`, line 172; `ScriptHandler.cs`, lines 332 and
+      333), so a stop lasts for one step.
+    - Two readers take the two streams, each in its own order, and at each turn the runner hands
+      on the lines of standard error that it holds before those of standard output
+      (`src/Runner.Sdk/ProcessInvoker.cs`, lines 400 to 438 and 507 to 529).
+    - A step's files, its outputs among them, are read after its process has ended
+      (`src/Runner.Worker/ActionRunner.cs`, line 282). They are not lines of the log, and a stop
+      does not touch them, so the values of `verdict` and `out` come from the file and come last.
+
+    So a text from outside the tool that the tool prints, such as a pod's message in a reason's
+    detail, which may begin a wrapped line, a late warning or an error's text, could be read as a
+    command: an annotation that the tool did not write, a mask that hides later text in the log
+    or makes the job drop an output that holds it, a folded log, or a refused command that fails
+    the step. The maintainer approved the defence of section 8 that day: on GitHub Actions the
+    tool's first line on each stream stops the commands, and its last line on standard output
+    resumes them when it ends by itself; the action's script stops them with a token of its own
+    and never resumes. The tool's token comes from Go's `crypto/rand`, the script's from
+    `/proc/sys/kernel/random/uuid`, read with bash's own `read`, so that the script needs no
+    further program. The tool resumes because a step that calls it from a script of its own may
+    use commands afterwards, and an `::add-mask::` that the runner ignored without a word would
+    leave a secret in the log. It does not resume after a signal, which ends the step, nor after
+    a crash that escapes its run. Two things stay open, because the runner's two readers do not
+    keep the order in which the tool wrote to the two streams. A line that the tool writes on
+    standard error just before it ends can reach the runner after the resume line, and is then
+    read for commands; section 10 says what can stand there ("Console", the bullet on standard
+    error). And when a run ends within a moment of its start, as a usage error does, the stop
+    line of standard error can reach the runner after the resume line of standard output; the
+    runner then takes it as a new stop and reads no command for the rest of the step, so that a
+    later command of the caller's own script is ignored without a word, which is what the
+    resume line is there to prevent. Neither was seen in a run, and no test can make the runner
+    read in that order. In the action neither arises, since the script's stop holds for the
+    whole step. Nor does a stop reach the problem matchers that an earlier step of the job
+    registered: they still read every line, and one that matches becomes an annotation
+    (`OutputManager.cs`, lines 101 to 155); which matchers a job registers is its own. What
+    lost:
+    **escaping `::` and `##[` in every line the tool prints**, where every place that is missed
+    is a hole, and the console's golden text changes; **never resuming**, under which a later
+    command of the caller's own script would be ignored without a word; and **a note in the
+    documentation alone**, which leaves the hole open. After the approval the drafting session
+    weighed two more, for the two things left open, and kept what was approved; the maintainer
+    may take either up. **A resume line on standard error too**: the runner hands on standard
+    error's lines first at each turn, so it could resume before it has read the console's last
+    lines, which is worse. **The tool's standard error joined to its standard output on GitHub
+    Actions**, so that the runner reads one stream in the tool's own order and nothing is left
+    open: it takes the tool's errors out of a file to which a caller's script sent standard
+    error, and puts them, with both lines, into a file to which it sent standard output.
 
 ## 15. Not in the first release
 
@@ -3665,6 +3797,21 @@ branch's inputs. Their logs are not filed in the repository; the records under t
 | The first fixture, on Docker, under Helm 3.22.1 and Helm 4.3.2 (the same record) | That it passes on a runner of 2 CPUs under both, in 166 s and 138 s, about what it takes on the workstation |
 | One test through Podman 4.9.3 as root, with an alias for kind's node image (the same record) | That a node of rootful Podman takes the setting too, and that the runner reached the run's registry and the cluster there. Without the alias: not run |
 
+Read later on 2026-11-22, while the plan for step 6 was built, in the same clone of the runner
+and in the copies of the project's own dependencies that its `go.sum` names, for section 8
+("Workflow commands"), section 10 ("Console") and section 14, point 33. The drafting session
+read the runner's places for a line's parsing, the stop and the resume first. An AI agent on an
+Opus model then read them again, with the others of the two rows below, and wrote the
+amendment. The session opened every place that point 33 names once more, and the client
+library's two, and found what the agent reported. One trial on the workstation: bash 5.3.20's
+`read` takes a token from `/proc/sys/kernel/random/uuid`, and from a file with no line end.
+Nothing else was run.
+
+| Source | What this design takes from it |
+| --- | --- |
+| `actions/runner` at `7e211dc`: how a step's two streams are read and parsed, the commands the runner knows, the stop and the resume of commands, how a job's outputs are set | That every line of both streams of a `run` step is parsed; the two forms of a command; the known commands, and that a command that fails marks the step failed; that a stop lasts for one step, ends only at the token's own line, is matched without regard to case and masks a token longer than 6 characters; that at each turn the lines of standard error are handed on before those of standard output; that a job output whose value the masker changes is dropped; that the problem matchers of earlier steps read every line, commands stopped or not |
+| `k8s.io/client-go` at `v0.37.2` and `k8s.io/klog/v2` at `v2.140.0`: the default handler of the API server's warnings, and where klog writes | That the library logs a warning that the API server sends with a response, as `Warning: ` and its text; that klog writes to standard error by default, at once, with the message quoted on one line |
+
 Still not shown by any run or any page: that 15 s is long enough for an install to settle under the
 probe; that a shorter time between the proxy's syncs would hide failures that the fixtures catch.
 And, from before the
@@ -3692,7 +3839,14 @@ but the chosen one, before or after a run of it by another trigger; the action's
 the binary out of its image, on Docker and on Podman; anything on Ubuntu 26.04 with Docker 29;
 the suite on Docker beyond its first fixture; and Podman beyond one test, with the tool's pull
 of kind's node image when no alias names its registry, and whether kind pulls a node image
-again that the tool pulled under another name. What is known of these is reasoned from the
+again that the tool pulled under another name. Left by section 14, point 33: that the runner,
+after the action's stop line, reads no command for the rest of the step, which the hosted run of
+the action's own test can show only in its log, by the stop line and by the tool's own lines
+standing after it as plain text, since no run plants a command; that the runner masks the
+token in that line; the order in which the runner reads the lines of the two streams, on which
+both things that section 8 leaves open depend; and the tool's resume line in a step of the
+caller's own script, which no workflow of the project runs. What is known of these is reasoned
+from the
 sources above or is the drafting session's own knowledge, and section 14 lists those of them
 that need a test.
 
