@@ -31,8 +31,10 @@ func main() {
 
 // run is the command: it reads args, the command line without the program's
 // name, into options, and returns the exit code. A flag it cannot read gives 2,
-// with the flag package's message on stderr. Otherwise it runs check and gives 0
-// when check gives no fault, and 1 when it gives any, each fault a line on
+// with the flag package's message on stderr. An argument left after the flags
+// gives 2 as well, with one line on stderr that names the first of them, since
+// a flag written after it would not be read. Otherwise it runs check and gives
+// 0 when check gives no fault, and 1 when it gives any, each fault a line on
 // stderr. It writes nothing to stdout. main is
 // os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)).
 func run(args []string, stdout, stderr io.Writer) int {
@@ -48,6 +50,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err := f.Parse(args); err != nil {
 		return 2
 	}
+	if f.NArg() > 0 {
+		fmt.Fprintf(stderr, "actioncheck: %q is no flag; every input is a flag\n", f.Arg(0))
+		return 2
+	}
 	faults := check(o)
 	for _, fault := range faults {
 		fmt.Fprintln(stderr, fault)
@@ -59,7 +65,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 // check returns the faults of the run that o describes, one sentence each, and none
-// when every check holds: verdict and out as wanted; out/result.json final, with
+// when every check holds: verdict and out as wanted; wantOut/result.json final, with
 // the wanted verdict and, when wantDecided is set, the reason that decided; and
 // exactly one masked summary under stepFiles (step_summary_*-scrubbed) that holds
 // the line "results: " + wantOut, whose first line begins "### rollproof: " and

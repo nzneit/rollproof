@@ -123,6 +123,57 @@ func TestCheckReportsEachFault(t *testing.T) {
 	}
 }
 
+func TestCheckFailsLoudOnWhatItCannotTell(t *testing.T) {
+	// From the whole run, one change a row, and exactly the one fault it gives:
+	//   wantDecided "interrupted", result.json with no reason
+	//                                       `no reason in result.json decided; want "interrupted"`
+	//   stepFiles a regular file            "the runner's folder of step files, PATH, cannot be read: "
+	//                                       and os.ReadDir's error for PATH
+	//   step_summary_9-scrubbed a folder, step_summary_1-scrubbed still holding the results line
+	//                                       "the masked job summary step_summary_9-scrubbed cannot be
+	//                                       read: " and os.ReadFile's error for it
+	rows := []struct {
+		name   string
+		change func(t *testing.T, o *options)
+		want   func(t *testing.T, o options) string
+	}{
+		{"no reason decided", func(t *testing.T, o *options) {
+			o.wantDecided = "interrupted"
+		}, func(*testing.T, options) string { return `no reason in result.json decided; want "interrupted"` }},
+		{"the step files a regular file", func(t *testing.T, o *options) {
+			o.stepFiles = filepath.Join(t.TempDir(), "a-file")
+			write(t, o.stepFiles, "not a folder\n")
+		}, func(t *testing.T, o options) string {
+			_, err := os.ReadDir(o.stepFiles)
+			if err == nil {
+				t.Fatal("os.ReadDir of a regular file gave no error")
+			}
+			return "the runner's folder of step files, " + o.stepFiles + ", cannot be read: " + err.Error()
+		}},
+		{"a masked copy that is a folder", func(t *testing.T, o *options) {
+			if err := os.Mkdir(filepath.Join(o.stepFiles, "step_summary_9-scrubbed"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, func(t *testing.T, o options) string {
+			_, err := os.ReadFile(filepath.Join(o.stepFiles, "step_summary_9-scrubbed"))
+			if err == nil {
+				t.Fatal("os.ReadFile of a folder gave no error")
+			}
+			return "the masked job summary step_summary_9-scrubbed cannot be read: " + err.Error()
+		}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			o := wholeRun(t)
+			row.change(t, &o)
+			want := []string{row.want(t, o)}
+			if diff := cmp.Diff(want, check(o)); diff != "" {
+				t.Errorf("faults (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestCheckFailsLoudWithoutTheStepFiles(t *testing.T) {
 	// stepFiles a path that does not exist, everything else whole: exactly the fault
 	// "the runner's folder of step files, PATH, is not there: GitHub does not promise it, so the job
@@ -157,6 +208,8 @@ func TestTheCommandsExitCodes(t *testing.T) {
 	// The same with "-verdict", "fail": 1; stdout empty; stderr exactly one line, the fault,
 	//   `verdict is "fail"; want "pass"` and a line end.
 	// The same with a flag it does not know added, "-no-such-flag": 2; stdout empty.
+	// The same with a word that is no flag added, "extra": 2; stdout empty; stderr exactly one
+	//   line that names it, `actioncheck: "extra" is no flag; every input is a flag` and a line end.
 	o := wholeRun(t)
 	args := func(verdict string, more ...string) []string {
 		return append([]string{"-verdict", verdict, "-out", o.out, "-want-verdict", "pass",
@@ -171,6 +224,7 @@ func TestTheCommandsExitCodes(t *testing.T) {
 		{"whole", args("pass"), 0, ptr("")},
 		{"a fault", args("fail"), 1, ptr(`verdict is "fail"; want "pass"` + "\n")},
 		{"a flag it does not know", args("pass", "-no-such-flag"), 2, nil},
+		{"a word that is no flag", args("pass", "extra"), 2, ptr(`actioncheck: "extra" is no flag; every input is a flag` + "\n")},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {

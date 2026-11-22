@@ -38,6 +38,14 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 		}
 		return nil
 	}
+	// remove runs one removal of the clean-up: a failure is a test error, unless the engine says
+	// that the name does not exist, which is a name the run never made.
+	remove := func(args ...string) {
+		out, err := exec.Command(engine, args...).CombinedOutput()
+		if err != nil && !isMissing(string(out)) {
+			t.Errorf("%s %s: %v\n%s", engine, strings.Join(args, " "), err, out)
+		}
+	}
 
 	// 1. go build (CGO_ENABLED=0, -trimpath, -ldflags "-s -w -X main.version=action-test") of
 	//    ../../cmd/rollproof into a temporary folder CTX as rollproof; ../../Dockerfile copied into
@@ -61,11 +69,7 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 	if err := do("build", "-t", "rollproof-action-test:dev", ctxDir); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := do("rmi", "rollproof-action-test:dev"); err != nil {
-			t.Error(err)
-		}
-	})
+	t.Cleanup(func() { remove("rmi", "rollproof-action-test:dev") })
 
 	// 3. ENGINE save -o IMAGE.tar rollproof-action-test:dev, the archive in another temporary
 	//    folder; tarball.ImageFromPath gives the image and its digest D.
@@ -88,11 +92,7 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 	//    127.0.0.1:PORT/rollproof-action-test@D with name.Insecure.
 	port := freePort(t)
 	registry := "127.0.0.1:" + port
-	t.Cleanup(func() {
-		if err := do("rm", "-f", "-v", "rollproof-action-test-registry"); err != nil {
-			t.Error(err)
-		}
-	})
+	t.Cleanup(func() { remove("rm", "-f", "-v", "rollproof-action-test-registry") })
 	if err := do("run", "-d", "--name", "rollproof-action-test-registry", "-p", registry+":5000",
 		cluster.DefaultRegistryImage); err != nil {
 		t.Fatal(err)
@@ -156,9 +156,20 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 		"KIND_EXPERIMENTAL_PROVIDER="+engine,
 	)
 	// The engine holds the image by this reference once the script has pulled it.
+	t.Cleanup(func() { remove("rmi", pushed) })
+	// A script cut short between its create and its rm leaves its container, named as its folder
+	// under RT, rollproof-action- and six characters. Clean-ups run last first, so these go before
+	// the image they were made from; only a name of that form is passed to the engine.
 	t.Cleanup(func() {
-		if err := do("rmi", pushed); err != nil {
+		entries, err := os.ReadDir(rt)
+		if err != nil {
 			t.Error(err)
+			return
+		}
+		for _, e := range entries {
+			if e.IsDir() && strings.HasPrefix(e.Name(), "rollproof-action-") {
+				remove("rm", "-f", e.Name())
+			}
 		}
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -245,6 +256,16 @@ func testEngine(t *testing.T) string {
 	}
 	t.Fatal("no container engine: KIND_EXPERIMENTAL_PROVIDER is not set, and none of docker, nerdctl and podman answers info")
 	return ""
+}
+
+// isMissing says whether an engine's output for a failed removal says only that the name does
+// not exist: nerdctl writes "no such container: NAME" and "no such image: NAME" (read on nerdctl
+// 2.4.2); Docker "No such container" and "No such image", and Podman "no such container" and
+// "image not known", are from memory, not read. Any other output is a removal that failed.
+func isMissing(out string) bool {
+	out = strings.ToLower(out)
+	return strings.Contains(out, "no such container") || strings.Contains(out, "no such image") ||
+		strings.Contains(out, "image not known")
 }
 
 // freePort returns a port of 127.0.0.1 that was free a moment ago.
