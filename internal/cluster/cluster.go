@@ -48,8 +48,10 @@ const inotifyHint = "; a cluster of several nodes also fails when the kernel's i
 const unansweredAttempt = "net.netfilter.nf_conntrack_tcp_timeout_syn_sent=5"
 
 // Through rootless nerdctl, kind's Create sometimes fails at its 30-second wait for a node's log
-// line, although the log holds the line (proof p08). Step 3 of Create tries kind's Create again
-// for that failure alone, createAttempts times in all.
+// line, although the log holds the line (proof p08): when `nerdctl logs -f` reads a line that the
+// logger has not finished writing, it loses its place and drops the lines after it (nerdctl
+// v2.4.2, pkg/logging/jsonfile Decode returns a nil error for a partial line). Step 3 of Create
+// tries kind's Create again for that failure alone, createAttempts times in all.
 const (
 	createAttempts = 4
 	logLineMissed  = "could not find a log line that matches"

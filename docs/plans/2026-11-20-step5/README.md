@@ -367,3 +367,14 @@ Pick: A.
 Losers: B, because the path in the run's registry is `images`' own business (section 5).
 
 Design delta: better, because the masking that section 8 asks of "everything it writes" lives at the one seam every writer already passes, the node files are pure functions with a golden file per shape, and `NotBuilt` leaves the code once nothing is unbuilt.
+
+## Changed during execution
+
+Recorded on 2026-11-21. The task files stay as written; where they disagree with this list, this list and the code win.
+
+- Task 9: a write that reaches `probe.log` after its close is dropped without a warning (a writer with a closed flag), and `probe.log` is also closed when the final write is refused; `05-run-and-wire.md` said such a write warns once (`b7238f9`).
+- Task 11: `-check` reads no password; an empty `STANDIN_PASSWORD` is an error while serving.
+- Task 12: `findForms` names a form by its 0-based index in `forms`, never by its text, and skips an empty form (`ce8c668`).
+- The final review, by the maintainer's rulings: each output stream of a command reaches its evidence in whole lines (`bd9b60a`); a stall's and an install's text also lists a pod's init containers, with the mirror note for one that cannot pull its image (`66794c2`; `04-mirror-note.md` and decision 12 name only `p.Spec.Containers`); the mask package's comment names the case of two credentials' forms that overlap (`374bc2a`).
+- The final review: the mirror workflow's `timeout-minutes` is 75, so `go test`'s own `-timeout 60m` ends a hung run first (`cd0adf1`; `06-mirror-job.md` says 60).
+
