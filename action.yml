@@ -1,0 +1,41 @@
+name: rollproof
+description: Test whether deploying a new version of a Kubernetes workload, and rolling it back, causes downtime.
+inputs:
+  config:
+    description: Path of the config file; a relative path is read from the workspace.
+    required: false
+    default: rollproof.yaml
+  image:
+    description: >-
+      The repository to pull the tool's own image from; the action adds the digest written into it
+      at the release. A reference that already carries a digest is used as it is. Before the first
+      release a reference with a digest is required.
+    required: false
+    default: ""
+  out:
+    description: Folder for the results; empty for a new folder under the runner's temporary directory.
+    required: false
+    default: ""
+outputs:
+  verdict:
+    description: >-
+      pass, fail or not-verified; empty when the tool never started, could not open its results
+      folder or could not write the outputs, which a caller treats as not verified.
+    value: ${{ steps.run.outputs.verdict }}
+  out:
+    description: The folder that holds result.json and the evidence.
+    value: ${{ steps.run.outputs.out }}
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        ROLLPROOF_ACTION_CONFIG: ${{ inputs.config }}
+        ROLLPROOF_ACTION_IMAGE: ${{ inputs.image }}
+        ROLLPROOF_ACTION_OUT: ${{ inputs.out }}
+        # Written at each release; empty before the first.
+        ROLLPROOF_ACTION_VERSION: ""
+        ROLLPROOF_ACTION_REPOSITORY: ""
+        ROLLPROOF_ACTION_DIGEST: ""
+      run: exec bash "$GITHUB_ACTION_PATH/action.sh"
