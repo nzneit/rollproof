@@ -8,7 +8,8 @@ name: rollproof proofs
 #                               env, outputs, the job summary and the cancel signal (section 14,
 #                               points 3, 4 and 20; section 10, "GitHub job summary")
 #   runner-user-cancel          user-cancel: cancels its own run, so it runs alone
-#   docker-proofs               proofs: point 8 with Docker (p08-kind-library, p01-registry-order)
+#   runner-last-value           last-value: the last of two values written for one output is kept
+#   docker-proofs              proofs: point 8 with Docker (p08-kind-library, p01-registry-order)
 #   docker-cluster-tests        cluster-tests: the tests under the build tag cluster, on Docker
 #   docker-first-fixture        first-fixture: the suite's first fixture under both Helm majors
 #   podman-node-setting         podman-node-setting: one test through rootful Podman, a try
@@ -41,6 +42,7 @@ on:
           - all
           - runner-files-and-timeouts
           - runner-user-cancel
+          - runner-last-value
           - docker-proofs
           - docker-cluster-tests
           - docker-first-fixture
@@ -535,6 +537,125 @@ jobs:
           grep -l 'S6-SIGNAL-SUMMARY uc-composite' "$d"/step_summary_* || echo "marker not found"
           end=$(( $(date +%s) + WINDOW ))
           while [ "$(date +%s)" -lt "$end" ]; do echo "still running at $(date +%s)"; sleep 15; done
+
+  # ---------------------------------------------------------------------------------------------
+  # Point 4, one more fact: when a step writes two values for one output, the runner keeps the
+  # last. The tool writes verdict when it starts and again when it ends (section 8), so the
+  # verdict that a caller reads rests on it. Tried in the plain form (NAME=VALUE), in the
+  # delimiter form (NAME<<DELIMITER), in both orders of the two, and through a composite action's
+  # outputs: once ending well, and once with a second value of fail and exit 1 under
+  # continue-on-error, which is the shape of the action's own test. A pass: the last step's table
+  # is all PASS.
+  # ---------------------------------------------------------------------------------------------
+  last-value:
+    if: inputs.part == 'all' || inputs.part == 'runner-last-value'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: write a throwaway action that writes one output twice
+        shell: bash
+        run: |
+          mkdir -p .proof/twice
+          cat > .proof/twice/action.yml <<'YAML'
+          name: proof-twice
+          description: throwaway composite action that writes one output twice
+          inputs:
+            end:
+              description: the second value of verdict, pass or fail; fail also exits 1
+              default: pass
+          outputs:
+            verdict:
+              description: written twice by the inner step
+              value: @{{ steps.inner.outputs.verdict }}
+            out:
+              description: written once, before the two
+              value: @{{ steps.inner.outputs.out }}
+          runs:
+            using: composite
+            steps:
+              - id: inner
+                shell: bash
+                env:
+                  END: @{{ inputs.end }}
+                run: |
+                  put() { printf '%s<<S6DELIM\n%s\nS6DELIM\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
+                  put out /tmp/results
+                  put verdict not-verified
+                  put verdict "$END"
+                  if [ "$END" = fail ]; then exit 1; fi
+          YAML
+          D='$'
+          sed -i "s/@{{/${D}{{/g" .proof/twice/action.yml
+
+      - name: the plain form, twice
+        id: plain
+        shell: bash
+        run: |
+          echo "verdict=not-verified" >> "$GITHUB_OUTPUT"
+          echo "verdict=pass" >> "$GITHUB_OUTPUT"
+
+      - name: the delimiter form, twice
+        id: delim
+        shell: bash
+        run: |
+          put() { printf '%s<<S6DELIM\n%s\nS6DELIM\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
+          put verdict not-verified
+          put verdict pass
+
+      - name: one form, then the other
+        id: mixed
+        shell: bash
+        run: |
+          put() { printf '%s<<S6DELIM\n%s\nS6DELIM\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
+          put a not-verified
+          echo "a=pass" >> "$GITHUB_OUTPUT"
+          echo "b=not-verified" >> "$GITHUB_OUTPUT"
+          put b pass
+
+      - name: through a composite action, ending well
+        id: comp_pass
+        uses: ./.proof/twice
+
+      - name: through a composite action, the second value fail and exit 1
+        id: comp_fail
+        continue-on-error: true
+        uses: ./.proof/twice
+        with:
+          end: fail
+
+      - name: assert and print
+        if: always()
+        shell: bash
+        env:
+          PLAIN: ${{ steps.plain.outputs.verdict }}
+          DELIM: ${{ steps.delim.outputs.verdict }}
+          MIXED_A: ${{ steps.mixed.outputs.a }}
+          MIXED_B: ${{ steps.mixed.outputs.b }}
+          COMP_PASS: ${{ steps.comp_pass.outputs.verdict }}
+          COMP_PASS_OUT: ${{ steps.comp_pass.outputs.out }}
+          COMP_FAIL: ${{ steps.comp_fail.outputs.verdict }}
+          COMP_FAIL_OUT: ${{ steps.comp_fail.outputs.out }}
+          COMP_FAIL_OUTCOME: ${{ steps.comp_fail.outcome }}
+          COMP_FAIL_CONCLUSION: ${{ steps.comp_fail.conclusion }}
+        run: |
+          fails=0
+          check() {  # what, expected, actual
+            if [ "$2" = "$3" ]; then r=PASS; else r=FAIL; fails=$((fails+1)); fi
+            printf '| %s | %s | `%s` | `%s` |\n' "$r" "$1" "$2" "$3" | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+          printf '| result | what | expected | actual |\n| --- | --- | --- | --- |\n' | tee -a "$GITHUB_STEP_SUMMARY"
+          check 'plain form twice: the last value'                    pass         "$PLAIN"
+          check 'delimiter form twice: the last value'                pass         "$DELIM"
+          check 'delimiter form, then plain: the last value'          pass         "$MIXED_A"
+          check 'plain form, then delimiter: the last value'          pass         "$MIXED_B"
+          check 'composite action, ending well: the last value'       pass         "$COMP_PASS"
+          check 'composite action, ending well: the other output'     /tmp/results "$COMP_PASS_OUT"
+          check 'composite action, exit 1: the last value'            fail         "$COMP_FAIL"
+          check 'composite action, exit 1: the other output'          /tmp/results "$COMP_FAIL_OUT"
+          check 'composite action, exit 1: outcome'                   failure      "$COMP_FAIL_OUTCOME"
+          check 'composite action, exit 1: conclusion under continue-on-error' success "$COMP_FAIL_CONCLUSION"
+          echo "failed checks: $fails"
+          exit "$fails"
 
   # ---------------------------------------------------------------------------------------------
   # The tests under the build tag cluster, on the runner's Docker: internal/cluster,
