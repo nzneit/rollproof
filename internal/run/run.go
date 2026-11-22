@@ -203,6 +203,7 @@ type writer interface {
 type gitHubFiles interface {
 	WriteOutputs(outs ...report.Output) error
 	AppendSummary(text string) error
+	Summarizes() bool
 }
 
 // gitHubOf gives the run's GitHub files from the environment. A test replaces it,
@@ -1108,11 +1109,11 @@ func (s *runState) appendSummary(text string) {
 }
 
 // summarize renders rec as the job summary and appends it through s.gh; it renders nothing when the
-// run has no GitHub files (s.gh is nil). A panic while the summary is rendered or appended is a warning,
+// run has no file for the summary. A panic while the summary is rendered or appended is a warning,
 // summaryNotWritten and the panic's text, once in a run as a failed write of the summary is, so
 // that a feature for GitHub alone cannot take away the console that follows it.
 func (s *runState) summarize(rec report.Run) {
-	if s.gh == nil {
+	if s.gh == nil || !s.gh.Summarizes() {
 		return
 	}
 	defer func() {

@@ -57,6 +57,27 @@ func TestGitHubActions(t *testing.T) {
 	}
 }
 
+// A GitHub says that it summarizes only when it runs on GitHub Actions and has a file for the
+// job summary.
+func TestSummarizes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{"on GitHub with a summary file", map[string]string{"GITHUB_ACTIONS": "true", "GITHUB_STEP_SUMMARY": "/r/summary"}, true},
+		{"on GitHub with no summary file", map[string]string{"GITHUB_ACTIONS": "true", "GITHUB_OUTPUT": "/r/output"}, false},
+		{"off GitHub", map[string]string{"GITHUB_STEP_SUMMARY": "/r/summary"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			getenv := func(key string) string { return tc.env[key] }
+			if got := GitHubFrom(getenv).Summarizes(); got != tc.want {
+				t.Errorf("Summarizes is %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGitHubFrom(t *testing.T) {
 	const written = "verdict<<D1\npass\nD1\n"
 	for _, tc := range []struct {

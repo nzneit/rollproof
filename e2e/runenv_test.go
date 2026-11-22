@@ -417,6 +417,10 @@ func TestReadGitHubOutputs(t *testing.T) {
 		want          map[string][]string
 	}{
 		{"a value of two lines", "x<<E\na\nb\nE\n", map[string][]string{"x": {"a\nb"}}},
+		// The harness reads the last value as the step's output and checks the list: the order is
+		// the contract.
+		{"one name written twice", "verdict<<D1\nnot-verified\nD1\nverdict<<D2\npass\nD2\n",
+			map[string][]string{"verdict": {"not-verified", "pass"}}},
 		{"an empty file", "", map[string][]string{}},
 	} {
 		t.Run(c.name, func(t *testing.T) {

@@ -16,8 +16,8 @@ type GitHub struct {
 
 // GitHubActions reports whether the tool runs on GitHub Actions: GITHUB_ACTIONS is
 // exactly "true" (section 8), which a caller's env: cannot change there.
-// GitHubFrom and the run command's lines for workflow commands both ask it, so
-// that the rule is written once.
+// GitHubFrom, Open and the run command's lines for workflow commands all ask it,
+// so that the rule is written once.
 func GitHubActions(getenv func(string) string) bool {
 	return getenv("GITHUB_ACTIONS") == "true"
 }
@@ -74,6 +74,12 @@ func (g GitHub) AppendSummary(text string) error {
 		return nil
 	}
 	return appendTo(g.summary, text)
+}
+
+// Summarizes reports whether g has a file for the job summary, so that a caller renders a
+// summary only when it will be written.
+func (g GitHub) Summarizes() bool {
+	return g.summary != ""
 }
 
 // newDelimiter gives a delimiter for one output: ROLLPROOF_EOF_ and 26 random

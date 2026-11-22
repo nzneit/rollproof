@@ -3722,6 +3722,9 @@ func (g *summaryPanicker) AppendSummary(text string) error {
 	return nil
 }
 
+// Summarizes is true: the fake has a file for the summary.
+func (g *summaryPanicker) Summarizes() bool { return true }
+
 // A panic while the job summary is rendered or appended is a warning, as a failed write of it is:
 // the console is printed all the same, the exit code is the verdict's, and the warning is told
 // after the console as every late warning is (section 10, rule 10).
@@ -3761,6 +3764,45 @@ func TestAPanicInTheSummaryStillPrintsTheConsole(t *testing.T) {
 	}
 	if len(fake.later) != 1 || !strings.Contains(fake.later[0], "warning: "+warning) {
 		t.Errorf("the summary's later calls are %q, want one that holds the warning's line", fake.later)
+	}
+}
+
+// noSummary stands for GitHub's files with no file for the summary: Summarizes is false, and an
+// AppendSummary fails the test.
+type noSummary struct{ t *testing.T }
+
+// WriteOutputs writes nothing and returns nil.
+func (g noSummary) WriteOutputs(...report.Output) error { return nil }
+
+// AppendSummary fails the test: nothing may be appended to a summary that has no file.
+func (g noSummary) AppendSummary(string) error {
+	g.t.Error("AppendSummary was called, though Summarizes is false")
+	return nil
+}
+
+// Summarizes is false.
+func (g noSummary) Summarizes() bool { return false }
+
+// A run with no file for the job summary renders none: the console is printed and no warning of
+// the summary is given.
+func TestNoSummaryIsRenderedWithoutItsFile(t *testing.T) {
+	w := newWorld(t)
+	was := gitHubOf
+	gitHubOf = func(func(string) string) gitHubFiles { return noSummary{t} }
+	defer func() { gitHubOf = was }()
+	if code := w.run(context.Background()); code != 0 {
+		t.Errorf("exit %d, want 0, the pass's code\n%s", code, w.stdout.String())
+	}
+	if !strings.HasPrefix(w.stdout.String(), "rollproof: PASS") {
+		t.Errorf("stdout does not begin with the console's first line %q:\n%s", "rollproof: PASS", w.stdout.String())
+	}
+	if strings.Contains(w.stdout.String(), "the job summary was not written") {
+		t.Errorf("stdout holds a warning of the summary:\n%s", w.stdout.String())
+	}
+	for _, warning := range w.result().Warnings {
+		if strings.HasPrefix(warning, "the job summary was not written") {
+			t.Errorf("result.json holds the warning %q", warning)
+		}
 	}
 }
 

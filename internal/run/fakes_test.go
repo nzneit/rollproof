@@ -760,6 +760,9 @@ func (g *gitHubRecorder) AppendSummary(text string) error {
 	return nil
 }
 
+// Summarizes is true: the recorder stands for a step with a file for the summary.
+func (g *gitHubRecorder) Summarizes() bool { return true }
+
 // finalness is "final" when result.json is final now, and "not final" otherwise, a file that
 // cannot be read among them.
 func (g *gitHubRecorder) finalness() string {
