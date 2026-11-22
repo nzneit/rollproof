@@ -2848,8 +2848,9 @@ proves which point.
     stays well under it, the setting leaves the tool. `docs/proofs/p12-keys.md` measured more than
     half the quota while the nodes were deleted, so the setting stays (section 9).
 13. **Masking, and what leaves the runner.** The rule of section 8 needs a security reviewer's eye
-    before the first release. So does the way the job summary escapes text that came from
-    outside the tool, which a run's page renders as Markdown with some HTML (section 10). So do
+    before the first release. So does the way the job summary keeps text that came from
+    outside the tool from changing a run's page, which renders it as Markdown with some HTML
+    (section 10; the plan for step 6 gives the rule in one of its decisions). So do
     five facts of section 11: the change under test runs with the
     job's power, every pod in the cluster can read the nodes' credentials, a registry entry's
     credentials reach its mirror and the token service that a challenge names, a chart's own pull
