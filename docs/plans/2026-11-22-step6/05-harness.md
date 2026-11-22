@@ -33,6 +33,13 @@ Read section 12 ("The suite's matrix", "The suite's workflow", "The mirror job",
     form NAME=VALUE, and gives each name's values in the order they were written. A
     line that is neither, or a delimiter that never comes, is an error that names
     the file and the line.
+  - `func summaryFaults(summary, out, word string) []string`
+    summaryFaults judges the text of a run's job summary against the results folder
+    out and the word of its first line (PASS, FAIL or NOT VERIFIED), and gives the
+    faults it finds, none for a good summary: the first line does not begin
+    "### rollproof: " + word; more or fewer than one line begins "### rollproof: ";
+    the line "results: " + out followed by the line of the fence does not stand
+    exactly once. Blocks after the results block, such as a warning's, are no fault.
 - Produces, in `harness_test.go`:
   - `var majors []string`, set by `TestMain` from `helmMajors(os.Getenv(helmVar))`.
   - `func checkGitHubFiles(t *testing.T, out, word, value string) (summary string)`
@@ -40,10 +47,10 @@ Read section 12 ("The suite's matrix", "The suite's workflow", "The mirror job",
     run whose verdict is value (pass, fail or not-verified), and whose first line
     writes word (PASS, FAIL or NOT VERIFIED), writes: the output out once, as out,
     and verdict as not-verified and then value; and a summary whose first line
-    begins "### rollproof: " + word and which holds the line "results: " + out
-    followed by the fence that closes its block, not necessarily at its end: a
-    warning after the console is appended after that block. It returns the
-    summary.
+    begins "### rollproof: " + word, the only line that begins "### rollproof: ",
+    and which holds the line "results: " + out followed by the fence that closes
+    its block exactly once, not necessarily at its end: a warning after the console
+    is appended after that block (summaryFaults judges it). It returns the summary.
 - Produces, in `config_test.go`: the field `github bool` of `fixture`, with the comment "github gives the run its own files for GitHub's outputs and job summary, github-output and github-summary in its results folder, with GITHUB_ACTIONS true; every other run gets none (section 12)."
 - Produces, in `fixtures_test.go`: `func underEachHelm(t *testing.T, f fixture, check func(t *testing.T, r result))`
   underEachHelm runs f once with each Helm major that ROLLPROOF_E2E_HELM selects
@@ -72,8 +79,11 @@ func TestRunEnvKeepsTheJobsGitHubFilesOut(t *testing.T) {
 	//   ["HOME=/home/u", "PATH=/usr/bin:/bin", "CI=true", "GITHUB_ACTIONS=true",
 	//    "GITHUB_OUTPUT=/r/github-output", "GITHUB_STEP_SUMMARY=/r/github-summary",
 	//    "PATH=/helm:/usr/bin:/bin"]
-	// runEnv([]string{"HOME=/h"}, "/helm", nil) == ["HOME=/h", "PATH=/helm:"]
-	// base is not changed by any of the three calls.
+	// runEnv([]string{"HOME=/h"}, "/helm", nil) == ["HOME=/h", "PATH=/helm"]
+	// runEnv([]string{"HOME=/h", "PATH="}, "/helm", nil) == ["HOME=/h", "PATH=", "PATH=/helm"]
+	// (an empty last element of PATH would mean the current folder in a command lookup, so none
+	// is written).
+	// base is not changed by any of the four calls.
 }
 
 func TestReadGitHubOutputs(t *testing.T) {
@@ -84,6 +94,20 @@ func TestReadGitHubOutputs(t *testing.T) {
 	// A file "x<<E\na\n" gives an error that holds the file's path and "E".
 	// An empty file gives an empty map and no error.
 }
+
+func TestSummaryFaults(t *testing.T) {
+	// out is "/tmp/r"; good is a summary of a pass: the heading "### rollproof: PASS" with a code
+	// span, a fenced set-up block, a table of windows, and the block "results: /tmp/r" in a fence
+	// of three backticks; warning is a block of one warning line in a fence of three backticks.
+	// Each row is a subtest:
+	//   good, "PASS" and good + warning, "PASS" give no fault;
+	//   good + good gives two: 2 lines that begin "### rollproof: ", and the results line followed
+	//     by the fence 2 times;
+	//   good without its results line, and good whose results line names "/tmp/other", give one
+	//     each: the results line followed by the fence 0 times;
+	//   "notice\n" + good gives one: the first line is "notice", not the heading;
+	//   good with the word "FAIL" gives one: its first line does not begin "### rollproof: FAIL".
+}
 ```
 
 In `fixtures_test.go`, `TestFirstFixture` gives its fixture `github: true`, and its check, after what it asserts today, calls `sum := checkGitHubFiles(t, outDir(t), "PASS", "pass")` and wants `sum` to hold the line `| window | length | checks | failed | after finish | slowest | behind | result |` and the line `| transition | workload | probed | pods replaced | quickest stop |`.
@@ -92,21 +116,21 @@ In `mirror_test.go`, after each run of `TestMirror` and before `checkPasswordGon
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go test ./e2e/ -run 'TestHelmMajors|TestRunEnvKeepsTheJobsGitHubFilesOut|TestReadGitHubOutputs' -v`, then `go vet -tags e2e ./...` and `go vet -tags mirror ./...`
-Expected: FAIL to compile: `helmMajors`, `runEnv`, `githubFiles` and `readGitHubOutputs` are not defined; the vets fail on `fixture.github` and `checkGitHubFiles`.
+Run: `go test ./e2e/ -run 'TestHelmMajors|TestRunEnvKeepsTheJobsGitHubFilesOut|TestReadGitHubOutputs|TestSummaryFaults' -v`, then `go vet -tags e2e ./...` and `go vet -tags mirror ./...`
+Expected: FAIL to compile: `helmMajors`, `runEnv`, `githubFiles`, `readGitHubOutputs` and `summaryFaults` are not defined; the vets fail on `fixture.github` and `checkGitHubFiles`.
 
 - [ ] **Step 3: Implement, each named one with its interface comment from the Interfaces block**
 
-- `runenv_test.go`: the five names above.
+- `runenv_test.go`: the six names above.
 - `harness_test.go`: `TestMain` first sets `majors`, before anything else it does; a `helmMajors` error prints `e2e: ` and the error to standard error and exits 1. It still checks both Helm binaries and both majors, with the comment "Both, whatever ROLLPROOF_E2E_HELM selects: the fourteenth row's control runs under Helm 3 in every run of the suite." `runFixture`, once the results folder is made: for a fixture with `github`, `gh := &githubFiles{filepath.Join(out, "github-output"), filepath.Join(out, "github-summary")}`, both written empty with mode 0644, a failure being `t.Fatalf`; then `env := runEnv(os.Environ(), helmDir, gh)` in place of `helmEnv(helmDir)` (gh is nil for every other fixture). `helmEnv` stays for `checkHelmMajor`. `runFixture`'s comment gains: "The tool never sees the job's GITHUB_OUTPUT or GITHUB_STEP_SUMMARY; a fixture with github gets files of its own."
-- `checkGitHubFiles`: reads both files with `readGitHubOutputs` and `os.ReadFile`; wants the outputs exactly `{"out": [out], "verdict": ["not-verified", value]}`; wants the summary's first line to begin `"### rollproof: " + word` and the summary to hold `"results: " + out + "\n```\n"`, contained and not necessarily last, with the comment "A warning after the console is appended after the results block, so the summary need not end with it. The fence is three backticks unless a line of that block holds a run of three or more backticks. Its lines are the run's reasons with their details, its warnings and the results line, and no run that calls this is expected to hold such a run of backticks."
+- `checkGitHubFiles`: reads both files with `readGitHubOutputs` and `os.ReadFile`; wants the outputs exactly `{"out": [out], "verdict": ["not-verified", value]}`; hands the summary to `summaryFaults(summary, out, word)`, reports each fault it gives with `t.Errorf` and then logs the summary once, so that the summary's first line must begin `"### rollproof: " + word`, exactly one line may begin `"### rollproof: "`, and `"results: " + out + "\n```\n"` must stand exactly once at a line's start, not necessarily last; before that call stands the comment "A warning after the console is appended after the results block, so the summary need not end with it. The fence is three backticks unless a line of that block holds a run of three or more backticks. Its lines are the run's reasons with their details, its warnings and the results line, and no run that calls this is expected to hold such a run of backticks."
 - `fixtures_test.go`: `underBothHelms` becomes `underEachHelm`, over `majors`; every call in `fixtures_test.go`, `custom_test.go` and `commands_test.go` follows (32 calls; `grep -rn underBothHelms e2e` prints nothing afterwards). In the comment of `TestChartDeniesTrafficByDefault`, the sentence "The control runs once, under Helm 3: it tests the cluster's network plugin, not Helm." becomes, exactly: "The control runs in every run of this test, under Helm 3, whatever ROLLPROOF_E2E_HELM selects: it tests the cluster's network plugin, not Helm, and each job of the suite's workflow runs on its own runner image and shows there that the plugin enforces the policy." Its code does not change.
 - `mirror_helpers_test.go`: `throughTheMirror` sets `github: true` (and so `mirrorReplacesItsHost`, which starts from it); its comment adds "with files of its own for GitHub's outputs and summary, which the search for the password reads".
 - `mirror_test.go`: the checks of Step 1; and `holdRunImages` runs the engine's `image inspect` under a limit of 1 minute and its `pull` under a limit of 10 minutes (`exec.CommandContext` with `context.WithTimeout`), a pull cut at its limit failing the test with "ENGINE pull REF did not end within 10m0s" (a leftover of step 5, its Task 13's m5; see Task 12's table).
 
 - [ ] **Step 4: Run the unit tests and the vets**
 
-Run: `go test ./e2e/ -v -run 'TestHelmMajors|TestRunEnvKeepsTheJobsGitHubFilesOut|TestReadGitHubOutputs'`, `gofmt -l .`, `go test ./...` and the four vets.
+Run: `go test ./e2e/ -v -run 'TestHelmMajors|TestRunEnvKeepsTheJobsGitHubFilesOut|TestReadGitHubOutputs|TestSummaryFaults'`, `gofmt -l .`, `go test ./...` and the four vets.
 Expected: PASS, no output from `gofmt` and the vets.
 
 - [ ] **Step 5: Run on this machine**

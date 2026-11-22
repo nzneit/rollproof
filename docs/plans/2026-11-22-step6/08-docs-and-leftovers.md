@@ -45,7 +45,7 @@ It cannot yet be used from another repository: nothing is released, so the actio
         name: rollproof-results
         path: ${{ steps.rollproof.outputs.out }}
 
-Two outputs. `verdict` is `pass`, `fail` or `not-verified`, the verdict that decides the step's exit code (0, 1 or 2); a run that was killed before it finished leaves `not-verified`. An empty `verdict` means that the action stopped before the tool started (the runner is not Linux, it has no container engine, or the image could not be pulled) or that the tool could not open its results folder, or that the step's outputs file could not be written, which a warning on the console says: read it as not verified. `out` is the folder that holds `result.json` and the evidence.
+Two outputs. `verdict` is `pass`, `fail` or `not-verified`, the verdict that decides the tool's exit code: 0, 1 or 2. After a signal, as after a cancel, `verdict` is the verdict of the final `result.json`, and the tool ends by the signal instead, which a shell reports as status 130 for SIGINT and 143 for SIGTERM. The tool writes `verdict` as `not-verified` as soon as it has its results folder, and again when the verdict exists, so a run that was killed in between leaves `not-verified`. An empty `verdict` means that the action stopped before the tool started (for example, the runner is not Linux, it has no container engine, or the image could not be pulled) or that the tool could not open its results folder, or that the step's outputs file could not be written, which a warning on the console says: read it as not verified. `out` is the folder that holds `result.json` and the evidence.
 
 The action uploads nothing. The step above uploads the folder, with `if: always()` so that it runs after a fail, after a run that was not verified and after a cancel. The evidence holds the chart's values and the probe's header values as they were given; only a registry password is masked. Keep the uploaded folder to yourself when those values are secret.
 
@@ -63,7 +63,7 @@ To run the suite: `go run ./hack/fetchhelm` fetches under `.tools/` the Helm bin
 
 The mirror job, `go test -tags mirror -p 1 ./e2e/ -run TestMirror -v -timeout 60m` (with `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0` before it on nerdctl), runs the first fixture through a mirror that needs a login, sits under a path and serves TLS from a private authority, with the nodes' route to public registries cut, and then a run whose candidate the mirror lacks.
 
-The project's workflows sit in the host repository, and all but the unit tests start by hand only: `rollproof-e2e.yml` runs the tests under the build tag `cluster`, and then the suite under Helm 3 on `ubuntu-24.04` and under Helm 4 on `ubuntu-26.04`, side by side, in about one and a half to two hours (about 172 to 205 billed minutes); `rollproof-mirror.yml` runs the mirror job; `rollproof-action.yml` runs the action's own test: a pass, a fail, and a run cut short by a time limit. `rollproof-unit.yml` runs the unit tests on every pull request that touches the project.
+The project's workflows sit in the host repository, and all but the unit tests start by hand only: `rollproof-e2e.yml` runs the tests under the build tag `cluster`, and then the suite under Helm 3 on `ubuntu-24.04` and under Helm 4 on `ubuntu-26.04`, side by side, in about 1 hour 30 minutes to 1 hour 50 minutes (about 172 to 205 billed minutes); `rollproof-mirror.yml` runs the mirror job; `rollproof-action.yml` runs the action's own test: a pass, a fail, and a run cut short by a time limit; `rollproof-proofs.yml` runs the proofs that need a hosted runner. `rollproof-unit.yml` runs the unit tests on every pull request that touches the project.
 
 Every key of version 1 is built: `registries` and `as` in `images` came with step 5.
 
@@ -164,7 +164,7 @@ The small faults that step 5's reviews deferred and its final fix wave did not c
 | Task 5 m4 | no test that an entry with credentials alone, outside `AsHosts`, writes no `hosts.toml` | Answered already: `TestHostSettingsNeedsNoFile` holds that entry at the function that decides, and `writeRegistryFiles` writes nothing for "" |
 | Task 6 m2 | no test sends a `local` entry with `as` through `Store` | Kept: `as` takes the same path for both sources; `images` is not changed |
 | Task 6 m3 | a test's registry keeps its default logger, which is noisy under `-v` | Kept: noise in a test's output only |
-| Task 7 m2 | no test that `watch.Start` copies `MirrorNote` into the tracker's options | Kept: `watch` is not changed by this step |
+| Task 7 m2 | no test that `watch.Start` copies `MirrorNote` into the tracker's options | Kept: this step changes no code of `watch`, only one dead assignment in one of its tests (Final f1, this task) |
 | Task 7 m3 | no test of the note after "and last ended", nor of a note function that gives "" | Kept: same |
 | Task 7 m4 | the lookup of a container by name is not pinned | Kept: same |
 | Task 8 m1 | the probe's lookup of its container by the name `probe` is not pinned | Kept: `probe` is not changed |

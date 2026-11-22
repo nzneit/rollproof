@@ -2288,9 +2288,10 @@ results: /tmp/rollproof-results-7f3a
   warning that arises later is appended as a line. The summary is masked as the console is
   (section 8), and text that came from outside the tool is written so that it cannot change
   how the page reads: inside code that it cannot close, or escaped. A run whose final
-  `result.json` could not be written prints no console block and writes no summary. A summary
-  that cannot be written is a warning (rule 10). GitHub shows no summary for a step whose file
-  is larger than 1 MiB, and the step stays green; the console's blocks are far below that.
+  `result.json` could not be written prints no console block and writes no summary; the run's
+  warnings are then printed as lines on the console. A summary that cannot be written is a
+  warning (rule 10). GitHub shows no summary for a step whose file is larger than 1 MiB, and
+  the step stays green; the console's blocks are far below that.
 - **Evidence folder.**
   - The probe's raw lines; the window boundaries and the moment each transition finished, each
     written when it happens; a per-second timeline that puts failure counts beside pod events

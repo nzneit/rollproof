@@ -31,9 +31,10 @@ How `finish`, `lateWarnings` and `warnAfterConsole` change (decision 6):
 // evidence completed, and the warnings that this added told as lines of the console and of the
 // summary, with result.json written again; then the clean-up and the exit code. A refused final
 // write, returned or panicked, prints no console and writes no summary, and the outputs still say
-// the verdict that the exit code gives (section 8). A panic after the final file was written is a
-// warning: the verdict was decided already. The clean-up runs on every path, so that a report that
-// cannot be written does not leave a cluster behind.
+// the verdict that the exit code gives (section 8); the run's warnings are then told as lines alone,
+// in the clean-up. A panic after the final file was written is a warning: the verdict was decided
+// already. The clean-up runs on every path, so that a report that cannot be written does not leave
+// a cluster behind.
 func (s *runState) finish() (code int) {
 	refused := false
 	written := false // the final result.json is in place
@@ -86,16 +87,15 @@ func (s *runState) refusedWrite() int
 - `lateWarnings` becomes:
 
 ```go
-// lateWarnings tells the warnings that came after the console was printed: each as a line
-// "warning: TEXT" of the console and, masked, as a line of the job summary, in order; and then
-// writes result.json again, once, with all of them. A warning that arises while it tells them,
-// such as that the summary could not be written, is told in the same call. It does nothing when
-// the final result.json was never written: that write was refused, the console was not printed,
-// and the exit code says so.
+// lateWarnings tells the warnings of the run that nothing has told yet, in order, each as a line
+// "warning: TEXT" of standard output. When the final result.json was written, those are the ones
+// that came after the console was printed: each is also appended, masked, as a line of the job
+// summary, and result.json is then written again, once, with all of them. When the final write was
+// refused, no console was printed, so they are every warning of the run: they are told as lines
+// alone, with no summary and no second try of result.json, so that the first file, the step's
+// output and the exit code say the same (section 8; decision 6). A warning that arises while it
+// tells them, such as that the summary could not be written, is told in the same call.
 func (s *runState) lateWarnings() {
-	if !s.finalWritten {
-		return
-	}
 	told := false
 	for {
 		all := s.warnings.all()
@@ -104,12 +104,14 @@ func (s *runState) lateWarnings() {
 		}
 		for _, text := range all[s.warningsTold:] {
 			s.println(s.o.Stdout, "warning: "+text)
-			s.appendSummary(report.SummaryLine("warning: " + s.mask.String(text)))
+			if s.finalWritten {
+				s.appendSummary(report.SummaryLine("warning: " + s.mask.String(text)))
+			}
 		}
 		s.warningsTold = len(all)
 		told = true
 	}
-	if told {
+	if told && s.finalWritten {
 		s.rewriteFinal()
 	}
 }
@@ -118,22 +120,28 @@ func (s *runState) lateWarnings() {
 - `warnAfterConsole` becomes:
 
 ```go
-// warnAfterConsole adds a warning that arose once the console text was printed, and tells it as
-// lateWarnings tells one. When the final result.json was refused, so that no console was printed
-// and no summary written, it prints the warning as a line of its own and does not write
-// result.json again: the first result.json, which says that the run did not finish, stays, so
-// that the file, the step's output and the exit code say the same.
+// warnAfterConsole adds a warning that arose once the console text was printed, or once the final
+// result.json was refused, and tells it as lateWarnings tells one.
 func (s *runState) warnAfterConsole(text string) {
 	s.warnings.add(text)
-	if s.finalWritten {
-		s.lateWarnings()
-		return
-	}
-	s.println(s.o.Stdout, "warning: "+text)
+	s.lateWarnings()
 }
 ```
 
-Today's `warnAfterConsole` (`internal/run/run.go:1177-1181`) calls `rewriteFinal` on every path, so, with this step's outputs, a later warning after a refused final write could write a final `result.json` that the exit code and the step's output contradict, once the folder could be written again. The existing tests of a refused write, read at `58c1cbf`, and what each needs: none asserts that second try, and none changes. `TestARefusedFinalKeepsTheVerdictsClass` (`internal/run/run_test.go:1653`) refuses the write at the probe's stop, and its cluster's delete succeeds, so no warning comes after the refused write, and it wants stdout empty; `TestAPanicInTheFinalWriteIsARefusedWrite` (`:1775`) and `TestARefusedFinalWriteClosesTheProbeLog` (`:3339`) call `finish` with no cluster, no watcher and no signal, so `warnAfterConsole` is never reached; `TestResultsFolderCannotBeWritten` (`:370`) ends before `finish`, when `report.Open` fails. The new `TestAWarningAfterARefusedFinalWriteWritesNoFinalFile` (Step 1) is the first test to reach `warnAfterConsole` after a refused write.
+- `Run` ends, in place of `return s.finish()`:
+
+```go
+	code := s.finish()
+	if !s.finalWritten {
+		// After a refused final write completeEvidence did not run, so windows.json is written a last
+		// time here, as before, and a warning that this gives is told as a line, as the others were.
+		s.marks.end()
+		s.lateWarnings()
+	}
+	return code
+```
+
+Today's `warnAfterConsole` (`internal/run/run.go:1177-1181`) calls `rewriteFinal` on every path, so, with this step's outputs, a later warning after a refused final write could write a final `result.json` that the exit code and the step's output contradict, once the folder could be written again. The existing tests of a refused write, read at `58c1cbf`, and what each needs: none asserts that second try. `TestARefusedFinalKeepsTheVerdictsClass` (`internal/run/run_test.go:1653`) refuses the write at the probe's stop, and its cluster's delete succeeds; its results folder is gone, so the last write of `windows.json`, which `Run` makes after the clean-up, fails, and its two rows, which wanted stdout empty, want exactly that one warning line (`isWindowsWarningAlone`); `TestAPanicInTheFinalWriteIsARefusedWrite` (`:1775`) and `TestARefusedFinalWriteClosesTheProbeLog` (`:3339`) call `finish` with no cluster, no watcher and no signal, so `warnAfterConsole` is never reached; `TestResultsFolderCannotBeWritten` (`:370`) ends before `finish`, when `report.Open` fails. The new `TestAWarningAfterARefusedFinalWriteWritesNoFinalFile` (Step 1) is the first test to reach `warnAfterConsole` after a refused write.
 
 - New:
 
@@ -206,7 +214,9 @@ func TestWhatVerdictSaysAfterEachEnding(t *testing.T) {
 	//   "a results folder that cannot be opened"
 	//                                 w.out is a file, as in TestResultsFolderCannotBeWritten
 	//                                                                         2  none                          empty
-	// For the three refused rows, stdout is empty too. After a signal Run returns the code of the
+	// For the three refused rows, stdout is exactly one line, the warning that windows.json was not
+	// written (isWindowsWarningAlone); for the row with no verdict values, the outputs file is
+	// empty. After a signal Run returns the code of the
 	// verdict, and the process then ends by the signal (TestASignalEndsTheToolByItAfterARefusedWrite).
 }
 
@@ -261,8 +271,27 @@ func TestAWarningAfterARefusedFinalWriteWritesNoFinalFile(t *testing.T) {
 	// again (os.MkdirAll, mode 0o700), before the clean-up's warning arises;
 	// w.cluster.deleteErr = errors.New("the engine did not answer").
 	// Exit 2; stdout holds the line "warning: the cluster was not deleted: the engine did not
-	// answer"; the outputs' verdict values are [not-verified not-verified]; w.out holds no final
-	// result.json (none, or one that is not final).
+	// answer" exactly once; the outputs' verdict values are [not-verified not-verified]; w.out
+	// holds no final result.json (none, or one that is not final).
+}
+
+// After a refused final write, a warning that arises later, here at the watcher's stop, is still
+// told once as a line of its own; no console block is printed, no summary written, and result.json
+// is not written again (section 8; decision 6).
+func TestAWarningAtTheWatchersStopAfterARefusedFinalWriteIsALine(t *testing.T) {
+	// w.gitHubFiles; the hook "watcher" opens the evidence pods/orders-a-1.log; the hook
+	// "end-commands" removes w.out; the hook "watch-stop" closes that file and writes to it.
+	// Exit 2; stdout holds exactly one line that begins "warning: the evidence pods/orders-a-1.log
+	// could not be written: ", and neither "rollproof: " nor "results: "; the summary file is empty;
+	// the outputs' verdict values are [not-verified not-verified]; w.out holds no final result.json.
+}
+
+// After a refused final write, the warning that the outputs could not be written at the first
+// moment is still told, once, so that an empty verdict is explained (section 8).
+func TestAnOutputsWarningAfterARefusedFinalWriteIsALine(t *testing.T) {
+	// GITHUB_ACTIONS "true", GITHUB_OUTPUT a path that does not exist; the hook "end-commands"
+	// removes w.out. Exit 2; stdout holds exactly one line that begins "warning: the step's
+	// outputs were not written: ".
 }
 ```
 

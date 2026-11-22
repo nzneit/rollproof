@@ -215,10 +215,13 @@ func TestSummaryGolden(t *testing.T) {
 
 func TestSummaryKeepsTextFromOutsideTheToolInCode(t *testing.T) {
 	const planted = "MARK<b>x</b>|*y*_z_[l](http://e.example) www.e.example ```\r\n`` end"
-	// For each of passRun, failRun, stallMirrorRun, customRun and beforeFirstRun:
-	// md := Summary(plantFreeText(RUN, planted)).
-	//   outsideCode(md) returns no error, and its text holds no "MARK";
-	//   md holds "MARK<b>x</b>" (the planted text is there, inside code);
+	// fence is a text that, on a reason's detail line, would be a line that closes a fence of
+	// three backticks, as GitHub reads one: up to three spaces, then a run of backticks.
+	const fence = "````"
+	// For each of passRun, failRun, stallMirrorRun, customRun and beforeFirstRun, and for each of
+	// planted and fence as the text s (a subtest each): md := Summary(plantFreeText(RUN, s)).
+	//   outsideCode(md) returns no error, and its text holds no "MARK" and no backtick;
+	//   for planted, md holds "MARK<b>x</b>" (the planted text is there, inside code);
 	//   every line of md outside its fenced code blocks that begins "| " has as many | not
 	//   preceded by \ as the header line of its table (the first line of that run of "| " lines).
 }
@@ -259,10 +262,11 @@ Two helpers in `summary_test.go`, each with its comment:
 func plantFreeText(r Run, s string) Run
 
 // outsideCode returns the text of md that is outside its fenced code blocks and code spans, read by
-// the rules that fenced and codeSpan write by: a fence opens at a line that begins with three or
-// more backticks and closes at the next line that is a run of at least as many backticks and
-// nothing else; outside a fence, a run of n backticks opens a code span that the next run of
-// exactly n backticks closes. A fence or a span that is not closed is an error.
+// the rules that fenced and codeSpan write by, which are GitHub's: a fence opens at a line that
+// begins, after at most three spaces, with three or more backticks, and closes at the next line
+// that is, after at most three spaces, a run of at least as many backticks and nothing else but
+// spaces; outside a fence, a run of n backticks opens a code span that the next run of exactly n
+// backticks on its line closes. A fence or a span that is not closed is an error.
 func outsideCode(md string) (string, error)
 ```
 

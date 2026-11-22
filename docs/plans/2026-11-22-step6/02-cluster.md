@@ -278,13 +278,17 @@ In `cluster_test.go` (tag `cluster`):
 
 ```go
 // A signal during kind's creation: Create returns at once, kind's abandoned call runs to its end,
-// and the next run's first step removes what it left (section 10, "On a signal").
+// and the next run's first step removes what it left (section 10, "On a signal"). The test checks
+// that no attempt of kind's Create has ended at the cancel, so that the result it then waits for
+// is the one of the call that the signal abandoned, not an earlier attempt's.
 func TestAnAbandonedCreateIsRemovedByTheNextRun(t *testing.T) {
 	// testSpec("abandoned", 1) on testEngine(t). kindCreate, as TestMain wrapped it, is wrapped
 	// once more: the wrapper closes began (once) and sends the wrapped call's error on ended (a
-	// channel with room for one). Create runs in a goroutine with a context that the test cancels
-	// 10 s after began was closed (began is awaited for at most 5 minutes: the node image may be
-	// pulled first).
+	// channel with room for createAttempts, one for every attempt that createKind makes, so that
+	// no send of the wrapper waits). Create runs in a goroutine with a context that the test
+	// cancels 10 s after began was closed (began is awaited for at most 5 minutes: the node image
+	// may be pulled first). Just before the cancel the test fails unless ended is empty: "kind's
+	// Create ended before the signal (ERR), so no call was abandoned".
 	// Create returns within 3 s of the cancel, cluster-failed, with "context canceled" in its text.
 	// The test then waits at most 5 minutes for ended: kind's call ran on to its end.
 	// The engine then lists at least one container whose name begins "rollproof-test-abandoned-"

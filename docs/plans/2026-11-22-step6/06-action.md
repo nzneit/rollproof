@@ -16,6 +16,7 @@ Read section 8 ("The action", whole), section 9 ("The probe's own image"), secti
 
 | Failure | Text on standard error (each followed by a line end; exit 2) |
 | --- | --- |
+| uname | `rollproof: uname -s failed, so the runner's system is not known; the action runs only on Linux` |
 | Not Linux | `rollproof: the runner is not Linux (uname -s printed NAME); the action runs only on Linux` |
 | No engine | `rollproof: no container engine that kind supports: KIND_EXPERIMENTAL_PROVIDER names none, and none of docker, nerdctl and podman answers -v` |
 | No image | `rollproof: no image to pull: before its first release this action carries no repository and no digest, so give the input image a reference with @sha256:` |
@@ -89,8 +90,9 @@ func TestTheScriptStartsTheToolInItsPlace(t *testing.T) {
 	//    "--out", "/tmp/rollproof-action-test/results"];
 	// its environment holds "KIND_EXPERIMENTAL_PROVIDER=docker" and no line that begins
 	// "ROLLPROOF_ACTION_"; its working folder is GITHUB_WORKSPACE.
-	// The log is exactly ["docker -v", "docker pull " + REF, "docker create " + REF + " /rollproof",
-	//   "docker export fake-id", "docker rm fake-id"].
+	// The log is exactly ["docker -v", "docker pull " + REF,
+	//   "docker create --name " + FOLDER + " " + REF + " /rollproof", "docker export fake-id",
+	//   "docker rm fake-id"], FOLDER the base name of the folder below.
 	// RUNNER_TEMP holds one folder, whose name begins "rollproof-action-", holding an executable
 	// file rollproof. GITHUB_OUTPUT is empty. stderr's last line is
 	// "rollproof: the tool from " + REF + ", through docker".
@@ -110,6 +112,9 @@ func TestTheScriptsEngineRule(t *testing.T) {
 	//   docker's -v exits 1, nerdctl's prints "nerdctl version 2.4.2"    -> "nerdctl\n", 0
 	//   docker's -v prints "Docker Desktop 4.40", nerdctl's as above     -> "nerdctl\n", 0
 	//   docker's -v prints "Docker version 28.0.4\nanother line"         -> "docker\n", 0
+	//   docker's -v as above, nerdctl's prints "nerdctl version 2.4.2"   -> "docker\n", 0
+	//   docker's -v prints "Client: Docker version 28.0.4", nerdctl's as above
+	//                                                                    -> "nerdctl\n", 0
 	//   only podman, "podman version 4.9.3"                              -> "podman\n", 0
 	//   no fake                                                          -> "", 1
 }
@@ -133,7 +138,11 @@ func TestTheScriptsImageReference(t *testing.T) {
 func TestTheScriptFailsWithExit2AndWritesNoOutput(t *testing.T) {
 	// Each row: exit 2, stderr's last line exactly the row's text of the table above, and
 	// GITHUB_OUTPUT still empty. REF as in TestTheScriptStartsTheToolInItsPlace.
+	// A row that reaches the engine's create wants exactly one create line in the log,
+	// "docker create --name " + FOLDER + " " + REF + " /rollproof", FOLDER the one folder
+	// rollproof-action-… under RUNNER_TEMP; a row that fails before it wants none.
 	//   "not Linux": a fake uname that prints "Darwin"; the log stays empty.
+	//   "a uname that fails": a fake uname that exits 1; the log stays empty.
 	//   "no engine": no fake engine.
 	//   "no image": ROLLPROOF_ACTION_IMAGE, ROLLPROOF_ACTION_REPOSITORY and ROLLPROOF_ACTION_DIGEST
 	//     empty; the log holds "docker -v" only.
@@ -151,8 +160,10 @@ func TestTheScriptFailsWithExit2AndWritesNoOutput(t *testing.T) {
 	//   "a binary that cannot start": export gives toolTar("rollproof", 0o755, CONTENT), CONTENT the
 	//     seven bytes "\x7fELF\x02\x01\x01" and 57 zero bytes, which execve refuses as a file of the
 	//     wrong format. (A file that is missing or not executable never reaches the exec: take_binary
-	//     stops it. So this row passes with or without the script's "set +e"; decision 17 says why
-	//     the line is there all the same.)
+	//     stops it. A file of the wrong format does, and execve refuses it. Under execfail and the
+	//     script's "set +e" the line after the exec then fails as the other failures do; without
+	//     "set +e", bash 5.3.20 ends the script itself at the failed exec with its own code 126
+	//     (tried on 2026-11-22), so this row fails too when the line is taken out (decision 17).)
 }
 
 func TestActionYAML(t *testing.T) {
@@ -246,7 +257,8 @@ runs:
 # digest, takes the binary out of it, and starts it with exec, in the workspace, so that the tool
 # is the step's first process and gets the runner's signals (design, sections 8 and 14, point 20).
 # It never writes an output: when it fails itself, it says why on standard error and exits 2, and
-# the step's verdict stays empty. Sourced, it only defines its functions.
+# the step's verdict stays empty. Sourced, it sets its shell options and defines its functions, and
+# does not run main.
 #
 # Its input is the environment that action.yml's step gives it:
 #   ROLLPROOF_ACTION_CONFIG      the input config
@@ -320,9 +332,11 @@ image_ref() {
 # creates a container that never starts, with /rollproof as its command for an engine that wants
 # one, exports its file system as a tar, keeps the one file rollproof, and removes the container.
 # The route is export and tar because rootless nerdctl refuses cp from a container that never ran.
+# The container carries the base name of dir, which begins rollproof-action- and is new for each
+# run, so that a container left by a cancel between create and rm is known as the project's.
 take_binary() {
   local engine=$1 ref=$2 dir=$3 id
-  id=$("$engine" create "$ref" /rollproof) || fail "$engine could not create a container from $ref"
+  id=$("$engine" create --name "${dir##*/}" "$ref" /rollproof) || fail "$engine could not create a container from $ref"
   if ! "$engine" export "$id" | tar -x -C "$dir" -f - rollproof; then
     "$engine" rm "$id" >/dev/null 2>&1 || true
     fail "the binary /rollproof could not be taken out of $ref"
@@ -336,7 +350,7 @@ take_binary() {
 # its own variables unset.
 main() {
   local system engine ref dir temp=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
-  system=$(uname -s)
+  system=$(uname -s) || fail "uname -s failed, so the runner's system is not known; the action runs only on Linux"
   [[ $system == Linux ]] || fail "the runner is not Linux (uname -s printed $system); the action runs only on Linux"
   engine=$(pick_engine) || fail "no container engine that kind supports: KIND_EXPERIMENTAL_PROVIDER names none, and none of docker, nerdctl and podman answers -v"
   ref=$(image_ref) || exit 2
