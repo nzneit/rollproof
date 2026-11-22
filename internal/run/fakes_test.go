@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -135,6 +136,8 @@ type world struct {
 	// onStdout, when set, is called after each write to the run's standard output, with what was
 	// written.
 	onStdout func(p []byte)
+	// env is the run's environment: what Options.Getenv gives. A name it does not hold is empty.
+	env map[string]string
 }
 
 // hookedWriter writes to w and then calls after with what was written.
@@ -391,10 +394,11 @@ func (f *fakeWatcher) Finishes() <-chan watch.Finish { return f.finishes }
 // PodEvents gives the scripted pod events.
 func (f *fakeWatcher) PodEvents() []watch.PodEvent { return f.podEvents }
 
-// WriteEvents keeps the call log, then, with eventsPanic, panics; with eventsWait, waits until
+// WriteEvents keeps the call log and runs the hook "write-events", then, with eventsPanic, panics; with eventsWait, waits until
 // ctx ends and returns its error; otherwise it writes the scripted events and returns eventsErr.
 func (f *fakeWatcher) WriteEvents(ctx context.Context, w io.Writer) error {
 	f.eventsCalls = f.w.calls.list()
+	f.w.hook("write-events")
 	if f.eventsPanic {
 		panic("the event list broke")
 	}
@@ -671,7 +675,98 @@ func (w *world) run(ctx context.Context) int {
 	}
 	return Run(ctx, Options{ConfigPath: filepath.Join(w.cfg.Dir, "rollproof.yaml"), Out: w.out,
 		KeepCluster: w.keep, Stdout: stdout, Stderr: &w.stderr, Version: "test",
-		Getenv: func(string) string { return "" }}, w.units())
+		Getenv: func(k string) string { return w.env[k] }}, w.units())
+}
+
+// gitHubFiles makes two empty files, output and summary, in a folder of their own, names them to the
+// run as GITHUB_OUTPUT and GITHUB_STEP_SUMMARY with GITHUB_ACTIONS true, and returns their paths.
+func (w *world) gitHubFiles(t *testing.T) (output, summary string) {
+	t.Helper()
+	dir := t.TempDir()
+	output, summary = filepath.Join(dir, "output"), filepath.Join(dir, "summary")
+	for _, path := range []string{output, summary} {
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if w.env == nil {
+		w.env = map[string]string{}
+	}
+	w.env["GITHUB_ACTIONS"] = "true"
+	w.env["GITHUB_OUTPUT"] = output
+	w.env["GITHUB_STEP_SUMMARY"] = summary
+	return output, summary
+}
+
+// readOutputs reads the outputs file at path, in the delimiter form and in the plain form
+// NAME=VALUE, and returns each name's values in the order they were written. A line that is
+// neither fails the test.
+func readOutputs(t *testing.T, path string) map[string][]string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outs := map[string][]string{}
+	lines := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	if len(b) == 0 {
+		lines = nil
+	}
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		if name, delimiter, ok := strings.Cut(line, "<<"); ok && name != "" && delimiter != "" {
+			var value []string
+			closed := false
+			for i++; i < len(lines); i++ {
+				if lines[i] == delimiter {
+					closed = true
+					break
+				}
+				value = append(value, lines[i])
+			}
+			if !closed {
+				t.Fatalf("the output %s in %s has no closing delimiter %q:\n%s", name, path, delimiter, b)
+			}
+			outs[name] = append(outs[name], strings.Join(value, "\n"))
+			continue
+		}
+		if name, value, ok := strings.Cut(line, "="); ok && name != "" {
+			outs[name] = append(outs[name], value)
+			continue
+		}
+		t.Fatalf("line %q of %s is no output:\n%s", line, path, b)
+	}
+	return outs
+}
+
+// gitHubRecorder stands for GitHub's files: it adds each write to the world's call log, as
+// "outputs NAMES FINALNESS" (the names joined by commas) or "summary FINALNESS", FINALNESS being
+// "final" when result.json was final at that moment and "not final" otherwise.
+type gitHubRecorder struct{ w *world }
+
+// WriteOutputs adds "outputs NAMES FINALNESS" to the call log.
+func (g *gitHubRecorder) WriteOutputs(outs ...report.Output) error {
+	names := make([]string, 0, len(outs))
+	for _, o := range outs {
+		names = append(names, o.Name)
+	}
+	g.w.calls.add("outputs " + strings.Join(names, ",") + " " + g.finalness())
+	return nil
+}
+
+// AppendSummary adds "summary FINALNESS" to the call log.
+func (g *gitHubRecorder) AppendSummary(text string) error {
+	g.w.calls.add("summary " + g.finalness())
+	return nil
+}
+
+// finalness is "final" when result.json is final now, and "not final" otherwise, a file that
+// cannot be read among them.
+func (g *gitHubRecorder) finalness() string {
+	if r, err := g.w.readResult(); err == nil && r.Final {
+		return "final"
+	}
+	return "not final"
 }
 
 // hook runs hooks[name] when it is set.

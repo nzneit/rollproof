@@ -793,6 +793,9 @@ const (
 	fakeWaits   = "waits"   // prints started, waits until its context ends, prints returned and returns 2
 	fakeLingers = "lingers" // prints started, prints cancelled when its context ends, waits 30 s and prints returned
 	fakeFails   = "fails"   // prints fakeFailsLine and returns 1 at once
+	// prints started, waits until its context ends, prints returned and returns 1, the code of a
+	// decided fail whose final result.json could not be written
+	fakeRefusedFail = "refused-fail"
 )
 
 // fakeFailsLine is the line that the fails fake prints before it returns 1, so
@@ -850,6 +853,15 @@ func TestHelperProcess(t *testing.T) {
 			return 2
 		case fakeFails:
 			fmt.Fprintln(o.Stdout, fakeFailsLine)
+			return 1
+		case fakeRefusedFail:
+			fmt.Fprintln(o.Stdout, "started")
+			select {
+			case <-ctx.Done():
+			case <-orphaned:
+				return 3
+			}
+			fmt.Fprintln(o.Stdout, "returned")
 			return 1
 		}
 		fmt.Fprintf(o.Stderr, "no fake run is named %q\n", fake)
@@ -984,6 +996,21 @@ func TestASignalEndsTheToolByIt(t *testing.T) {
 				t.Errorf("the process ended before the run returned%s", c.output())
 			}
 		})
+	}
+}
+
+// After a signal, the process ends by it also when the run returned 1, as a run does whose final
+// result.json could not be written after a fail was decided (section 8; section 10, "On a signal").
+func TestASignalEndsTheToolByItAfterARefusedWrite(t *testing.T) {
+	c := startChild(t, fakeRefusedFail)
+	c.waitFor(t, "started")
+	c.signal(t, syscall.SIGTERM)
+	ws := c.wait(t, 10*time.Second)
+	if !ws.Signaled() || ws.Signal() != syscall.SIGTERM {
+		t.Errorf("the child ended %s, want by %s%s", ending(ws), syscall.SIGTERM, c.output())
+	}
+	if !strings.Contains(c.stdout.String(), "returned\n") {
+		t.Errorf("the process ended before the run returned%s", c.output())
 	}
 }
 

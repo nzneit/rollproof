@@ -1057,8 +1057,8 @@ func TestWarningAtTheWatchersStop(t *testing.T) {
 }
 
 // Rule 10: a pod log's evidence write that fails after the last result.json was written and the
-// console printed, and before the clean-up begins, is a warning in result.json and on the console,
-// told once.
+// console printed, and before the evidence is completed and the clean-up begins, is a warning in
+// result.json and on the console, told once.
 func TestWarningBetweenTheConsoleAndTheCleanUp(t *testing.T) {
 	w := newWorld(t)
 	var podLog io.WriteCloser
@@ -3098,7 +3098,7 @@ func formsOf(t *testing.T, user, pw string) map[string]string {
 }
 
 // Every password of registries is masked, in each of its forms, in every file of the results
-// folder, on the console and on standard error. It is planted in every input: each evidence
+// folder, on the console, on standard error and in GitHub's two files. It is planted in every input: each evidence
 // writer of step 4, a command's argument line and output, a pod's log split across two writes,
 // the probe's raw lines, the events and a warning (section 12, "Masking"; decisions 2 and 3).
 func TestPasswordsAreMaskedEverywhere(t *testing.T) {
@@ -3143,6 +3143,7 @@ func TestPasswordsAreMaskedEverywhere(t *testing.T) {
 	w.cluster.rawText = "line " + pw1 + "\n"
 	w.watcher.events = "event " + pw2 + "\n"
 	w.cluster.deleteErr = errors.New("the engine said " + pw1)
+	output, summary := w.gitHubFiles(t)
 	if code := w.run(context.Background()); code != 0 {
 		t.Fatalf("exit %d, want 0", code)
 	}
@@ -3154,7 +3155,8 @@ func TestPasswordsAreMaskedEverywhere(t *testing.T) {
 	for name, f := range formsOf(t, "ci2", pw2) {
 		forms["pw2's "+name] = f
 	}
-	texts := map[string]string{"stdout": w.stdout.String(), "stderr": w.stderr.String()}
+	texts := map[string]string{"stdout": w.stdout.String(), "stderr": w.stderr.String(),
+		"GITHUB_OUTPUT": readFile(t, output), "GITHUB_STEP_SUMMARY": readFile(t, summary)}
 	err = filepath.WalkDir(w.out, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
@@ -3187,6 +3189,9 @@ func TestPasswordsAreMaskedEverywhere(t *testing.T) {
 	}
 	if diff := cmp.Diff([]string{"the cluster was not deleted: the engine said ***"}, r.Warnings); diff != "" {
 		t.Errorf("warnings (-want +got):\n%s", diff)
+	}
+	if !strings.Contains(texts["GITHUB_STEP_SUMMARY"], "warning: the cluster was not deleted: the engine said ***") {
+		t.Errorf("the summary does not hold the masked warning:\n%s", texts["GITHUB_STEP_SUMMARY"])
 	}
 	names := []string{"probe.log", "events.txt"}
 	for _, p := range planted {
@@ -3425,5 +3430,329 @@ func TestARefusedFinalWriteClosesTheProbeLog(t *testing.T) {
 				t.Errorf("probe.log is %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// readFile reads the file at path and fails the test when it cannot.
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// The outputs are written at two moments: with the first result.json, the results folder and
+// verdict as not verified; and with the final one, the verdict (section 8; decision 2).
+func TestTheOutputsAtBothMoments(t *testing.T) {
+	w := newWorld(t)
+	output, _ := w.gitHubFiles(t)
+	var atLoad map[string][]string
+	w.hooks["load"] = func() { atLoad = readOutputs(t, output) }
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	if diff := cmp.Diff(map[string][]string{"out": {w.out}, "verdict": {"not-verified"}}, atLoad); diff != "" {
+		t.Errorf("the outputs at Load (-want +got):\n%s", diff)
+	}
+	want := map[string][]string{"out": {w.out}, "verdict": {"not-verified", "pass"}}
+	if diff := cmp.Diff(want, readOutputs(t, output)); diff != "" {
+		t.Errorf("the outputs after the run (-want +got):\n%s", diff)
+	}
+}
+
+// verdict says the verdict that the exit code gives, after each ending of a run, a signal and a
+// final result.json that cannot be written among them (section 8).
+func TestWhatVerdictSaysAfterEachEnding(t *testing.T) {
+	removeOut := func(t *testing.T, w *world) {
+		w.hooks["end-commands"] = func() {
+			if err := os.RemoveAll(w.out); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	signalAfterDeployFailed := func(w *world, cancel context.CancelFunc) {
+		w.probe.events = append(w.probe.events, failureAt(12*time.Second, 12*time.Second))
+		w.hooks["transition-deploy"] = func() {
+			w.clock.Advance(20 * time.Second)
+			cancel()
+		}
+	}
+	rows := []struct {
+		name     string
+		setUp    func(t *testing.T, w *world, cancel context.CancelFunc)
+		code     int
+		verdicts []string
+		summary  bool
+		refused  bool
+	}{
+		{"a pass", func(t *testing.T, w *world, cancel context.CancelFunc) {},
+			0, []string{"not-verified", "pass"}, true, false},
+		{"a fail", func(t *testing.T, w *world, cancel context.CancelFunc) {
+			w.probe.events = append(w.probe.events, failureAt(20*time.Second, 20*time.Second))
+		}, 1, []string{"not-verified", "fail"}, true, false},
+		{"not verified", func(t *testing.T, w *world, cancel context.CancelFunc) {
+			w.probe.events = append(w.probe.events, failureAt(5*time.Second, 5*time.Second))
+		}, 2, []string{"not-verified", "not-verified"}, true, false},
+		{"a rejected configuration", func(t *testing.T, w *world, cancel context.CancelFunc) {
+			w.loadErr = verdict.Condition{Code: verdict.ConfigRejected, Text: "version: must be 1"}
+		}, 2, []string{"not-verified", "not-verified"}, true, false},
+		{"a signal during the deploy", func(t *testing.T, w *world, cancel context.CancelFunc) {
+			w.deployer.results["deploy"] = deploy.Result{Ending: deploy.StoppedBySignal, ExitCode: -1}
+			w.hooks["transition-deploy"] = func() {
+				w.clock.Advance(5 * time.Second)
+				cancel()
+			}
+		}, 2, []string{"not-verified", "not-verified"}, true, false},
+		{"a signal after the deploy failed", func(t *testing.T, w *world, cancel context.CancelFunc) {
+			signalAfterDeployFailed(w, cancel)
+		}, 1, []string{"not-verified", "fail"}, true, false},
+		{"a refused final write after a fail", func(t *testing.T, w *world, cancel context.CancelFunc) {
+			w.probe.events = append(w.probe.events, failureAt(20*time.Second, 20*time.Second))
+			removeOut(t, w)
+		}, 1, []string{"not-verified", "fail"}, false, true},
+		{"a refused final write, no fail", func(t *testing.T, w *world, cancel context.CancelFunc) {
+			removeOut(t, w)
+		}, 2, []string{"not-verified", "not-verified"}, false, true},
+		{"a signal and a refused final write after a fail", func(t *testing.T, w *world, cancel context.CancelFunc) {
+			signalAfterDeployFailed(w, cancel)
+			removeOut(t, w)
+		}, 1, []string{"not-verified", "fail"}, false, true},
+		{"a failure of the tool", func(t *testing.T, w *world, cancel context.CancelFunc) {
+			w.hooks["deployer"] = func() { panic("the deployer broke") }
+		}, 2, []string{"not-verified", "not-verified"}, true, false},
+		{"a results folder that cannot be opened", func(t *testing.T, w *world, cancel context.CancelFunc) {
+			w.out = filepath.Join(t.TempDir(), "a-file")
+			if err := os.WriteFile(w.out, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, 2, nil, false, false},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			w := newWorld(t)
+			output, summary := w.gitHubFiles(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			row.setUp(t, w, cancel)
+			// After a signal Run returns the code of the verdict, and the process then ends by the
+			// signal (TestASignalEndsTheToolByItAfterARefusedWrite).
+			if code := w.run(ctx); code != row.code {
+				t.Errorf("exit %d, want %d\n%s", code, row.code, w.stdout.String())
+			}
+			if diff := cmp.Diff(row.verdicts, readOutputs(t, output)["verdict"]); diff != "" {
+				t.Errorf("verdict's values (-want +got):\n%s", diff)
+			}
+			text := readFile(t, summary)
+			if row.summary && !strings.HasPrefix(text, "### rollproof: ") {
+				t.Errorf("the summary file holds no summary:\n%s", text)
+			}
+			if !row.summary && text != "" {
+				t.Errorf("the summary file is not empty:\n%s", text)
+			}
+			if row.refused && w.stdout.Len() != 0 {
+				t.Errorf("stdout is %q, want empty: the final file was not written", w.stdout.String())
+			}
+		})
+	}
+}
+
+// Nothing is written for GitHub unless GITHUB_ACTIONS is true, and each file only when its
+// variable names one (section 8).
+func TestNothingIsWrittenForGitHubWithoutItsVariables(t *testing.T) {
+	// Each row names the variables set; wantOutputs and wantSummary say which file is written, and
+	// the other stays empty.
+	rows := []struct {
+		name                     string
+		actions, output, summary bool
+		wantOutputs, wantSummary bool
+	}{
+		{"GITHUB_ACTIONS is not set", false, true, true, false, false},
+		{"GITHUB_OUTPUT only", true, true, false, true, false},
+		{"GITHUB_STEP_SUMMARY only", true, false, true, false, true},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			w := newWorld(t)
+			dir := t.TempDir()
+			output, summary := filepath.Join(dir, "output"), filepath.Join(dir, "summary")
+			for _, path := range []string{output, summary} {
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w.env = map[string]string{}
+			if row.actions {
+				w.env["GITHUB_ACTIONS"] = "true"
+			}
+			if row.output {
+				w.env["GITHUB_OUTPUT"] = output
+			}
+			if row.summary {
+				w.env["GITHUB_STEP_SUMMARY"] = summary
+			}
+			if code := w.run(context.Background()); code != 0 {
+				t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+			}
+			if row.wantOutputs {
+				want := map[string][]string{"out": {w.out}, "verdict": {"not-verified", "pass"}}
+				if diff := cmp.Diff(want, readOutputs(t, output)); diff != "" {
+					t.Errorf("the outputs (-want +got):\n%s", diff)
+				}
+			} else if text := readFile(t, output); text != "" {
+				t.Errorf("the outputs file is not empty:\n%s", text)
+			}
+			text := readFile(t, summary)
+			if row.wantSummary && !strings.HasPrefix(text, "### rollproof: PASS") {
+				t.Errorf("the summary begins %q, want %q", text, "### rollproof: PASS")
+			}
+			if !row.wantSummary && text != "" {
+				t.Errorf("the summary file is not empty:\n%s", text)
+			}
+		})
+	}
+}
+
+// Review Focus 1: a GitHub file that cannot be written is a warning, once in a run for each file,
+// and changes no verdict (section 10, rule 10; decision 3).
+func TestAGitHubFileThatCannotBeWrittenIsAWarning(t *testing.T) {
+	w := newWorld(t)
+	output := filepath.Join(t.TempDir(), "no-such-file")
+	w.env = map[string]string{"GITHUB_ACTIONS": "true", "GITHUB_OUTPUT": output, "GITHUB_STEP_SUMMARY": t.TempDir()}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	r := w.result()
+	if r.Verdict != "pass" {
+		t.Errorf("verdict %q, want pass", r.Verdict)
+	}
+	if len(r.Warnings) != 2 || !strings.HasPrefix(r.Warnings[0], "the step's outputs were not written: ") ||
+		!strings.HasPrefix(r.Warnings[1], "the job summary was not written: ") {
+		t.Errorf("warnings %q, want the outputs' and then the summary's", r.Warnings)
+	}
+	for _, prefix := range []string{"the step's outputs were not written: ", "the job summary was not written: "} {
+		if n := strings.Count(w.stdout.String(), prefix); n != 1 {
+			t.Errorf("stdout holds %q %d times, want once:\n%s", prefix, n, w.stdout.String())
+		}
+	}
+	if _, err := os.Lstat(output); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the outputs' path: %v, want it still not there", err)
+	}
+}
+
+// The summary is appended to the step's summary file once, after what an earlier step wrote.
+func TestTheSummaryIsAppendedOnce(t *testing.T) {
+	w := newWorld(t)
+	_, summary := w.gitHubFiles(t)
+	if err := os.WriteFile(summary, []byte("earlier step\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	text := readFile(t, summary)
+	if !strings.HasPrefix(text, "earlier step\n### rollproof: PASS") {
+		t.Errorf("the summary file begins %q, want the earlier step's line and then the summary", text)
+	}
+	if n := strings.Count(text, "### rollproof"); n != 1 {
+		t.Errorf("the summary file holds %d summaries, want 1:\n%s", n, text)
+	}
+	// The fence is three backticks because no line of that block holds a backtick: w.out is a path
+	// the test made.
+	if want := "results: " + w.out + "\n```\n"; !strings.HasSuffix(text, want) {
+		t.Errorf("the summary file ends %q, want %q", text, want)
+	}
+}
+
+// A warning that arises after the summary was written is appended to it as a line, as it is
+// printed after the console (section 10; decision 6).
+func TestALateWarningIsALineOfTheSummary(t *testing.T) {
+	w := newWorld(t)
+	_, summary := w.gitHubFiles(t)
+	w.watcher.eventsErr = errors.New("the list broke")
+	w.cluster.deleteErr = errors.New("the engine did not answer")
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	const events = "the events were not written: the list broke"
+	const deleted = "the cluster was not deleted: the engine did not answer"
+	want := "\n```\nwarning: " + events + "\n```\n" + "\n```\nwarning: " + deleted + "\n```\n"
+	if text := readFile(t, summary); !strings.HasSuffix(text, want) {
+		t.Errorf("the summary ends %q, want %q", text, want)
+	}
+	lines := strings.Split(strings.TrimSuffix(w.stdout.String(), "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("stdout has %d lines:\n%s", len(lines), w.stdout.String())
+	}
+	if diff := cmp.Diff([]string{"warning: " + events, "warning: " + deleted}, lines[len(lines)-2:]); diff != "" {
+		t.Errorf("stdout's last two lines (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{events, deleted}, w.result().Warnings); diff != "" {
+		t.Errorf("result.json's warnings (-want +got):\n%s", diff)
+	}
+}
+
+// The final result.json, the second verdict, the summary and the console come before the
+// evidence is completed, so that a run that is cancelled on GitHub has them (section 10;
+// decision 6).
+func TestTheResultsComeBeforeTheEvidence(t *testing.T) {
+	w := newWorld(t)
+	was := gitHubOf
+	gitHubOf = func(func(string) string) gitHubFiles { return &gitHubRecorder{w} }
+	defer func() { gitHubOf = was }()
+	told := false
+	w.onStdout = func(p []byte) {
+		if !told && bytes.Contains(p, []byte("results: ")) {
+			told = true
+			w.calls.add("console")
+		}
+	}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	calls := w.calls.list()
+	first, load := slices.Index(calls, "outputs out,verdict not final"), slices.Index(calls, "load")
+	if first < 0 || load < 0 || first > load {
+		t.Errorf("the first outputs at %d and load at %d, want the outputs first: %q", first, load, calls)
+	}
+	i := slices.Index(calls, "outputs verdict final")
+	want := []string{"outputs verdict final", "summary final", "console"}
+	if i < 0 || i+len(want) > len(calls) || !slices.Equal(calls[i:i+len(want)], want) {
+		t.Errorf("the call log is %q, want %q in a row", calls, want)
+	}
+	if ev := w.watcher.eventsCalls; len(ev) == 0 || ev[len(ev)-1] != "console" {
+		t.Errorf("the events were listed after %q, want right after the console", ev)
+	}
+}
+
+// A warning after a refused final write is a line of its own, and result.json is not written
+// again: the file, the step's output and the exit code say the same (decision 6).
+func TestAWarningAfterARefusedFinalWriteWritesNoFinalFile(t *testing.T) {
+	w := newWorld(t)
+	output, _ := w.gitHubFiles(t)
+	w.hooks["end-commands"] = func() {
+		if err := os.RemoveAll(w.out); err != nil {
+			t.Error(err)
+		}
+	}
+	w.hooks["delete"] = func() {
+		if err := os.MkdirAll(w.out, 0o700); err != nil {
+			t.Error(err)
+		}
+	}
+	w.cluster.deleteErr = errors.New("the engine did not answer")
+	if code := w.run(context.Background()); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	const line = "warning: the cluster was not deleted: the engine did not answer"
+	if !slices.Contains(strings.Split(w.stdout.String(), "\n"), line) {
+		t.Errorf("stdout has no line %q:\n%s", line, w.stdout.String())
+	}
+	if diff := cmp.Diff([]string{"not-verified", "not-verified"}, readOutputs(t, output)["verdict"]); diff != "" {
+		t.Errorf("verdict's values (-want +got):\n%s", diff)
+	}
+	if r, err := w.readResult(); err == nil && r.Final {
+		t.Errorf("w.out holds a final result.json, verdict %q: the refused write was tried again", r.Verdict)
 	}
 }

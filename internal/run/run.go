@@ -138,6 +138,12 @@ func Run(ctx context.Context, o Options, u Units) int {
 		return 2
 	}
 	s.w = w
+	if o.Getenv != nil {
+		s.gh = gitHubOf(o.Getenv)
+	}
+	// The first moment of the outputs (section 8): the results folder, and verdict as not verified,
+	// with the first result.json, so that a run that is killed leaves an answer.
+	s.writeOutputs(report.Output{Name: "out", Value: w.Dir()}, report.Output{Name: "verdict", Value: string(verdict.NotVerified)})
 	s.ev = &evidence{files: w.Evidence, warn: s.warnings.add}
 	s.marks = newMarks(w.ReplaceEvidence, s.warnings.add)
 	// The follower of the finishes never outlives the run, whichever way it ended; after
@@ -185,6 +191,23 @@ type writer interface {
 	SetMasker(m *mask.Masker)
 }
 
+// gitHubFiles is what a run asks of GitHub's files: the step's outputs and its job summary.
+// report.GitHub is the real one.
+type gitHubFiles interface {
+	WriteOutputs(outs ...report.Output) error
+	AppendSummary(text string) error
+}
+
+// gitHubOf gives the run's GitHub files from the environment. A test replaces it,
+// to see the moment of each write.
+var gitHubOf = func(getenv func(string) string) gitHubFiles { return report.GitHubFrom(getenv) }
+
+// The two warnings of a GitHub file that cannot be written (decision 3).
+const (
+	outputsNotWritten = "the step's outputs were not written: "
+	summaryNotWritten = "the job summary was not written: "
+)
+
 // runState is everything one run knows: the units it has, what each returned,
 // and the timeline of its windows. Only the goroutine that reads the probe's
 // events, from just before the probe starts, the goroutine of a command, and
@@ -196,6 +219,7 @@ type runState struct {
 	ctx      context.Context // derived from parent and cancelled when the run ends
 	cancel   context.CancelFunc
 	w        writer
+	gh       gitHubFiles // the step's outputs and job summary; nil writes nothing
 	ev       *evidence
 	marks    *marks // windows.json: set at each change of a window's start or end
 	warnings *warnings
@@ -236,9 +260,14 @@ type runState struct {
 	// finalWritten says that the final result.json is in place, so that a warning raised after it
 	// is printed and written again (lateWarnings).
 	finalWritten bool
-	// warningsWritten is how many of the run's warnings the last result.json written holds; the
-	// console prints that same record, so these are the warnings already told.
+	// warningsWritten is how many of the run's warnings the last result.json written holds.
 	warningsWritten int
+	// warningsTold is how many of the run's warnings the console and the job summary have told;
+	// warningsWritten is how many the last result.json holds.
+	warningsTold int
+	// outputsWarned and summaryWarned say that a failed write of that GitHub file was warned of
+	// already: each warns once in a run (decision 3).
+	outputsWarned, summaryWarned bool
 }
 
 // sequence performs steps 1 to 13 and returns the value of a panic, if one
@@ -979,13 +1008,14 @@ func (s *runState) toolFailed(caught any) {
 	s.decide(true)
 }
 
-// finish performs steps 14 to 16: the final result.json, the evidence completed
-// (and result.json written again when that added a warning), the console text,
-// the clean-up and the exit code. A panic here after the final
-// file was written is a warning: the verdict was decided already. A panic
-// before it is the refused write, which still closes probe.log. The clean-up
-// runs on every path, so that a report that cannot be written does not leave a
-// cluster behind.
+// finish performs steps 14 to 16 in the order section 10 gives: the final result.json, the second
+// verdict of the outputs, the job summary and the console's text, all from one record; then the
+// evidence completed, and the warnings that this added told as lines of the console and of the
+// summary, with result.json written again; then the clean-up and the exit code. A refused final
+// write, returned or panicked, prints no console and writes no summary, and the outputs still say
+// the verdict that the exit code gives (section 8). A panic after the final file was written is a
+// warning: the verdict was decided already. The clean-up runs on every path, so that a report that
+// cannot be written does not leave a cluster behind.
 func (s *runState) finish() (code int) {
 	refused := false
 	written := false // the final result.json is in place
@@ -1005,51 +1035,74 @@ func (s *runState) finish() (code int) {
 			return
 		}
 		// A panic before the final file was written leaves the first file, which says that the run
-		// did not finish. That is the refused write (section 8): exit 1 only for a decided fail.
+		// did not finish. That is the refused write (section 8).
 		refused = true
 		s.println(s.o.Stderr, "rollproof: cannot write results: "+panicText(p))
-		if s.decision.Verdict == verdict.Fail {
-			code = 1
-		} else {
-			code = 2
-		}
+		code = s.refusedWrite()
 	}()
-	// A refused final write, returned or panicked, comes before completeEvidence, which closes
-	// probe.log: it is closed here then, so that its held-back tail reaches the file all the same.
-	// On every other path completeEvidence has closed it, and this does nothing.
+	// A refused final write comes before completeEvidence, which closes probe.log: it is closed
+	// here then, so that its held-back tail reaches the file all the same.
 	defer s.closeProbeLog()
 	rec, n := s.recordAndWarnings()
 	if err := s.writeFinal(rec, n); err != nil {
-		// The decided verdict keeps its exit code (section 8): a window that had
-		// already failed is a fail, and everything else is not verified, because a
-		// pass whose result.json could not be written cannot be vouched for. The
-		// console is not printed: it would claim more than the folder holds.
+		// The console is not printed and the summary not written: they would claim more than the
+		// folder holds.
 		refused = true
 		s.println(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
-		if s.decision.Verdict == verdict.Fail {
-			return 1
-		}
-		return 2
+		return s.refusedWrite()
 	}
 	written = true
 	s.finalWritten = true
+	s.writeOutputs(report.Output{Name: "verdict", Value: rec.Verdict})
+	masked := report.Mask(rec, s.mask)
+	s.appendSummary(report.Summary(masked))
+	fmt.Fprint(s.o.Stdout, report.Console(masked))
+	s.warningsTold = n
 	s.completeEvidence()
-	if len(s.warnings.all()) != s.warningsWritten {
-		next, n := s.recordAndWarnings()
-		if err := s.writeFinal(next, n); err != nil {
-			s.println(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
-		} else {
-			rec = next
-		}
-	}
-	// The console prints the record last written, so that lateWarnings tells every warning that
-	// came after it, masked as result.json is.
-	fmt.Fprint(s.o.Stdout, report.Console(report.Mask(rec, s.mask)))
+	s.lateWarnings()
 	return s.decision.Verdict.ExitCode()
 }
 
+// refusedWrite gives the exit code of a run whose final result.json could not be written, 1 for a
+// fail that was already decided and 2 otherwise, and writes the verdict that code stands for as the
+// step's output: fail or not-verified (section 8). A pass whose result.json could not be written
+// cannot be vouched for.
+func (s *runState) refusedWrite() int {
+	if s.decision.Verdict == verdict.Fail {
+		s.writeOutputs(report.Output{Name: "verdict", Value: string(verdict.Fail)})
+		return 1
+	}
+	s.writeOutputs(report.Output{Name: "verdict", Value: string(verdict.NotVerified)})
+	return 2
+}
+
+// writeOutputs appends outs to the step's outputs through s.gh. A write that fails is a warning,
+// outputsNotWritten and its error, once in a run: later failures add none.
+func (s *runState) writeOutputs(outs ...report.Output) {
+	if s.gh == nil {
+		return
+	}
+	if err := s.gh.WriteOutputs(outs...); err != nil && !s.outputsWarned {
+		s.outputsWarned = true
+		s.warnings.add(outputsNotWritten + err.Error())
+	}
+}
+
+// appendSummary appends text to the step's job summary through s.gh. A write that fails is a
+// warning, summaryNotWritten and its error, once in a run: later failures add none, so that a
+// summary that cannot be written does not warn again for each warning appended to it.
+func (s *runState) appendSummary(text string) {
+	if s.gh == nil {
+		return
+	}
+	if err := s.gh.AppendSummary(text); err != nil && !s.summaryWarned {
+		s.summaryWarned = true
+		s.warnings.add(summaryNotWritten + err.Error())
+	}
+}
+
 // writeFinal writes rec, which holds the first n of the run's warnings, as the final result.json,
-// and when that worked keeps n as the warnings told.
+// and when that worked keeps n as the warnings written.
 func (s *runState) writeFinal(rec report.Run, n int) error {
 	if err := s.w.Final(rec); err != nil {
 		return err
@@ -1121,7 +1174,7 @@ func (s *runState) cleanUpQuietly() {
 }
 
 // cleanUp performs step 15: the watcher is stopped, the warnings raised since
-// the last result.json are told, the cluster is deleted unless it was asked
+// they were last told are told, the cluster is deleted unless it was asked
 // for or a signal ended the run, and an error is a warning.
 func (s *runState) cleanUp() {
 	if s.watcher != nil {
@@ -1170,31 +1223,46 @@ func (s *runState) signalAfterTheVerdict() {
 	s.warnAfterConsole(afterText)
 }
 
-// warnAfterConsole adds a warning that arose once the console text was
-// printed, prints its line, and replaces result.json with it. A failure of that
-// second write is not allowed to escape: it would panic inside a deferred
-// function.
+// warnAfterConsole adds a warning that arose once the console text was printed, and tells it as
+// lateWarnings tells one. When the final result.json was refused, so that no console was printed
+// and no summary written, it prints the warning as a line of its own and does not write
+// result.json again: the first result.json, which says that the run did not finish, stays, so
+// that the file, the step's output and the exit code say the same.
 func (s *runState) warnAfterConsole(text string) {
 	s.warnings.add(text)
-	s.println(s.o.Stdout, "warning: "+text)
-	s.rewriteFinal()
-}
-
-// lateWarnings prints the warnings that came after the last result.json written, whose record the
-// console printed, and replaces result.json with them, as warnAfterConsole does. The watcher's
-// pod-log followers write and close their evidence files until its Stop, which comes after the
-// console was printed, and a failed write or close is a warning then (rule 10). It does nothing
-// when no warning came, or when the final result.json was never written: that write was refused,
-// the console was not printed, and the exit code says so.
-func (s *runState) lateWarnings() {
-	all := s.warnings.all()
-	if !s.finalWritten || len(all) <= s.warningsWritten {
+	if s.finalWritten {
+		s.lateWarnings()
 		return
 	}
-	for _, text := range all[s.warningsWritten:] {
-		s.println(s.o.Stdout, "warning: "+text)
+	s.println(s.o.Stdout, "warning: "+text)
+}
+
+// lateWarnings tells the warnings that came after the console was printed: each as a line
+// "warning: TEXT" of the console and, masked, as a line of the job summary, in order; and then
+// writes result.json again, once, with all of them. A warning that arises while it tells them,
+// such as that the summary could not be written, is told in the same call. It does nothing when
+// the final result.json was never written: that write was refused, the console was not printed,
+// and the exit code says so.
+func (s *runState) lateWarnings() {
+	if !s.finalWritten {
+		return
 	}
-	s.rewriteFinal()
+	told := false
+	for {
+		all := s.warnings.all()
+		if len(all) <= s.warningsTold {
+			break
+		}
+		for _, text := range all[s.warningsTold:] {
+			s.println(s.o.Stdout, "warning: "+text)
+			s.appendSummary(report.SummaryLine("warning: " + s.mask.String(text)))
+		}
+		s.warningsTold = len(all)
+		told = true
+	}
+	if told {
+		s.rewriteFinal()
+	}
 }
 
 // rewriteFinal writes result.json again with the run's record. A failure is printed and is not
