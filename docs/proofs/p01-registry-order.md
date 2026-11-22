@@ -292,6 +292,37 @@ For `rollproof.test`, the tool writes the form of case e, with the run's registr
 
 **The report's lines on images can rest on `imageID`.** `status.containerStatuses[].imageID` is `REPOSITORY@sha256:DIGEST`, where DIGEST is the manifest digest that the push returned. It had this form both when the kubelet pulled the image and when the node already held it. In both pods, REPOSITORY was the repository of the pod's image reference, and each image had only one name on the node. An image held under two names was not tried, and its `imageID` may name the other repository. So the report compares only the digest after the `@` with the digest it recorded, never the whole string. This was measured only with images of one manifest each (an image index was not tried), and with one container in each pod.
 
+## Docker
+
+Run once on 2026-11-22, in run 45014226495 of the workflow `.github/workflows/rollproof-proofs.yml` at commit `cd7bc1f6eb0635c75832de73c47464ed9c026b32`: job `proofs` (job 137182961058), its step "The registry order in the nodes, on Docker", after the p08 record's Docker run in the same job, with the command `go run ./p01-registry-order` from `projects/rollproof/proofs/`. The machine is that run's: GitHub's hosted runner, image `ubuntu-24.04` version 20261116.376.1, Go 1.27.4, rootful Docker (28.0.4 by the image's software list, read; the p08 record says where). The worker gave `crictl version 1.36.0` and `ctr github.com/containerd/containerd/v2 v2.3.4`, and the registries' log `version=3.1.2` and `go.version=go1.26.8`, as on nerdctl.
+
+Cases a to g passed, and the program ended `p01: all checks passed`. Each case asked the same registries for the same paths, apart from the digests, in the same order and with the same answers as run 4 above; the `ok:` lines are the same apart from the digests. What differs:
+
+- `Create` took one attempt, with no retry line:
+
+  ```
+  lab: Create returned after 27.969s; 0 of 2 nodes Ready
+  lab: every node Ready after 39.965s
+  ```
+
+- The five digests differ from the nerdctl runs' (X is `sha256:7436f28c5524875280f89857a28821da3927630cd94beb88010f27b7313fc733`, against `sha256:8ed9d7d8…`); the binaries were built here by Go 1.27.4, there by Go 1.27.3.
+- The addresses: run and real were `172.18.0.4:5000` and `172.18.0.5:5000` on Docker's network `kind`, and the nodes asked `172.18.0.1:53` for names, where nerdctl's asked `10.0.2.3:53`.
+- The pull of the zero digest in case e took longer, because the lookups of `rollproof.test` did. The program's timer, around the exec of `crictl pull` in the node, gave 199 ms, against 56 ms and 92 ms on nerdctl. containerd's journal gives 153.8 ms from `PullImage` to its `failed` line, against about 20 ms; of that, the two failed lookups of `rollproof.test`, each from a `trying next host` line to the next `fetch failed` line, took 106.2 ms (from 10:52:25.070616459 to 10:52:25.176808995) and 44.2 ms (from 10:52:25.177898198 to 10:52:25.222112120), against 2.9 ms and 2.8 ms in run 4's journal above:
+
+  ```
+  info: e-zero: crictl pull rollproof.test/probe/rollproof@sha256:0000000000000000000000000000000000000000000000000000000000000000 failed after 199ms; its output:
+  info: e-zero: containerd: time="2026-11-22T10:52:25.068726173Z" level=info msg="PullImage \"rollproof.test/probe/rollproof@sha256:0000000000000000000000000000000000000000000000000000000000000000\""
+  info: e-zero: containerd: time="2026-11-22T10:52:25.070616459Z" level=info msg="trying next host after status: 404 Not Found" host="172.18.0.4:5000" method=HEAD url="http://172.18.0.4:5000/v2/probe/rollproof/manifests/sha256:0000000000000000000000000000000000000000000000000000000000000000?ns=rollproof.test"
+  info: e-zero: containerd: time="2026-11-22T10:52:25.176808995Z" level=info msg="fetch failed" error="failed to do request: Head \"https://rollproof.test/v2/probe/rollproof/manifests/sha256:0000000000000000000000000000000000000000000000000000000000000000\": dial tcp: lookup rollproof.test on 172.18.0.1:53: no such host" host=rollproof.test method=HEAD url="https://rollproof.test/v2/probe/rollproof/manifests/sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  info: e-zero: containerd: time="2026-11-22T10:52:25.177898198Z" level=info msg="trying next host after status: 404 Not Found" host="172.18.0.4:5000" method=HEAD url="http://172.18.0.4:5000/v2/probe/rollproof/blobs/sha256:0000000000000000000000000000000000000000000000000000000000000000?ns=rollproof.test"
+  info: e-zero: containerd: time="2026-11-22T10:52:25.222112120Z" level=info msg="fetch failed" error="failed to do request: Head \"https://rollproof.test/v2/probe/rollproof/blobs/sha256:0000000000000000000000000000000000000000000000000000000000000000\": dial tcp: lookup rollproof.test on 172.18.0.1:53: no such host" host=rollproof.test method=HEAD url="https://rollproof.test/v2/probe/rollproof/blobs/sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  info: e-zero: containerd: time="2026-11-22T10:52:25.222524705Z" level=error msg="PullImage \"rollproof.test/probe/rollproof@sha256:0000000000000000000000000000000000000000000000000000000000000000\" failed" error="rpc error: code = NotFound desc = failed to pull and unpack image \"rollproof.test/probe/rollproof@sha256:0000000000000000000000000000000000000000000000000000000000000000\": failed to resolve reference \"rollproof.test/probe/rollproof@sha256:0000000000000000000000000000000000000000000000000000000000000000\": rollproof.test/probe/rollproof@sha256:0000000000000000000000000000000000000000000000000000000000000000: not found"
+  ```
+
+  The error text, as on nerdctl, names only "not found".
+- In case f, `ctr` went straight to `https://registry.example` here too, and the lookup failed on `172.18.0.1:53`. The program's line still says "nerdctl reports 1 for any non-zero code"; that text is fixed in the program whatever the engine, and here the 1 came through Docker.
+- In case g, `probe-w` ran 1.01 s and `kubelet-x` 1.007 s after they were created, and each `imageID` named the pushed digest.
+
 Plan assumed: "For a host, the node's settings file lists the run's registry as `[host.\"http://ADDRESS:5000\"]` with `capabilities = [\"pull\"]`, before the real host. A reference by digest is then served by the run's registry; a reference by tag is not answered by it and goes to the real host; a reference with a tag and a digest is pulled by the digest alone; an image the run's registry lacks is fetched from the real host."
 Holds: yes
 Plan assumed: "The tool has a node pull with `crictl pull REFERENCE`, run in the node. That pull uses the node's registry settings, the ones the kubelet's pulls use."
