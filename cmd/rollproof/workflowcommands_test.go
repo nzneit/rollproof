@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode"
 )
 
 // stopToken replaces newStopToken, for the test, by one that gives token, and puts it back with
@@ -170,8 +171,9 @@ func TestNoWorkflowCommandLinesOffGitHub(t *testing.T) {
 	}
 }
 
-// A panic that escapes the run is no end by itself that the step can trust: the commands stay
-// stopped, and the panic's trace on stderr is read as plain lines (decision 26).
+// A panic that escapes the run is no end by itself that the step can trust: no resume line is
+// printed, so the commands stay stopped. That the runner then reads the panic's trace on stderr
+// as plain lines is read in its source, not shown here (decision 26).
 func TestAPanicInTheRunLeavesNoResumeLine(t *testing.T) {
 	stopToken(t, "TESTTOKEN")
 	signalled := func() bool {
@@ -287,6 +289,10 @@ func TestTheRunCommandsLinesComeFirstAndLast(t *testing.T) {
 	}
 }
 
+// newStopToken replaced by a function that fails the test when called; realMain with getenv
+// githubEnv. One row each: ["version"] exits 0; no args exits 2; ["probe", "http", "--url",
+// "http://127.0.0.1:1/", "--rate", "0"] exits 2. In each row no line of stdout or stderr begins "::"
+// after its leading white space, and none holds "##[".
 func TestOnlyTheRunCommandStopsWorkflowCommands(t *testing.T) {
 	noStopToken(t)
 	for _, tc := range []struct {
@@ -305,8 +311,11 @@ func TestOnlyTheRunCommandStopsWorkflowCommands(t *testing.T) {
 			}
 			for name, s := range map[string]string{"stdout": stdout.String(), "stderr": stderr.String()} {
 				for _, l := range splitLines(s) {
-					if strings.HasPrefix(l, "::") {
-						t.Errorf("%s holds the line %q, which begins %q", name, l, "::")
+					if strings.HasPrefix(strings.TrimLeftFunc(l, unicode.IsSpace), "::") {
+						t.Errorf("%s holds the line %q, which begins %q after its leading white space", name, l, "::")
+					}
+					if strings.Contains(l, "##[") {
+						t.Errorf("%s holds the line %q, which holds %q", name, l, "##[")
 					}
 				}
 			}

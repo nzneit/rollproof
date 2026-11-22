@@ -182,6 +182,10 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err = cmd.Run()
+	// On GitHub's runner the lines of this log are read for workflow commands too: go test
+	// indents them, and the runner trims that. So the script's stop line, logged here, stops the
+	// runner's commands for the rest of the go test step, which prints none (design, section
+	// 12, "The suite's workflow").
 	t.Logf("action.sh's standard output:\n%s\nits standard error:\n%s", stdout.String(), stderr.String())
 
 	// It exits 2.

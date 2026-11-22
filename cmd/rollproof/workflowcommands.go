@@ -20,13 +20,14 @@ var newStopToken = func() string { return rand.Text() }
 // detects it, it first prints "::stop-commands::TOKEN" on stdout and then on
 // stderr, TOKEN new for each call: the runner reads each stream in its own order,
 // so each needs the line first, and the one that the runner meets second is a
-// plain line. The runner then reads no line of the command as a command. When
-// command has returned and signalled says that no signal came, it prints
-// "::TOKEN::" on stdout, so that a step that runs the tool from a script of its
-// own can use workflow commands again. After a signal it prints nothing more: the
-// process ends by the signal, and the step with it. A panic in command passes
-// through with no resume line. Elsewhere it only runs command. A nil getenv is
-// not GitHub Actions.
+// plain line. The runner then reads no line of the command as a command, but for
+// the two things that the design's section 8 leaves open. When command has
+// returned and signalled says that no signal came, it prints "::TOKEN::" on
+// stdout, so that a step that runs the tool from a script of its own can use
+// workflow commands again. After a signal it prints nothing more: the process
+// ends by the signal, and the step with it. A panic in command passes through
+// with no resume line. Elsewhere it only runs command. A nil getenv is not
+// GitHub Actions.
 func withWorkflowCommandsStopped(stdout, stderr io.Writer, getenv func(string) string, signalled func() bool, command func() int) int {
 	if getenv == nil || !report.GitHubActions(getenv) {
 		return command()

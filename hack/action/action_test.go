@@ -660,22 +660,39 @@ func TestTheScriptsStopLine(t *testing.T) {
 	noLineEnd := file("no-line-end", "tok-1")
 	missing := filepath.Join(dir, "missing")
 	empty := file("empty", "")
+	const uuidLine = "::stop-commands::6d1e3c9a-2b7f-4c1e-9a0d-3f5b8e2c7a14\n"
 	for _, tc := range []struct {
 		name, path, stdout, stderr string
 		code                       int
+		// redirect follows stop_commands in the sourced text, to close one of its streams.
+		redirect string
+		// stderrLast, when not empty, is stderr's last line, and stderr is judged by it alone: bash's
+		// own message for a failed write may stand before it.
+		stderrLast string
+		// anyStderr says that stderr is not judged: it is closed.
+		anyStderr bool
 	}{
-		{"a UUID", uuid, "::stop-commands::6d1e3c9a-2b7f-4c1e-9a0d-3f5b8e2c7a14\n",
-			"::stop-commands::6d1e3c9a-2b7f-4c1e-9a0d-3f5b8e2c7a14\n", 0},
-		{"no line end", noLineEnd, "::stop-commands::tok-1\n", "::stop-commands::tok-1\n", 0},
-		{"a path that does not exist", missing, "", noToken(missing), 2},
-		{"an empty file", empty, "", noToken(empty), 2},
+		{name: "a UUID", path: uuid, stdout: uuidLine, stderr: uuidLine},
+		{name: "no line end", path: noLineEnd, stdout: "::stop-commands::tok-1\n", stderr: "::stop-commands::tok-1\n"},
+		{name: "a path that does not exist", path: missing, stderr: noToken(missing), code: 2},
+		{name: "an empty file", path: empty, stderr: noToken(empty), code: 2},
+		{name: "standard output is closed", path: uuid, code: 2, redirect: " >&-",
+			stderrLast: "rollproof: the line that stops the runner's workflow commands could not be written to standard output"},
+		{name: "standard error is closed", path: uuid, stdout: uuidLine, code: 2, redirect: " 2>&-", anyStderr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newScriptRun(t)
-			stdout, code, stderr := r.source("token_file=" + shQuote(tc.path) + "; stop_commands")
-			if stdout != tc.stdout || code != tc.code || stderr != tc.stderr {
-				t.Errorf("stop_commands gave stdout %q, exit %d, stderr %q; want %q, %d, %q",
-					stdout, code, stderr, tc.stdout, tc.code, tc.stderr)
+			stdout, code, stderr := r.source("token_file=" + shQuote(tc.path) + "; stop_commands" + tc.redirect)
+			stderrOK := stderr == tc.stderr
+			switch {
+			case tc.anyStderr:
+				stderrOK = true
+			case tc.stderrLast != "":
+				stderrOK = lastLine(stderr) == tc.stderrLast
+			}
+			if stdout != tc.stdout || code != tc.code || !stderrOK {
+				t.Errorf("stop_commands gave stdout %q, exit %d, stderr %q; want %q, %d, stderr %q (or a last line %q)",
+					stdout, code, stderr, tc.stdout, tc.code, tc.stderr, tc.stderrLast)
 			}
 		})
 	}

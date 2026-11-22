@@ -25,9 +25,10 @@
 set -euo pipefail
 shopt -s execfail
 
-# fail prints its message, after "rollproof: ", to standard error, and exits 2.
+# fail prints its message, after "rollproof: ", to standard error, and exits 2, also when the
+# message cannot be written.
 fail() {
-  printf 'rollproof: %s\n' "$1" >&2
+  printf 'rollproof: %s\n' "$1" >&2 || true
   exit 2
 }
 
@@ -37,14 +38,16 @@ token_file=/proc/sys/kernel/random/uuid
 
 # stop_commands prints "::stop-commands::TOKEN" on standard output and on standard error, TOKEN
 # the first line of token_file, read with bash's own read. GitHub's runner then reads no workflow
-# command in the step until a line "::TOKEN::", which this script never prints. Each stream gets
-# the line, because the runner reads each in its own order. Without a token it fails.
+# command in the step until a line that names TOKEN as a command ("::TOKEN::", or the older form
+# "##[TOKEN]" anywhere in a line), which this script never prints. Each stream gets the line,
+# because the runner reads each in its own order. Without a token, or when it cannot write one
+# of the two lines, it fails.
 stop_commands() {
   local token=
   read -r token 2>/dev/null <"$token_file" || true
   [[ -n $token ]] || fail "no token for the line that stops the runner's workflow commands: $token_file gave none"
-  printf '::stop-commands::%s\n' "$token"
-  printf '::stop-commands::%s\n' "$token" >&2
+  printf '::stop-commands::%s\n' "$token" || fail "the line that stops the runner's workflow commands could not be written to standard output"
+  printf '::stop-commands::%s\n' "$token" >&2 || fail "the line that stops the runner's workflow commands could not be written to standard error"
 }
 
 # pick_engine prints the engine's command name as the tool's pickEngine chooses it
