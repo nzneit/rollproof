@@ -68,9 +68,11 @@ type engineBehaviour struct {
 // FAKE_TOOL_DIR, and exits 7.
 func toolTar(t *testing.T, name string, mode int64, content []byte) []byte
 
-// run runs bash action.sh with the run's environment, in a folder of its own, and gives the exit
-// code and standard error. source runs `source action.sh; FUNCTION` the same way and gives standard
-// output, the exit code and standard error.
+// run runs bash with the absolute path of ../../action.sh, with the run's environment, its working
+// folder a folder of its own, and gives the exit code and standard error. source runs
+// `source PATH; FUNCTION`, PATH being that absolute path, the same way and gives standard output,
+// the exit code and standard error. The path is absolute because the working folder is not the
+// package's.
 func (r *scriptRun) run() (code int, stderr string)
 func (r *scriptRun) source(function string) (stdout string, code int, stderr string)
 ```

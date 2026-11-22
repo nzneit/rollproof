@@ -231,7 +231,8 @@ func TestAGitHubFileThatCannotBeWrittenIsAWarning(t *testing.T) {
 func TestTheSummaryIsAppendedOnce(t *testing.T) {
 	// w.gitHubFiles; the summary file holds "earlier step\n" before the run. Exit 0; the file
 	// begins "earlier step\n### rollproof: PASS", holds "### rollproof" exactly once, and ends
-	// "results: " + w.out + "\n```\n".
+	// "results: " + w.out + "\n```\n". The fence is three backticks here because no line of that
+	// block holds a backtick: w.out is a path the test made.
 }
 
 func TestALateWarningIsALineOfTheSummary(t *testing.T) {
@@ -293,7 +294,7 @@ Expected: PASS, no race, no output from `gofmt` and the vets.
 - [ ] **Step 5: Run the first fixture once**
 
 Run: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags e2e -p 1 -count=1 ./e2e/ -run '^TestFirstFixture$/^helm-3$' -v -timeout 30m`
-Expected: PASS. Its `console.txt` in `/tmp/rollproof-e2e-results/TestFirstFixture-helm-3` (under the system's temporary folder) begins with the console's first line and ends with its results line; the run, which has no GitHub variables here, writes no outputs and no summary. Afterwards `nerdctl ps -a --format "{{.Names}}"` prints no name that begins `rollproof-e2e-`.
+Expected: PASS. Its `console.txt` in `/tmp/rollproof-e2e-results/TestFirstFixture-helm-3` (under the system's temporary folder) begins with the console's first line and holds its results line, which is its last line unless a warning came after the console; the run, which has no GitHub variables here, writes no outputs and no summary. Afterwards `nerdctl ps -a --format "{{.Names}}"` prints no name that begins `rollproof-e2e-`.
 
 - [ ] **Step 6: Commit**
 
