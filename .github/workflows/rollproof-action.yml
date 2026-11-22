@@ -1,8 +1,12 @@
 name: rollproof action test
 
-# A placeholder. The default branch holds a file of this name so that the workflow can be started
-# by hand on the branch of rollproof's build-order step 6, which writes its jobs. Its one job never
-# runs.
+# The action's own test (rollproof's design, section 12, "The action"), started by hand only. The
+# job builds the tool's image and pushes it to a registry in the job, builds the fixture's images as
+# the suite's harness builds them, and uses the action from its folder three times: a pass, from a
+# file whose release name only env: on the step sets; a fail, read by a later step; and a run cut
+# short by the step's time limit. After each run, hack/actioncheck checks the step's outputs, its
+# results folder and its job summary, read in the runner's masked copy, and fails loudly when that
+# copy is not where it was. A job that fails uploads the three results folders, for three days.
 
 on:
   workflow_dispatch:
@@ -10,9 +14,109 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+    working-directory: projects/rollproof
+
 jobs:
-  placeholder:
-    if: false
+  action:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: "0"
     steps:
-      - run: "true"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27"
+          cache-dependency-path: projects/rollproof/go.sum
+      - name: The job's registry
+        run: docker run -d --name rollproof-action-registry -p 127.0.0.1:5000:5000 docker.io/library/registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
+      - name: The tool's image, pushed to the job's registry and named by its digest
+        id: image
+        run: |
+          dir=$(mktemp -d "$RUNNER_TEMP/rollproof-image-XXXXXX")
+          go build -trimpath -ldflags "-s -w -X main.version=dev" -o "$dir/rollproof" ./cmd/rollproof
+          cp Dockerfile "$dir/Dockerfile"
+          docker build -t 127.0.0.1:5000/rollproof:ci "$dir"
+          docker push 127.0.0.1:5000/rollproof:ci
+          ref=$(docker image inspect --format '{{index .RepoDigests 0}}' 127.0.0.1:5000/rollproof:ci)
+          case $ref in
+            127.0.0.1:5000/rollproof@sha256:*) ;;
+            *) echo "the pushed image has no digest of the job's registry: $ref" >&2; exit 1 ;;
+          esac
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: The fixture's images, built as the suite's harness builds them
+        run: |
+          for version in previous candidate; do
+            dir=$(mktemp -d "$RUNNER_TEMP/rollproof-image-XXXXXX")
+            go build -trimpath -ldflags "-s -w -X main.version=$version" -o "$dir/svc" ./fixtures/service
+            cp fixtures/service/Dockerfile "$dir/Dockerfile"
+            docker build -t "rollproof-fixture:$version" "$dir"
+          done
+
+      - name: A pass, with a variable that only the step's env sets
+        id: pass
+        uses: ./projects/rollproof
+        env:
+          ROLLPROOF_ACTION_TEST_RELEASE: orders
+        with:
+          config: projects/rollproof/hack/action/testdata/pass.yaml
+          image: ${{ steps.image.outputs.ref }}
+          out: ${{ runner.temp }}/results-pass
+      - name: Check the pass
+        env:
+          VERDICT: ${{ steps.pass.outputs.verdict }}
+          OUT: ${{ steps.pass.outputs.out }}
+        run: go run ./hack/actioncheck -verdict "$VERDICT" -out "$OUT" -want-verdict pass -want-out "$RUNNER_TEMP/results-pass" -step-files "$RUNNER_TEMP/_runner_file_commands"
+
+      - name: A fail, read by a later step
+        id: fail
+        uses: ./projects/rollproof
+        continue-on-error: true
+        with:
+          config: projects/rollproof/hack/action/testdata/fail.yaml
+          image: ${{ steps.image.outputs.ref }}
+          out: ${{ runner.temp }}/results-fail
+      - name: Check the fail
+        env:
+          OUTCOME: ${{ steps.fail.outcome }}
+          VERDICT: ${{ steps.fail.outputs.verdict }}
+          OUT: ${{ steps.fail.outputs.out }}
+        run: |
+          if [ "$OUTCOME" != failure ]; then echo "the step's outcome is $OUTCOME; want failure" >&2; exit 1; fi
+          go run ./hack/actioncheck -verdict "$VERDICT" -out "$OUT" -want-verdict fail -want-decided probe-failures -want-out "$RUNNER_TEMP/results-fail" -step-files "$RUNNER_TEMP/_runner_file_commands"
+
+      - name: A run cut short by the step's time limit
+        id: cut
+        uses: ./projects/rollproof
+        continue-on-error: true
+        timeout-minutes: 2
+        with:
+          config: projects/rollproof/hack/action/testdata/cut.yaml
+          image: ${{ steps.image.outputs.ref }}
+          out: ${{ runner.temp }}/results-cut
+      - name: Check the run cut short
+        env:
+          OUTCOME: ${{ steps.cut.outcome }}
+          VERDICT: ${{ steps.cut.outputs.verdict }}
+          OUT: ${{ steps.cut.outputs.out }}
+        run: |
+          stat -c '%n was last written at %y' "$OUT/result.json" || true
+          ls -l --time-style=full-iso "$OUT/evidence" || true
+          if [ "$OUTCOME" != failure ]; then echo "the step's outcome is $OUTCOME; want failure" >&2; exit 1; fi
+          go run ./hack/actioncheck -verdict "$VERDICT" -out "$OUT" -want-verdict not-verified -want-decided interrupted -want-out "$RUNNER_TEMP/results-cut" -step-files "$RUNNER_TEMP/_runner_file_commands"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: action-test-results
+          path: |
+            ${{ runner.temp }}/results-pass
+            ${{ runner.temp }}/results-fail
+            ${{ runner.temp }}/results-cut
+          retention-days: 3
+          if-no-files-found: warn

@@ -28,6 +28,11 @@ jobs:
           cache-dependency-path: projects/rollproof/go.sum
       - name: Vet
         run: go vet ./...
+      - name: Vet the code under each build tag
+        run: |
+          go vet -tags cluster ./...
+          go vet -tags e2e ./...
+          go vet -tags mirror ./...
       - name: Unit tests
         run: go test ./...
       - name: Build
@@ -36,3 +41,10 @@ jobs:
         run: |
           file bin/rollproof
           file bin/rollproof | grep -q "statically linked"
+      - name: Build for arm64
+        run: env CGO_ENABLED=0 GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=dev" -o bin/rollproof-arm64 ./cmd/rollproof
+      - name: The arm64 binary is statically linked
+        run: |
+          file bin/rollproof-arm64
+          file bin/rollproof-arm64 | grep -q "ARM aarch64"
+          file bin/rollproof-arm64 | grep -q "statically linked"
