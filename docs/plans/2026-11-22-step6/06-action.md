@@ -362,7 +362,7 @@ main() {
     args+=(--out "$ROLLPROOF_ACTION_OUT")
   fi
   cd "${GITHUB_WORKSPACE:-.}" || fail "the workspace ${GITHUB_WORKSPACE:-.} cannot be entered"
-  printf 'rollproof: the tool from %s, through %s\n' "$ref" "$engine" >&2
+  printf 'rollproof: the tool from %s, through %s\n' "$ref" "$engine" >&2 || true
   unset ROLLPROOF_ACTION_CONFIG ROLLPROOF_ACTION_IMAGE ROLLPROOF_ACTION_OUT \
     ROLLPROOF_ACTION_VERSION ROLLPROOF_ACTION_REPOSITORY ROLLPROOF_ACTION_DIGEST
   export KIND_EXPERIMENTAL_PROVIDER=$engine
@@ -564,7 +564,7 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 }
 ```
 
-The outputs are read by a copy, in `action_cluster_test.go`, of `e2e`'s `readGitHubOutputs` (Task 7), with its comment; `e2e`'s is in a package that this one cannot import.
+The outputs are read by a copy, in `action_cluster_test.go`, of `e2e`'s `readGitHubOutputs` (Task 7), with its comment; `e2e`'s is in a package that this one cannot import. The copy is the strict one: it reads the delimiter form only, and a line outside a value that is not `NAME<<DELIMITER`, the plain form `NAME=VALUE` among them, is an error.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 

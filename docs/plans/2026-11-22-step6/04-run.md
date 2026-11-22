@@ -5,13 +5,13 @@ Read section 8 ("The command line", the exit after a signal; "The action", the o
 ### Task 6: the outputs at both moments, the summary, the console before the evidence, late warnings as lines
 
 **Files:**
-- Modify: `internal/run/run.go` (`Run`; `runState`; `finish`; `lateWarnings`; `warnAfterConsole`; new: `gitHubFiles`, `gitHubOf`, `writeOutputs`, `appendSummary`, `refusedWrite`, the two warning prefixes)
+- Modify: `internal/run/run.go` (`Run`; `runState`; `finish`; `lateWarnings`; `warnAfterConsole`; `writeFinal`; `rewriteFinal`; `println`; new: `gitHubFiles`, `gitHubOf`, `writeOutputs`, `appendSummary`, `summarize`, `refusedWrite`, the two warning prefixes)
 - Modify: `internal/run/run_test.go`, `internal/run/fakes_test.go`
 - Modify: `cmd/rollproof/main_test.go`
 
 **Interfaces:**
-- Consumes: `report.GitHub`, `report.GitHubFrom`, `report.Output`, `(report.GitHub).WriteOutputs`, `(report.GitHub).AppendSummary` (Task 4); `report.Summary`, `report.SummaryLine` (Task 5).
-- Produces: `type gitHubFiles interface { WriteOutputs(outs ...report.Output) error; AppendSummary(text string) error }`
+- Consumes: `report.GitHub`, `report.GitHubFrom`, `report.Output`, `(report.GitHub).WriteOutputs`, `(report.GitHub).AppendSummary`, `(report.GitHub).Summarizes` (Task 4); `report.Summary`, `report.SummaryLine`, `report.ConsoleLine` (Task 5).
+- Produces: `type gitHubFiles interface { WriteOutputs(outs ...report.Output) error; AppendSummary(text string) error; Summarizes() bool }`
   What a run asks of GitHub's files: the step's outputs and its job summary.
   report.GitHub is the real one.
 - Produces: `var gitHubOf = func(getenv func(string) string) gitHubFiles { return report.GitHubFrom(getenv) }`
@@ -22,7 +22,7 @@ Read section 8 ("The command line", the exit after a signal; "The action", the o
 How `finish`, `lateWarnings` and `warnAfterConsole` change (decision 6):
 
 - `Run`, right after `report.Open` succeeded: `s.gh = gitHubOf(o.Getenv)` when `o.Getenv` is not nil, and then the first moment of the outputs, `s.writeOutputs(report.Output{Name: "out", Value: w.Dir()}, report.Output{Name: "verdict", Value: string(verdict.NotVerified)})`, with the comment "The first moment of the outputs (section 8): the results folder, and verdict as not verified, with the first result.json, so that a run that is killed leaves an answer." A results folder that cannot be opened returns before this, and writes no output.
-- `runState` gains `gh gitHubFiles` (nil writes nothing), `outputsWarned, summaryWarned bool`, and `warningsTold int`, with the comment "how many of the run's warnings the console and the job summary have told; warningsWritten is how many the last result.json holds".
+- `runState` gains `gh gitHubFiles` (nil writes nothing), `outputsWarned, summaryWarned bool`, and `warningsTold int`, with the comment "warningsTold is how many of the run's warnings have been told: in the final result.json, the job summary and the console, or as a line." It loses `warningsWritten`, which nothing reads. `writeFinal` takes the record alone, `func (s *runState) writeFinal(rec report.Run) error`, with the comment "writeFinal writes rec as the final result.json.", and returns `s.w.Final(rec)`; `recordAndWarnings` still returns the count, which `finish` keeps for `warningsTold`, and `rewriteFinal` calls `writeFinal` with the record alone (`rec, _ := s.recordAndWarnings()`).
 - `finish` becomes:
 
 ```go
@@ -63,7 +63,7 @@ func (s *runState) finish() (code int) {
 	// here then, so that its held-back tail reaches the file all the same.
 	defer s.closeProbeLog()
 	rec, n := s.recordAndWarnings()
-	if err := s.writeFinal(rec, n); err != nil {
+	if err := s.writeFinal(rec); err != nil {
 		// The console is not printed and the summary not written: they would claim more than the
 		// folder holds.
 		refused = true
@@ -74,7 +74,7 @@ func (s *runState) finish() (code int) {
 	s.finalWritten = true
 	s.writeOutputs(report.Output{Name: "verdict", Value: rec.Verdict})
 	masked := report.Mask(rec, s.mask)
-	s.appendSummary(report.Summary(masked))
+	s.summarize(masked)
 	fmt.Fprint(s.o.Stdout, report.Console(masked))
 	s.warningsTold = n
 	s.completeEvidence()
@@ -159,6 +159,35 @@ func (s *runState) writeOutputs(outs ...report.Output)
 // warning, summaryNotWritten and its error, once in a run: later failures add none, so that a
 // summary that cannot be written does not warn again for each warning appended to it.
 func (s *runState) appendSummary(text string)
+
+// summarize renders rec as the job summary and appends it through s.gh; it renders nothing when the
+// run has no file for the summary. A panic while the summary is rendered or appended is a warning,
+// summaryNotWritten and the panic's text, once in a run as a failed write of the summary is, so
+// that a feature for GitHub alone cannot take away the console that follows it.
+func (s *runState) summarize(rec report.Run) {
+	if s.gh == nil || !s.gh.Summarizes() {
+		return
+	}
+	defer func() {
+		if p := recover(); p != nil && !s.summaryWarned {
+			s.summaryWarned = true
+			s.warnings.add(summaryNotWritten + panicText(p))
+		}
+	}()
+	s.appendSummary(report.Summary(rec))
+}
+```
+
+- `println` masks and then cleans, so that every line the run prints but the console's is one line (section 10):
+
+```go
+// println writes line and a line end to out: masked by the run's masker, which leaves it as it is
+// before the configuration has loaded, and then cleaned as one line of the console
+// (report.ConsoleLine), so that no text in it can split or redraw the line. Every line the run
+// prints but the console's goes through it.
+func (s *runState) println(out io.Writer, line string) {
+	fmt.Fprintln(out, report.ConsoleLine(s.mask.String(line)))
+}
 ```
 
 `cleanUp` keeps its call of `lateWarnings` after the watcher's stop, and its call of `warnAfterConsole` for a cluster that was not deleted.
@@ -183,6 +212,9 @@ func readOutputs(t *testing.T, path string) map[string][]string
 // "outputs NAMES FINALNESS" (the names joined by commas) or "summary FINALNESS", FINALNESS being
 // "final" when result.json was final at that moment and "not final" otherwise.
 type gitHubRecorder struct{ w *world }
+
+// Summarizes is true: the recorder stands for a step with a file for the summary.
+func (g *gitHubRecorder) Summarizes() bool
 ```
 
 In `run_test.go`:
@@ -259,6 +291,36 @@ func TestALateWarningIsALineOfTheSummary(t *testing.T) {
 	// exactly those two texts, in that order.
 }
 
+// A panic while the job summary is rendered or appended is a warning, as a failed write of it is:
+// the console is printed all the same, the exit code is the verdict's, and the warning is told
+// after the console as every late warning is (section 10, rule 10).
+func TestAPanicInTheSummaryStillPrintsTheConsole(t *testing.T) {
+	// gitHubOf replaced, for the test, by one that gives a summaryPanicker, a fake of gitHubFiles
+	// whose Summarizes is true and whose AppendSummary panics with "the summary broke" at its first
+	// call and records the text of each later call. Exit 0. stdout has a line that begins
+	// "rollproof: PASS", and its lines after the console's last line that begins "results: " are
+	// exactly ["warning: the job summary was not written: the summary broke"]; result.json is a
+	// final pass whose warnings are exactly ["the job summary was not written: the summary broke"];
+	// the fake's later calls are one, which holds that warning's line.
+}
+
+// A run with no file for the job summary renders none: the console is printed and no warning of
+// the summary is given.
+func TestNoSummaryIsRenderedWithoutItsFile(t *testing.T) {
+	// gitHubOf replaced by one that gives a noSummary, a fake of gitHubFiles whose Summarizes is
+	// false and whose AppendSummary fails the test when it is called. Exit 0; stdout begins
+	// "rollproof: PASS" and does not hold "the job summary was not written"; no warning of
+	// result.json begins with it.
+}
+
+// A late warning whose text holds a line end or a lone carriage return is printed as one line, as
+// the console's text is cleaned (section 10).
+func TestALateWarningIsOneLineOfTheConsole(t *testing.T) {
+	// w.cluster.deleteErr = errors.New("first\nsecond\rthird"). Exit 0. Of stdout's lines, split at
+	// each LF and each CR, exactly one begins "warning: ", and it holds "first second third"; none
+	// begins "second" or "third".
+}
+
 func TestTheResultsComeBeforeTheEvidence(t *testing.T) {
 	// gitHubOf replaced, for the test, by one that gives &gitHubRecorder{w}; w.onStdout adds
 	// "console" to the call log at the first write that holds "results: ". Exit 0.
@@ -315,7 +377,7 @@ func TestASignalEndsTheToolByItAfterARefusedWrite(t *testing.T) {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go test ./internal/run/ ./cmd/rollproof/ -run 'TestTheOutputsAtBothMoments|TestWhatVerdictSaysAfterEachEnding|TestNothingIsWrittenForGitHubWithoutItsVariables|TestAGitHubFileThatCannotBeWrittenIsAWarning|TestTheSummaryIsAppendedOnce|TestALateWarningIsALineOfTheSummary|TestTheResultsComeBeforeTheEvidence|TestAWarningAfterARefusedFinalWriteWritesNoFinalFile|TestAWarningAtTheWatchersStopAfterARefusedFinalWriteIsALine|TestAnOutputsWarningAfterARefusedFinalWriteIsALine|TestPasswordsAreMaskedEverywhere|TestASignalEndsTheToolByItAfterARefusedWrite' -v`
+Run: `go test ./internal/run/ ./cmd/rollproof/ -run 'TestTheOutputsAtBothMoments|TestWhatVerdictSaysAfterEachEnding|TestNothingIsWrittenForGitHubWithoutItsVariables|TestAGitHubFileThatCannotBeWrittenIsAWarning|TestTheSummaryIsAppendedOnce|TestALateWarningIsALineOfTheSummary|TestAPanicInTheSummaryStillPrintsTheConsole|TestNoSummaryIsRenderedWithoutItsFile|TestALateWarningIsOneLineOfTheConsole|TestTheResultsComeBeforeTheEvidence|TestAWarningAfterARefusedFinalWriteWritesNoFinalFile|TestAWarningAtTheWatchersStopAfterARefusedFinalWriteIsALine|TestAnOutputsWarningAfterARefusedFinalWriteIsALine|TestPasswordsAreMaskedEverywhere|TestASignalEndsTheToolByItAfterARefusedWrite' -v`
 Expected: FAIL: `gitHubOf` and `gitHubFiles` are not defined in `internal/run`. `TestASignalEndsTheToolByItAfterARefusedWrite` passes already: it pins `endProcess`'s rule for this case.
 
 - [ ] **Step 3: Implement the changes above, each named one with its interface comment**

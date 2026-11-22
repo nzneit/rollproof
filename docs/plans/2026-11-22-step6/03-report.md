@@ -31,6 +31,9 @@ Read section 8 ("The action", the outputs and their two moments, "Secrets"), sec
   AppendSummary appends text to the step's summary file in one write. It does
   nothing when no summary file is named. The file must exist: it is opened for
   appending and never made.
+- Produces: `func (g GitHub) Summarizes() bool`
+  Summarizes reports whether g has a file for the job summary, so that a caller renders a
+  summary only when it will be written.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -83,13 +86,22 @@ func TestAppendSummaryAppends(t *testing.T) {
 func TestAZeroGitHubWritesNothing(t *testing.T) {
 	// GitHub{}.WriteOutputs(Output{"verdict", "pass"}) and GitHub{}.AppendSummary("x") return nil.
 }
+
+// A GitHub says that it summarizes only when it runs on GitHub Actions and has a file for the
+// job summary.
+func TestSummarizes(t *testing.T) {
+	// GitHubFrom(getenv).Summarizes(), one row each:
+	//   {GITHUB_ACTIONS: "true", GITHUB_STEP_SUMMARY: "/r/summary"} -> true
+	//   {GITHUB_ACTIONS: "true", GITHUB_OUTPUT: "/r/output"}         -> false
+	//   {GITHUB_STEP_SUMMARY: "/r/summary"}                          -> false (off GitHub)
+}
 ```
 
 Each test that replaces `newDelimiter` (`TestGitHubFrom`, `TestOutputsInTheDelimiterForm`, `TestADelimiterThatTheValueHoldsIsDrawnAgain`) restores the real one with `t.Cleanup`, so that `TestTheRealDelimiter` meets the real one in any order.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go test ./internal/report/ -run 'TestGitHubFrom|TestOutputsInTheDelimiterForm|TestADelimiterThatTheValueHoldsIsDrawnAgain|TestTheRealDelimiter|TestGitHubsFilesAreNeverMade|TestAppendSummaryAppends|TestAZeroGitHubWritesNothing' -v`
+Run: `go test ./internal/report/ -run 'TestGitHubFrom|TestOutputsInTheDelimiterForm|TestADelimiterThatTheValueHoldsIsDrawnAgain|TestTheRealDelimiter|TestGitHubsFilesAreNeverMade|TestAppendSummaryAppends|TestAZeroGitHubWritesNothing|TestSummarizes' -v`
 Expected: FAIL to compile: `GitHub` is not defined.
 
 - [ ] **Step 3: Implement `github.go`, each named one with its interface comment from the Interfaces block**
@@ -118,7 +130,7 @@ git commit -m "Write the step's outputs in the delimiter form and append to its 
 
 **Files:**
 - Create: `internal/report/summary.go`, `internal/report/summary_test.go`, `internal/report/testdata/summary-pass.golden.md`, `summary-fail.golden.md`, `summary-not-verified.golden.md`, `summary-before-first-observation.golden.md`, `summary-in-install-window.golden.md`, `summary-install-decided.golden.md`, `summary-custom-no-ms-or-lag.golden.md`, `summary-stall-mirror.golden.md` (all under `internal/report/testdata/`)
-- Modify: `internal/report/console.go` (the console's blocks as data, for both renderings)
+- Modify: `internal/report/console.go` (the console's blocks as data, for both renderings; new `ConsoleLine`), `internal/report/console_test.go` (new `TestConsoleLine`)
 
 **Interfaces:**
 - Consumes: nothing of this plan.
@@ -136,6 +148,10 @@ git commit -m "Write the step's outputs in the delimiter form and append to its 
   fenced code block of the line, cleaned as Console cleans text, so that a warning
   that arises after the summary was written is appended to it as a line
   (section 10).
+- Produces: `func ConsoleLine(text string) string`
+  ConsoleLine returns text as one line of a terminal, cleaned as Console cleans text: a
+  line that the run prints outside the console's blocks goes through it, so that no text
+  from outside the tool can split or redraw it (section 10).
 
 The console's blocks become data that both renderings read. In `console.go`, with these comments:
 
@@ -164,10 +180,10 @@ func transitionRows(r Run) (header []string, rows [][]string)
 // exercisedItems is what the lists of a pass hold: for each transition that ran, its name and what
 // it exercised, in order; and each line of what was not exercised, the lines of a restart-only run
 // or of a deploy with no rollback first.
-func exercisedItems(r Run) (exercised [][2]string, notExercised []string)
+func exercisedItems(r Run) (exercised [][2]string, notList []string)
 ```
 
-`verdictLine`, `windowsTable`, `transitionsTable` and `exercisedLists` keep their names and give the text of today from these. `setUp` and `last` stay as they are. No golden file of the console changes; the three of section 10 are compared by `sameAsFile` and are never rewritten.
+`exercisedItems`' second result is named `notList`, so that it does not shadow the package's `notExercised`. `ConsoleLine`, with its interface comment, stands beside `clean` and returns `clean(text)`. `verdictLine`, `windowsTable`, `transitionsTable` and `exercisedLists` keep their names and give the text of today from these. `setUp` and `last` stay as they are. No golden file of the console changes; the three of section 10 are compared by `sameAsFile` and are never rewritten.
 
 In `summary.go`, besides `Summary` and `SummaryLine`:
 
@@ -253,6 +269,18 @@ func TestSummaryLine(t *testing.T) {
 }
 ```
 
+In `console_test.go`:
+
+```go
+// ConsoleLine gives one line of a terminal, a space for each line end and control, as clean does;
+// a text with none is returned as it is.
+func TestConsoleLine(t *testing.T) {
+	// ConsoleLine("a\r\nb\rc\nd\te" + U+2028 + "f") == "a b c d e f" (CR LF, a lone CR, a lone LF,
+	//   a tab and a line separator);
+	// ConsoleLine("warning: the cluster was not deleted") == "warning: the cluster was not deleted".
+}
+```
+
 Two helpers in `summary_test.go`, each with its comment:
 
 ```go
@@ -272,8 +300,8 @@ func outsideCode(md string) (string, error)
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go test ./internal/report/ -run 'TestSummary|TestFence|TestCodeSpan|TestMarkdownTable' -v`
-Expected: FAIL to compile: `Summary`, `SummaryLine`, `fenced`, `codeSpan` and `markdownTable` are not defined.
+Run: `go test ./internal/report/ -run 'TestSummary|TestFence|TestCodeSpan|TestMarkdownTable|TestConsoleLine' -v`
+Expected: FAIL to compile: `Summary`, `SummaryLine`, `fenced`, `codeSpan`, `markdownTable` and `ConsoleLine` are not defined.
 
 - [ ] **Step 3: Implement, each named one with its interface comment from the Interfaces block and from the comments above**
 
@@ -295,6 +323,6 @@ Expected: PASS, no output.
 - [ ] **Step 6: Commit**
 
 ```
-git add internal/report/summary.go internal/report/summary_test.go internal/report/console.go internal/report/testdata/summary-pass.golden.md internal/report/testdata/summary-fail.golden.md internal/report/testdata/summary-not-verified.golden.md internal/report/testdata/summary-before-first-observation.golden.md internal/report/testdata/summary-in-install-window.golden.md internal/report/testdata/summary-install-decided.golden.md internal/report/testdata/summary-custom-no-ms-or-lag.golden.md internal/report/testdata/summary-stall-mirror.golden.md
+git add internal/report/summary.go internal/report/summary_test.go internal/report/console.go internal/report/console_test.go internal/report/testdata/summary-pass.golden.md internal/report/testdata/summary-fail.golden.md internal/report/testdata/summary-not-verified.golden.md internal/report/testdata/summary-before-first-observation.golden.md internal/report/testdata/summary-in-install-window.golden.md internal/report/testdata/summary-install-decided.golden.md internal/report/testdata/summary-custom-no-ms-or-lag.golden.md internal/report/testdata/summary-stall-mirror.golden.md
 git commit -m "Render the console's blocks as the job summary, with text from outside the tool only in code blocks and code spans"
 ```

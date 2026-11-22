@@ -70,7 +70,9 @@ func TestNodeImageAsksTheEngineByItsName(t *testing.T) {
 	// exactly one line, "image inspect --format {{json .RepoDigests}} docker.io/kindest/node:v1.37.0".
 	// With fakeEngineOnPath as nerdctl: the same call with Binary "nerdctl" returns the same, and the line
 	// ends "kindest/node:v1.37.0" with nothing in front of kindest.
-	// A name with a digest, under either: returned as it is, and the log is empty.
+	// A name with a digest, under either: returned as it is, and the log does not exist or is
+	// empty. Only a log that does not exist says that the engine was not asked: any other error
+	// that reading it gives fails the test.
 }
 ```
 

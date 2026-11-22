@@ -9,7 +9,7 @@ Unlike Tasks 2 to 12, every command of this task runs from the repository root: 
 **Files:**
 - Create: `projects/rollproof/cmd/rollproof/workflowcommands.go`, `projects/rollproof/cmd/rollproof/workflowcommands_test.go`
 - Modify: `projects/rollproof/cmd/rollproof/main.go` (`realMain`), `projects/rollproof/cmd/rollproof/main_test.go` (`startChild`)
-- Modify: `projects/rollproof/internal/report/github.go` (new `GitHubActions`; `GitHubFrom` asks it), `projects/rollproof/internal/report/github_test.go`
+- Modify: `projects/rollproof/internal/report/github.go` (new `GitHubActions`; `GitHubFrom` asks it), `projects/rollproof/internal/report/github_test.go`, `projects/rollproof/internal/report/result.go` (`Open` asks `GitHubActions`)
 - Modify: `projects/rollproof/action.sh` (its opening comment; new `token_file` and `stop_commands`; `main`)
 - Modify: `projects/rollproof/hack/action/action_test.go`, `projects/rollproof/hack/action/action_cluster_test.go`
 - Modify: `projects/rollproof/e2e/runenv_test.go` (new `stopLine`, `envValue`, `workflowCommandFaults`), `projects/rollproof/e2e/harness_test.go` (`runFixture`)
@@ -20,8 +20,8 @@ Unlike Tasks 2 to 12, every command of this task runs from the repository root: 
 - Produces: `func GitHubActions(getenv func(string) string) bool` in `internal/report`
   GitHubActions reports whether the tool runs on GitHub Actions: GITHUB_ACTIONS is
   exactly "true" (section 8), which a caller's env: cannot change there.
-  GitHubFrom and the run command's lines for workflow commands both ask it, so
-  that the rule is written once.
+  GitHubFrom, Open and the run command's lines for workflow commands all ask it,
+  so that the rule is written once.
 - Produces: `var newStopToken = func() string { return rand.Text() }` in `cmd/rollproof`
   newStopToken gives the token of one run's lines for GitHub's workflow commands:
   26 random characters of crypto/rand.Text, which no command of the runner is
@@ -265,6 +265,8 @@ func TestWorkflowCommandFaults(t *testing.T) {
 	//     [`stdout holds the line "::ABCDEFGHIJKLMNOPQRSTUVWXYZ::", though a signal ended the run`]
 	//   "a resume line on stderr": OUT, STOP + "\n" + RESUME + "\n", true, false ->
 	//     [`stderr holds the line "::ABCDEFGHIJKLMNOPQRSTUVWXYZ::", which only stdout's last line may be`]
+	//   "off GitHub, a line after a lone carriage return": "rollproof: PASS\rnext\r::error::x\n", "", false, false ->
+	//     [`stdout holds the line "::error::x", which begins "::", though GITHUB_ACTIONS is not true`]
 }
 ```
 
@@ -275,7 +277,7 @@ Expected: FAIL: `GitHubActions` is not defined in `internal/report`; `newStopTok
 
 - [ ] **Step 3: Implement**
 
-`internal/report/github.go`: `GitHubActions` with its interface comment, placed before `GitHubFrom`; `GitHubFrom` begins `if !GitHubActions(getenv) {` in place of `if getenv("GITHUB_ACTIONS") != "true" {`, and its comment's second sentence becomes "The tool detects GitHub Actions as GitHubActions does (section 8); the GitHub it returns then writes the outputs to the file that GITHUB_OUTPUT names and the summary to the file that GITHUB_STEP_SUMMARY names, each only when its variable is not empty."
+`internal/report/github.go`: `GitHubActions` with its interface comment, placed before `GitHubFrom`; `GitHubFrom` begins `if !GitHubActions(getenv) {` in place of `if getenv("GITHUB_ACTIONS") != "true" {`, and its comment's second sentence becomes "The tool detects GitHub Actions as GitHubActions does (section 8); the GitHub it returns then writes the outputs to the file that GITHUB_OUTPUT names and the summary to the file that GITHUB_STEP_SUMMARY names, each only when its variable is not empty." `internal/report/result.go`: in `Open`, the condition `getenv("GITHUB_ACTIONS") == "true" && getenv("RUNNER_TEMP") != ""` becomes `GitHubActions(getenv) && getenv("RUNNER_TEMP") != ""`, so that the rule is written once.
 
 `cmd/rollproof/workflowcommands.go`, exactly but for the interface comments, which are those of the Interfaces block:
 
@@ -412,7 +414,7 @@ func envValue(env []string, name string) string
 func workflowCommandFaults(stdout, stderr string, onGitHub, bySignal bool) []string
 ```
 
-The faults' texts are those of `TestWorkflowCommandFaults`, in this order: each stream's first line that begins `::` off GitHub (stdout, then stderr); on GitHub, stdout's first line; stderr's first line; the stop line's count in stdout, then in stderr; the resume line on stderr; then, after a signal, the resume line on stdout, and otherwise stdout's last line and the resume line's count in stdout. A stream's lines are its text without its last line end, split at each line end; an empty text has none.
+The faults' texts are those of `TestWorkflowCommandFaults`, in this order: each stream's first line that begins `::` off GitHub (stdout, then stderr); on GitHub, stdout's first line; stderr's first line; the stop line's count in stdout, then in stderr; the resume line on stderr; then, after a signal, the resume line on stdout, and otherwise stdout's last line and the resume line's count in stdout. A stream's lines are its text without its last line end, split at each line end; an empty text has none. A line ends at CR LF, at LF and at a lone CR, as the runner's reader ends a line, so that a line after a lone carriage return is judged as the runner would read it (`streamLines`, whose comment says so).
 
 `e2e/harness_test.go`, in `runFixture`, between the end of the `switch` on `runErr` and the reading of `result.json`:
 
@@ -424,7 +426,17 @@ The faults' texts are those of `TestWorkflowCommandFaults`, in this order: each 
 	}
 ```
 
-and `runFixture`'s comment gains, after "…its standard error as stderr.txt.", the sentence "It checks the lines for GitHub's workflow commands in both streams by the run's own GITHUB_ACTIONS (workflowCommandFaults)." Above the `t.Logf` that logs the run's two streams, and above the one in `TestTheScriptRunsTheToolFromItsImage` (`hack/action/action_cluster_test.go`), a comment says that on GitHub's runner the lines of that log are read for workflow commands too, since `go test` indents them and the runner trims that, so the logged stop lines keep the runner's commands stopped for the rest of the `go test` step, which prints none (design, section 12, "The suite's workflow").
+and `runFixture`'s comment gains, after "…its standard error as stderr.txt.", the sentence "It checks the lines for GitHub's workflow commands in both streams by the run's own GITHUB_ACTIONS (workflowCommandFaults)." Above the `t.Logf` that logs the run's two streams stands, exactly:
+
+```go
+	// On GitHub's runner the lines of this log are read for workflow commands too: go test
+	// indents them, and the runner trims that. So the logged stop lines of a run with
+	// GITHUB_ACTIONS true keep the runner's commands stopped for the rest of the go test step,
+	// which prints none: the logged resume line is followed at once by the run's stop line of
+	// standard error, which stops them again (design, section 12, "The suite's workflow").
+```
+
+Above the one in `TestTheScriptRunsTheToolFromItsImage` (`hack/action/action_cluster_test.go`), a comment says that on GitHub's runner the lines of that log are read for workflow commands too, since `go test` indents them and the runner trims that, so the script's stop line, logged there, stops the runner's commands for the rest of the `go test` step, which prints none (design, section 12, "The suite's workflow").
 
 `README.md`, in the section "On GitHub Actions", after the sentence "The job summary holds the console's report as Markdown, with every text from the cluster, the commands and the configuration inside code.", in the same paragraph:
 
@@ -464,7 +476,7 @@ What this shows and what it does not: the order of the script's and the tool's l
 From the repository root, each command alone:
 
 ```
-git add projects/rollproof/cmd/rollproof/workflowcommands.go projects/rollproof/cmd/rollproof/workflowcommands_test.go projects/rollproof/cmd/rollproof/main.go projects/rollproof/cmd/rollproof/main_test.go projects/rollproof/internal/report/github.go projects/rollproof/internal/report/github_test.go projects/rollproof/action.sh projects/rollproof/hack/action/action_test.go projects/rollproof/hack/action/action_cluster_test.go projects/rollproof/e2e/runenv_test.go projects/rollproof/e2e/harness_test.go projects/rollproof/README.md
+git add projects/rollproof/cmd/rollproof/workflowcommands.go projects/rollproof/cmd/rollproof/workflowcommands_test.go projects/rollproof/cmd/rollproof/main.go projects/rollproof/cmd/rollproof/main_test.go projects/rollproof/internal/report/github.go projects/rollproof/internal/report/github_test.go projects/rollproof/internal/report/result.go projects/rollproof/action.sh projects/rollproof/hack/action/action_test.go projects/rollproof/hack/action/action_cluster_test.go projects/rollproof/e2e/runenv_test.go projects/rollproof/e2e/harness_test.go projects/rollproof/README.md
 git commit -F MESSAGE
 ```
 

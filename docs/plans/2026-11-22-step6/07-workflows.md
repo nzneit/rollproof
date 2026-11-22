@@ -211,7 +211,11 @@ jobs:
         env:
           VERDICT: ${{ steps.pass.outputs.verdict }}
           OUT: ${{ steps.pass.outputs.out }}
-        run: go run ./hack/actioncheck -verdict "$VERDICT" -out "$OUT" -want-verdict pass -want-out "$RUNNER_TEMP/results-pass" -step-files "$RUNNER_TEMP/_runner_file_commands"
+        run: |
+          # The action's step stopped the runner's workflow commands for itself alone. This notice
+          # shows, as an annotation of the run, that the next step's commands are read again.
+          echo "::notice title=rollproof action test::workflow commands are read again in the step after the action"
+          go run ./hack/actioncheck -verdict "$VERDICT" -out "$OUT" -want-verdict pass -want-out "$RUNNER_TEMP/results-pass" -step-files "$RUNNER_TEMP/_runner_file_commands"
 
       - name: A fail, read by a later step
         id: fail

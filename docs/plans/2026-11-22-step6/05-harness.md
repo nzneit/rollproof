@@ -29,10 +29,11 @@ Read section 12 ("The suite's matrix", "The suite's workflow", "The mirror job",
     with GITHUB_ACTIONS=true and the two variables naming gh's files; and, last,
     PATH with helmDir in front of base's own PATH.
   - `func readGitHubOutputs(path string) (map[string][]string, error)`
-    readGitHubOutputs reads an outputs file in the delimiter form and in the plain
-    form NAME=VALUE, and gives each name's values in the order they were written. A
-    line that is neither, or a delimiter that never comes, is an error that names
-    the file and the line.
+    readGitHubOutputs reads an outputs file in the delimiter form, the only form the
+    tool writes, and gives each name's values in the order they were written. A line
+    outside a value that is not NAME<<DELIMITER, the plain form NAME=VALUE among
+    them, or a delimiter that never comes, is an error that names the file and the
+    line.
   - `func summaryFaults(summary, out, word string) []string`
     summaryFaults judges the text of a run's job summary against the results folder
     out and the word of its first line (PASS, FAIL or NOT VERIFIED), and gives the
@@ -87,12 +88,18 @@ func TestRunEnvKeepsTheJobsGitHubFilesOut(t *testing.T) {
 }
 
 func TestReadGitHubOutputs(t *testing.T) {
-	// A file "out<<D1\n/tmp/r\nD1\nverdict<<D2\nnot-verified\nD2\nverdict=pass\n" gives
-	//   {"out": ["/tmp/r"], "verdict": ["not-verified", "pass"]}.
 	// A file "x<<E\na\nb\nE\n" gives {"x": ["a\nb"]}.
-	// A file "good=1\nno separator\n" gives an error that holds the file's path and "line 2".
-	// A file "x<<E\na\n" gives an error that holds the file's path and "E".
+	// "one name written twice": a file "verdict<<D1\nnot-verified\nD1\nverdict<<D2\npass\nD2\n"
+	//   gives {"verdict": ["not-verified", "pass"]}; the harness reads the last value as the
+	//   step's output and checks the list, so the order is the contract.
 	// An empty file gives an empty map and no error.
+	// Each of these gives an error that holds the file's path and the text after it:
+	//   the plain form after the delimiter form,
+	//     "out<<D1\n/tmp/r\nD1\nverdict<<D2\nnot-verified\nD2\nverdict=pass\n":
+	//     `line 7: "verdict=pass" is not NAME<<DELIMITER`;
+	//   a line in the plain form, "good=1\nno separator\n": `line 1: "good=1" is not NAME<<DELIMITER`;
+	//   a delimiter that never comes, "x<<E\na\n": `"E"`, the delimiter quoted, so that a path that
+	//     holds the letter cannot pass for it.
 }
 
 func TestSummaryFaults(t *testing.T) {
@@ -122,11 +129,11 @@ Expected: FAIL to compile: `helmMajors`, `runEnv`, `githubFiles`, `readGitHubOut
 - [ ] **Step 3: Implement, each named one with its interface comment from the Interfaces block**
 
 - `runenv_test.go`: the six names above.
-- `harness_test.go`: `TestMain` first sets `majors`, before anything else it does; a `helmMajors` error prints `e2e: ` and the error to standard error and exits 1. It still checks both Helm binaries and both majors, with the comment "Both, whatever ROLLPROOF_E2E_HELM selects: the fourteenth row's control runs under Helm 3 in every run of the suite." `runFixture`, once the results folder is made: for a fixture with `github`, `gh := &githubFiles{filepath.Join(out, "github-output"), filepath.Join(out, "github-summary")}`, both written empty with mode 0644, a failure being `t.Fatalf`; then `env := runEnv(os.Environ(), helmDir, gh)` in place of `helmEnv(helmDir)` (gh is nil for every other fixture). `helmEnv` stays for `checkHelmMajor`. `runFixture`'s comment gains: "The tool never sees the job's GITHUB_OUTPUT or GITHUB_STEP_SUMMARY; a fixture with github gets files of its own."
+- `harness_test.go`: `TestMain` first sets `majors`, before anything else it does; a `helmMajors` error prints `e2e: ` and the error to standard error and exits 1. It still checks both Helm binaries and both majors, with the comment "Both, whatever ROLLPROOF_E2E_HELM selects: the fourteenth row's control runs under Helm 3 in every run of the suite." `runFixture`, once the results folder is made: for a fixture with `github`, `gh := &githubFiles{filepath.Join(out, "github-output"), filepath.Join(out, "github-summary")}`, both written empty with mode 0644, a failure being `t.Fatalf`; then `env := runEnv(os.Environ(), helmDir, gh)` in place of `helmEnv(helmDir)` (gh is nil for every other fixture). `helmEnv` stays for `checkHelmMajor`. `runFixture`'s comment gains: "The tool never sees the job's GITHUB_OUTPUT or GITHUB_STEP_SUMMARY; a fixture with github gets files of its own." Before `cmd.Start()`, `runFixture` sets `cmd.WaitDelay = 10 * time.Second`, with the comment "A child of the tool that still holds a pipe would keep Wait blocked past the context's limit."
 - `checkGitHubFiles`: reads both files with `readGitHubOutputs` and `os.ReadFile`; wants the outputs exactly `{"out": [out], "verdict": ["not-verified", value]}`; hands the summary to `summaryFaults(summary, out, word)`, reports each fault it gives with `t.Errorf` and, when it gave any, logs the summary once, so that the summary's first line must begin `"### rollproof: " + word`, exactly one line may begin `"### rollproof: "`, and `"results: " + out + "\n```\n"` must stand exactly once at a line's start, not necessarily last; before that call stands the comment "A warning after the console is appended after the results block, so the summary need not end with it. The fence is three backticks unless a line of that block holds a run of three or more backticks. Its lines are the run's reasons with their details, its warnings and the results line, and no run that calls this is expected to hold such a run of backticks."
 - `fixtures_test.go`: `underBothHelms` becomes `underEachHelm`, over `majors`; every call in `fixtures_test.go`, `custom_test.go` and `commands_test.go` follows (32 calls; `grep -rn underBothHelms e2e` prints nothing afterwards). In the comment of `TestChartDeniesTrafficByDefault`, the sentence "The control runs once, under Helm 3: it tests the cluster's network plugin, not Helm." becomes, exactly: "The control runs in every run of this test, under Helm 3, whatever ROLLPROOF_E2E_HELM selects: it tests the cluster's network plugin, not Helm, and each job of the suite's workflow runs on its own runner image and shows there that the plugin enforces the policy." Its code does not change.
 - `mirror_helpers_test.go`: `throughTheMirror` sets `github: true` (and so `mirrorReplacesItsHost`, which starts from it); its comment adds "with files of its own for GitHub's outputs and summary, which the search for the password reads".
-- `mirror_test.go`: the checks of Step 1; and `holdRunImages` runs the engine's `image inspect` under a limit of 1 minute and its `pull` under a limit of 10 minutes (`exec.CommandContext` with `context.WithTimeout`), a pull cut at its limit failing the test with "ENGINE pull REF did not end within 10m0s" (a leftover of step 5, its Task 13's m5; see Task 12's table).
+- `mirror_test.go`: the checks of Step 1; and `holdRunImages` runs the engine's `image inspect` under a limit of 1 minute and its `pull` under a limit of 10 minutes (`exec.CommandContext` with `context.WithTimeout`), a pull cut at its limit failing the test with "ENGINE pull REF did not end within 10m0s" (a leftover of step 5, its Task 13's m5; see Task 12's table). Each of the two commands is a variable with `WaitDelay` of 10 seconds: the pull, with the comment "A child of the engine that still holds the output pipe would keep Wait blocked past the limit." and then `CombinedOutput()`; the inspect, in `inspectImage`, with the comment "A child of the engine that outlives it would keep Wait blocked past the limit." and then `Run()`.
 
 - [ ] **Step 4: Run the unit tests and the vets**
 

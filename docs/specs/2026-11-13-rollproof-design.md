@@ -2165,6 +2165,11 @@ results: /tmp/rollproof-results-7f3a
     (section 6), or, when the tool did not judge the probe's stop, why not. The console names
     each variable that the tool took out of its commands' environment (section 7), and prints
     every warning.
+  - Text from the cluster, from commands and from the configuration is cleaned before it is
+    printed: a line end, every other control character, the line and paragraph separators and
+    the bidirectional controls each become a space, so that none of it can redraw or split a
+    line. That holds for the console's blocks and for every other line that the run prints, a
+    warning after the console's text among them.
   - On GitHub Actions the line that stops the runner's workflow commands comes first on
     standard output and on standard error, and the line that resumes them comes last on
     standard output, after everything else that the run prints there, unless a signal or a
@@ -2293,8 +2298,9 @@ results: /tmp/rollproof-results-7f3a
   how the page reads: inside code that it cannot close, or escaped. A run whose final
   `result.json` could not be written prints no console block and writes no summary; the run's
   warnings are then printed as lines on the console. A summary that cannot be written is a
-  warning (rule 10). GitHub shows no summary for a step whose file is larger than 1 MiB, and
-  the step stays green; the console's blocks are far below that.
+  warning (rule 10), and so is a crash while it is rendered or appended; the console is printed
+  all the same. GitHub shows no summary for a step whose file is larger than 1 MiB, and the
+  step stays green; the console's blocks are far below that.
 - **Evidence folder.**
   - The probe's raw lines; the window boundaries and the moment each transition finished, each
     written when it happens; a per-second timeline that puts failure counts beside pod events
@@ -2678,7 +2684,10 @@ fails with a message that names it when the copy is not there, and never passes 
 read a summary. The golden files of the unit tests pin the summary's exact text. The job's log
 is expected to show, at the start of each run's step, the script's stop line with its token
 masked, and the tool's own lines after it as plain text; the record of the runs says what it
-showed. No run plants a command, so none shows one that is ignored (section 16).
+showed. No run plants a command, so none shows one that is ignored (section 16). The step after
+the first run prints one notice of its own: when the run shows it as an annotation, the runner
+read that step's commands again, so the script's stop ended with the action's step (section 14,
+point 33).
 
 The action's test starts by hand only, as the suite and the mirror job do (section 13).
 
