@@ -879,9 +879,12 @@ type helperChild struct {
 	exited chan struct{} // closed when Wait has returned and the output is complete
 }
 
-// startChild starts the child with the fake run that fake names. The child is
-// killed at the end of the test if it still runs.
-func startChild(t *testing.T, fake string) *helperChild {
+// startChild starts the child with the fake run that fake names, and env added to
+// its environment. The child gets no GITHUB_ACTIONS from this process, so that it
+// prints the lines for GitHub's workflow commands only when env asks for them, on
+// this machine and on GitHub's runner alike. The child is killed at the end of
+// the test if it still runs.
+func startChild(t *testing.T, fake string, env ...string) *helperChild {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -889,7 +892,13 @@ func startChild(t *testing.T, fake string) *helperChild {
 	}
 	c := &helperChild{exited: make(chan struct{})}
 	c.cmd = exec.Command(exe, "-test.run=^TestHelperProcess$")
-	c.cmd.Env = append(os.Environ(), "ROLLPROOF_HELPER="+fake)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "GITHUB_ACTIONS=") {
+			c.cmd.Env = append(c.cmd.Env, entry)
+		}
+	}
+	c.cmd.Env = append(c.cmd.Env, "ROLLPROOF_HELPER="+fake)
+	c.cmd.Env = append(c.cmd.Env, env...)
 	c.cmd.Stdout = &c.stdout
 	c.cmd.Stderr = &c.stderr
 	if err := c.cmd.Start(); err != nil {

@@ -14,13 +14,21 @@ type GitHub struct {
 	summary string
 }
 
+// GitHubActions reports whether the tool runs on GitHub Actions: GITHUB_ACTIONS is
+// exactly "true" (section 8), which a caller's env: cannot change there.
+// GitHubFrom and the run command's lines for workflow commands both ask it, so
+// that the rule is written once.
+func GitHubActions(getenv func(string) string) bool {
+	return getenv("GITHUB_ACTIONS") == "true"
+}
+
 // GitHubFrom reads the environment through getenv. The tool detects GitHub Actions
-// when GITHUB_ACTIONS is "true" (section 8); the GitHub it returns then writes the
-// outputs to the file that GITHUB_OUTPUT names and the summary to the file that
+// as GitHubActions does (section 8); the GitHub it returns then writes the outputs
+// to the file that GITHUB_OUTPUT names and the summary to the file that
 // GITHUB_STEP_SUMMARY names, each only when its variable is not empty. Otherwise
 // it writes nothing.
 func GitHubFrom(getenv func(string) string) GitHub {
-	if getenv("GITHUB_ACTIONS") != "true" {
+	if !GitHubActions(getenv) {
 		return GitHub{}
 	}
 	return GitHub{outputs: getenv("GITHUB_OUTPUT"), summary: getenv("GITHUB_STEP_SUMMARY")}

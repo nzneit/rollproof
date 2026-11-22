@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -138,6 +140,115 @@ func summaryFaults(summary, out, word string) []string {
 	return faults
 }
 
+// stopLine matches the line by which the tool stops GitHub's workflow commands:
+// "::stop-commands::" and 26 characters of crypto/rand.Text's alphabet.
+var stopLine = regexp.MustCompile(`^::stop-commands::[A-Z2-7]{26}$`)
+
+// envValue gives the value of name in env, the last one when it stands twice, as
+// os/exec uses it, and "" when it is not there.
+func envValue(env []string, name string) string {
+	value := ""
+	for _, entry := range env {
+		if n, v, ok := strings.Cut(entry, "="); ok && n == name {
+			value = v
+		}
+	}
+	return value
+}
+
+// workflowCommandFaults judges a run's standard output and standard error against
+// the lines for GitHub's workflow commands (design, section 8), and gives the
+// faults it finds, none when they hold. onGitHub is whether the run's
+// GITHUB_ACTIONS was "true", and bySignal whether a signal ended it. Off GitHub,
+// no line of either stream begins "::" after its leading white space, which is
+// how the runner reads a line. On GitHub, stdout's first line is
+// "::stop-commands::TOKEN" with a token of the tool's form; stderr's first line is
+// the same; each stream holds it once; "::TOKEN::" stands on stderr never, and on
+// stdout exactly once, as its last line, unless a signal ended the run, when it
+// stands nowhere. It stops at a first line of stdout that is not a stop line,
+// since the other checks need its token.
+func workflowCommandFaults(stdout, stderr string, onGitHub, bySignal bool) []string {
+	var faults []string
+	outLines, errLines := streamLines(stdout), streamLines(stderr)
+	if !onGitHub {
+		for _, s := range []struct {
+			name  string
+			lines []string
+		}{{"stdout", outLines}, {"stderr", errLines}} {
+			for _, l := range s.lines {
+				if strings.HasPrefix(strings.TrimLeftFunc(l, unicode.IsSpace), "::") {
+					faults = append(faults, fmt.Sprintf("%s holds the line %q, which begins %q, though GITHUB_ACTIONS is not true", s.name, l, "::"))
+					break
+				}
+			}
+		}
+		return faults
+	}
+	first := ""
+	if len(outLines) > 0 {
+		first = outLines[0]
+	}
+	if !stopLine.MatchString(first) {
+		return append(faults, fmt.Sprintf("stdout's first line is %q, want %q and a token of 26 characters", first, "::stop-commands::"))
+	}
+	stop := first
+	resume := "::" + strings.TrimPrefix(stop, "::stop-commands::") + "::"
+	errFirst := ""
+	if len(errLines) > 0 {
+		errFirst = errLines[0]
+	}
+	if errFirst != stop {
+		faults = append(faults, fmt.Sprintf("stderr's first line is %q, want %q, stdout's", errFirst, stop))
+	}
+	// The first-line checks find a stop line that is missing; the counts find one that stands
+	// again later, which would stop the commands anew after the resume line.
+	if n := countLine(outLines, stop); n > 1 {
+		faults = append(faults, fmt.Sprintf("stdout holds the stop line %d times, want once", n))
+	}
+	if n := countLine(errLines, stop); n > 1 {
+		faults = append(faults, fmt.Sprintf("stderr holds the stop line %d times, want once", n))
+	}
+	if slices.Contains(errLines, resume) {
+		faults = append(faults, fmt.Sprintf("stderr holds the line %q, which only stdout's last line may be", resume))
+	}
+	if bySignal {
+		if slices.Contains(outLines, resume) {
+			faults = append(faults, fmt.Sprintf("stdout holds the line %q, though a signal ended the run", resume))
+		}
+		return faults
+	}
+	if last := outLines[len(outLines)-1]; last != resume {
+		faults = append(faults, fmt.Sprintf("stdout's last line is %q, want %q", last, resume))
+	}
+	// The last-line check finds a resume line that is missing; the count finds one that stands
+	// before the last line as well.
+	if n := countLine(outLines, resume); n > 1 {
+		faults = append(faults, fmt.Sprintf("stdout holds the line %q %d times, want once", resume, n))
+	}
+	return faults
+}
+
+// streamLines gives the lines of a stream's text: the text without its last line
+// end, split at each line end; none for an empty text.
+func streamLines(s string) []string {
+	s = strings.TrimSuffix(s, "\n")
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "\n")
+}
+
+// countLine gives how many of lines are exactly line.
+func countLine(lines []string, line string) int {
+	n := 0
+	for _, l := range lines {
+		if l == line {
+			n++
+		}
+	}
+	return n
+}
+
 func TestHelmMajors(t *testing.T) {
 	for _, c := range []struct {
 		value string
@@ -219,6 +330,71 @@ func TestSummaryFaults(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if diff := cmp.Diff(c.want, summaryFaults(c.summary, out, c.word)); diff != "" {
 				t.Errorf("summaryFaults (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestEnvValue(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{"set", []string{"A=1", "GITHUB_ACTIONS=true"}, "true"},
+		{"set twice, the last empty", []string{"GITHUB_ACTIONS=true", "GITHUB_ACTIONS="}, ""},
+		{"set twice, the last true", []string{"GITHUB_ACTIONS=", "GITHUB_ACTIONS=true"}, "true"},
+		{"not there", []string{"A=1"}, ""},
+		{"nil", nil, ""},
+	} {
+		if got := envValue(c.env, "GITHUB_ACTIONS"); got != c.want {
+			t.Errorf("%s: envValue(%q, GITHUB_ACTIONS) is %q, want %q", c.name, c.env, got, c.want)
+		}
+	}
+}
+
+func TestWorkflowCommandFaults(t *testing.T) {
+	const (
+		token  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+		stop   = "::stop-commands::" + token
+		resume = "::" + token + "::"
+		out    = stop + "\nrollproof: PASS\nresults: /r\n" + resume + "\n"
+	)
+	for _, c := range []struct {
+		name             string
+		stdout, stderr   string
+		onGitHub, signal bool
+		want             []string
+	}{
+		{"off GitHub", "rollproof: PASS\nresults: /r\n", "", false, false, nil},
+		{"off GitHub, a stop line", stop + "\nrollproof: PASS\n", "", false, false,
+			[]string{`stdout holds the line "::stop-commands::ABCDEFGHIJKLMNOPQRSTUVWXYZ", which begins "::", though GITHUB_ACTIONS is not true`}},
+		{"off GitHub, an indented line on stderr", "rollproof: PASS\n", "  ::error::x\n", false, false,
+			[]string{`stderr holds the line "  ::error::x", which begins "::", though GITHUB_ACTIONS is not true`}},
+		{"on GitHub", out, stop + "\n", true, false, nil},
+		{"on GitHub, after a signal", stop + "\nrollproof: NOT VERIFIED\nresults: /r\n", stop + "\n", true, true, nil},
+		{"no stop line", "rollproof: PASS\n" + resume + "\n", stop + "\n", true, false,
+			[]string{`stdout's first line is "rollproof: PASS", want "::stop-commands::" and a token of 26 characters`}},
+		{"a token of another form", "::stop-commands::abc\n" + resume + "\n", stop + "\n", true, false,
+			[]string{`stdout's first line is "::stop-commands::abc", want "::stop-commands::" and a token of 26 characters`}},
+		{"nothing on stdout", "", stop + "\n", true, false,
+			[]string{`stdout's first line is "", want "::stop-commands::" and a token of 26 characters`}},
+		{"stderr begins with another line", out, "warning\n" + stop + "\n", true, false,
+			[]string{`stderr's first line is "warning", want "::stop-commands::ABCDEFGHIJKLMNOPQRSTUVWXYZ", stdout's`}},
+		{"the stop line twice", stop + "\n" + out, stop + "\n", true, false,
+			[]string{"stdout holds the stop line 2 times, want once"}},
+		{"no resume line", stop + "\nrollproof: PASS\n", stop + "\n", true, false,
+			[]string{`stdout's last line is "rollproof: PASS", want "::ABCDEFGHIJKLMNOPQRSTUVWXYZ::"`}},
+		{"the resume line twice", out + resume + "\n", stop + "\n", true, false,
+			[]string{`stdout holds the line "::ABCDEFGHIJKLMNOPQRSTUVWXYZ::" 2 times, want once`}},
+		{"a resume line after a signal", out, stop + "\n", true, true,
+			[]string{`stdout holds the line "::ABCDEFGHIJKLMNOPQRSTUVWXYZ::", though a signal ended the run`}},
+		{"a resume line on stderr", out, stop + "\n" + resume + "\n", true, false,
+			[]string{`stderr holds the line "::ABCDEFGHIJKLMNOPQRSTUVWXYZ::", which only stdout's last line may be`}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if diff := cmp.Diff(c.want, workflowCommandFaults(c.stdout, c.stderr, c.onGitHub, c.signal)); diff != "" {
+				t.Errorf("workflowCommandFaults (-want +got):\n%s", diff)
 			}
 		})
 	}

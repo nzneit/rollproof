@@ -3,6 +3,7 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -177,8 +178,11 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 	cmd := exec.CommandContext(ctx, "bash", script)
 	cmd.Dir = work
 	cmd.Env = env
-	out, err := cmd.CombinedOutput()
-	t.Logf("action.sh's output:\n%s", out)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	t.Logf("action.sh's standard output:\n%s\nits standard error:\n%s", stdout.String(), stderr.String())
 
 	// It exits 2.
 	if cmd.ProcessState == nil {
@@ -186,6 +190,40 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 	}
 	if code := cmd.ProcessState.ExitCode(); code != 2 {
 		t.Fatalf("action.sh exited %d (%v), want 2", code, err)
+	}
+	// stdout's first line is matched by scriptStopLine, its second by toolStopLine, and its last
+	// is "::" + T + "::"; stderr's first line is stdout's first; the line of stderr after the one
+	// that begins "rollproof: the tool from " is stdout's second, and it is stderr's last; no line
+	// of either stream is "::" + U + "::".
+	outLines, errLines := textLines(stdout.String()), textLines(stderr.String())
+	if len(outLines) < 3 || !scriptStopLine.MatchString(outLines[0]) || !toolStopLine.MatchString(outLines[1]) {
+		t.Fatalf("stdout's first line is not the script's stop line, or its second not the tool's:\n%s", stdout.String())
+	}
+	scriptToken := strings.TrimPrefix(outLines[0], "::stop-commands::")
+	toolToken := strings.TrimPrefix(outLines[1], "::stop-commands::")
+	if got, want := outLines[len(outLines)-1], "::"+toolToken+"::"; got != want {
+		t.Errorf("stdout's last line is %q, want %q", got, want)
+	}
+	if len(errLines) == 0 || errLines[0] != outLines[0] {
+		t.Errorf("stderr's first line is not stdout's %q:\n%s", outLines[0], stderr.String())
+	}
+	toolFrom := -1
+	for i, l := range errLines {
+		if strings.HasPrefix(l, "rollproof: the tool from ") {
+			toolFrom = i
+			break
+		}
+	}
+	if toolFrom < 0 || toolFrom+1 != len(errLines)-1 || errLines[toolFrom+1] != outLines[1] {
+		t.Errorf("stderr does not end with the line %q and then stdout's second, %q:\n%s",
+			"rollproof: the tool from …", outLines[1], stderr.String())
+	}
+	for name, lines := range map[string][]string{"stdout": outLines, "stderr": errLines} {
+		for _, l := range lines {
+			if l == "::"+scriptToken+"::" {
+				t.Errorf("%s holds the line %q, which resumes the script's commands", name, l)
+			}
+		}
 	}
 	// WS/results/result.json is final, its verdict not-verified, its one reason config-rejected.
 	results := filepath.Join(ws, "results")

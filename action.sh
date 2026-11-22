@@ -7,6 +7,12 @@
 # the step's verdict stays empty. Sourced, it sets its shell options and defines its functions, and
 # does not run main.
 #
+# Once it knows that the runner is Linux, and before any line that can hold an input or an
+# engine's output, it prints the line that stops the runner's workflow commands, with a token of
+# its own, on both streams, and it never prints the line that resumes them: the runner then reads
+# no line of the step as a command, the tool's own lines included (design, section 8, "Workflow
+# commands").
+#
 # Its input is the environment that action.yml's step gives it:
 #   ROLLPROOF_ACTION_CONFIG      the input config
 #   ROLLPROOF_ACTION_IMAGE       the input image
@@ -14,7 +20,7 @@
 #   ROLLPROOF_ACTION_VERSION     written at a release; nothing reads it
 #   ROLLPROOF_ACTION_REPOSITORY  written at a release: the image's repository
 #   ROLLPROOF_ACTION_DIGEST      written at a release: the image's digest, sha256:…
-# Besides bash and the engine, it uses uname, mktemp and tar.
+# Besides bash and the engine, it uses uname, mktemp and tar, and reads /proc/sys/kernel/random/uuid.
 
 set -euo pipefail
 shopt -s execfail
@@ -23,6 +29,22 @@ shopt -s execfail
 fail() {
   printf 'rollproof: %s\n' "$1" >&2
   exit 2
+}
+
+# token_file is where stop_commands reads its token: the kernel gives a new random UUID at each
+# read. A test that sources this script sets it to a file of its own.
+token_file=/proc/sys/kernel/random/uuid
+
+# stop_commands prints "::stop-commands::TOKEN" on standard output and on standard error, TOKEN
+# the first line of token_file, read with bash's own read. GitHub's runner then reads no workflow
+# command in the step until a line "::TOKEN::", which this script never prints. Each stream gets
+# the line, because the runner reads each in its own order. Without a token it fails.
+stop_commands() {
+  local token=
+  read -r token 2>/dev/null <"$token_file" || true
+  [[ -n $token ]] || fail "no token for the line that stops the runner's workflow commands: $token_file gave none"
+  printf '::stop-commands::%s\n' "$token"
+  printf '::stop-commands::%s\n' "$token" >&2
 }
 
 # pick_engine prints the engine's command name as the tool's pickEngine chooses it
@@ -99,6 +121,8 @@ main() {
   local system engine ref dir temp=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
   system=$(uname -s) || fail "uname -s failed, so the runner's system is not known; the action runs only on Linux"
   [[ $system == Linux ]] || fail "the runner is not Linux (uname -s printed $system); the action runs only on Linux"
+  # From here on a line may hold an input or an engine's output.
+  stop_commands
   engine=$(pick_engine) || fail "no container engine that kind supports: KIND_EXPERIMENTAL_PROVIDER names none, and none of docker, nerdctl and podman answers -v"
   ref=$(image_ref) || exit 2
   "$engine" pull "$ref" >&2 || fail "$engine could not pull $ref"

@@ -27,6 +27,36 @@ func delimiterFrom(t *testing.T, delimiters ...string) {
 	t.Cleanup(func() { newDelimiter = real })
 }
 
+func TestGitHubActions(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		set   bool
+		value string
+		want  bool
+	}{
+		{`"true"`, true, "true", true},
+		{"unset", false, "", false},
+		{`""`, true, "", false},
+		{`"false"`, true, "false", false},
+		{`"TRUE"`, true, "TRUE", false},
+		{`"1"`, true, "1", false},
+		{`" true"`, true, " true", false},
+		{`"true\n"`, true, "true\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			getenv := func(key string) string {
+				if key == "GITHUB_ACTIONS" && tc.set {
+					return tc.value
+				}
+				return ""
+			}
+			if got := GitHubActions(getenv); got != tc.want {
+				t.Errorf("GitHubActions with GITHUB_ACTIONS %q (set: %v) is %v, want %v", tc.value, tc.set, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGitHubFrom(t *testing.T) {
 	const written = "verdict<<D1\npass\nD1\n"
 	for _, tc := range []struct {

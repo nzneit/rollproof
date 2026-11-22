@@ -310,10 +310,11 @@ func expect(t *testing.T, got, want result) {
 // they apply. While the tool runs, it calls the fixture's action, if any, with
 // the window marks, and fails the test when the run ended before the action
 // reported done. It keeps the tool's standard output in the results folder as
-// console.txt and its standard error as stderr.txt. TestMain builds the
-// binary and the images once for the whole test run. The tool never sees the
-// job's GITHUB_OUTPUT or GITHUB_STEP_SUMMARY; a fixture with github gets files
-// of its own.
+// console.txt and its standard error as stderr.txt. It checks the lines for
+// GitHub's workflow commands in both streams by the run's own GITHUB_ACTIONS
+// (workflowCommandFaults). TestMain builds the binary and the images once for
+// the whole test run. The tool never sees the job's GITHUB_OUTPUT or
+// GITHUB_STEP_SUMMARY; a fixture with github gets files of its own.
 func runFixture(t *testing.T, f fixture) result {
 	t.Helper()
 	out := outDir(t)
@@ -426,6 +427,11 @@ func runFixture(t *testing.T, f fixture) result {
 		}
 	default:
 		t.Fatalf("%s (%s): %v", f.name, f.helm, runErr)
+	}
+	// The run's own GITHUB_ACTIONS decides which lines it prints; on GitHub every run has it, and
+	// on a developer's machine only the runs with files of their own.
+	for _, fault := range workflowCommandFaults(stdout.String(), stderr.String(), envValue(env, "GITHUB_ACTIONS") == "true", r.signal != "") {
+		t.Errorf("%s (%s): %s", f.name, f.helm, fault)
 	}
 
 	b, err := os.ReadFile(filepath.Join(out, "result.json"))

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -251,6 +252,13 @@ const dockerBanner = "Docker version 28.0.4, build b8034c0"
 
 var ref = "127.0.0.1:5000/rollproof@sha256:" + strings.Repeat("a", 64)
 
+// scriptStopLine is the line by which action.sh stops the runner's workflow commands: its token
+// is the kernel's random UUID.
+var scriptStopLine = regexp.MustCompile(`^::stop-commands::[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// toolStopLine is the line by which the tool stops them: 26 characters of crypto/rand.Text.
+var toolStopLine = regexp.MustCompile(`^::stop-commands::[A-Z2-7]{26}$`)
+
 // startingRun is a run in which the script starts the fake tool: a fake docker whose export gives
 // toolTar("rollproof", 0o755, fakeTool), and ROLLPROOF_ACTION_IMAGE set to ref.
 func startingRun(t *testing.T) *scriptRun {
@@ -447,19 +455,23 @@ func TestTheScriptFailsWithExit2AndWritesNoOutput(t *testing.T) {
 		// log's create line built from its base name, compared whole. A row that fails before
 		// create (no folder may exist, as in "no folder for the binary") wants no create line.
 		creates bool
+		// beforeStop says that the script fails before it prints its stop line: stdout is then
+		// empty and stderr only the failure's text. Every other row wants the stop line first on
+		// both streams.
+		beforeStop bool
 	}{
 		{name: "not Linux",
 			change: func(t *testing.T, r *scriptRun) { r.command("uname", "printf '%s\\n' Darwin\n") },
 			text: func(*scriptRun) string {
 				return "rollproof: the runner is not Linux (uname -s printed Darwin); the action runs only on Linux"
 			},
-			exact: true},
+			exact: true, beforeStop: true},
 		{name: "a uname that fails",
 			change: func(t *testing.T, r *scriptRun) { r.command("uname", "exit 1\n") },
 			text: func(*scriptRun) string {
 				return "rollproof: uname -s failed, so the runner's system is not known; the action runs only on Linux"
 			},
-			exact: true},
+			exact: true, beforeStop: true},
 		{name: "no engine",
 			change: func(t *testing.T, r *scriptRun) {
 				if err := os.Remove(filepath.Join(r.path, "docker")); err != nil {
@@ -538,12 +550,27 @@ func TestTheScriptFailsWithExit2AndWritesNoOutput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := startingRun(t)
 			tc.change(t, r)
-			code, stderr := r.run()
+			stdout, code, stderr := r.start(r.script)
 			if code != 2 {
 				t.Errorf("exit code %d, want 2; stderr:\n%s", code, stderr)
 			}
 			if got, want := lastLine(stderr), tc.text(r); got != want {
 				t.Errorf("stderr's last line is %q, want %q; stderr:\n%s", got, want, stderr)
+			}
+			if tc.beforeStop {
+				if stdout != "" {
+					t.Errorf("stdout is %q, want it empty", stdout)
+				}
+				if want := tc.text(r) + "\n"; stderr != want {
+					t.Errorf("stderr is %q, want %q", stderr, want)
+				}
+			} else {
+				out := textLines(stdout)
+				if len(out) != 1 || !scriptStopLine.MatchString(out[0]) {
+					t.Errorf("stdout is %q, want one line that %s matches", stdout, scriptStopLine)
+				} else if first, _, _ := strings.Cut(stderr, "\n"); first != out[0] {
+					t.Errorf("stderr's first line is %q, want stdout's %q; stderr:\n%s", first, out[0], stderr)
+				}
 			}
 			r.outputIsEmpty()
 			log := r.lines(r.log)
@@ -567,6 +594,88 @@ func TestTheScriptFailsWithExit2AndWritesNoOutput(t *testing.T) {
 			}
 			if diff := cmp.Diff(wantCreates, creates); diff != "" {
 				t.Errorf("the log's create lines (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// textLines gives the lines of a stream's text: the text without its last line end, split at
+// each line end; none for an empty text.
+func textLines(s string) []string {
+	s = strings.TrimSuffix(s, "\n")
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "\n")
+}
+
+func TestTheScriptStopsWorkflowCommandsFirst(t *testing.T) {
+	var tokens []string
+	for i := range 2 {
+		r := startingRun(t)
+		stdout, code, stderr := r.start(r.script)
+		if code != 7 {
+			t.Fatalf("run %d: exit code %d, want 7, the fake tool's; stderr:\n%s", i+1, code, stderr)
+		}
+		out := textLines(stdout)
+		if len(out) != 1 || !scriptStopLine.MatchString(out[0]) {
+			t.Fatalf("run %d: stdout is %q, want one line that %s matches", i+1, stdout, scriptStopLine)
+		}
+		token := strings.TrimPrefix(out[0], "::stop-commands::")
+		errLines := textLines(stderr)
+		if len(errLines) == 0 || errLines[0] != out[0] {
+			t.Errorf("run %d: stderr's first line is not stdout's %q; stderr:\n%s", i+1, out[0], stderr)
+		}
+		if got, want := lastLine(stderr), "rollproof: the tool from "+ref+", through docker"; got != want {
+			t.Errorf("run %d: stderr's last line is %q, want %q", i+1, got, want)
+		}
+		resume := "::" + token + "::"
+		for name, lines := range map[string][]string{"stdout": out, "stderr": errLines} {
+			for _, l := range lines {
+				if l == resume {
+					t.Errorf("run %d: %s holds the resume line %q", i+1, name, resume)
+				}
+			}
+		}
+		tokens = append(tokens, token)
+	}
+	if tokens[0] == tokens[1] {
+		t.Errorf("both runs had the token %q, want two", tokens[0])
+	}
+}
+
+func TestTheScriptsStopLine(t *testing.T) {
+	dir := t.TempDir()
+	file := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	noToken := func(path string) string {
+		return "rollproof: no token for the line that stops the runner's workflow commands: " + path + " gave none\n"
+	}
+	uuid := file("uuid", "6d1e3c9a-2b7f-4c1e-9a0d-3f5b8e2c7a14\n")
+	noLineEnd := file("no-line-end", "tok-1")
+	missing := filepath.Join(dir, "missing")
+	empty := file("empty", "")
+	for _, tc := range []struct {
+		name, path, stdout, stderr string
+		code                       int
+	}{
+		{"a UUID", uuid, "::stop-commands::6d1e3c9a-2b7f-4c1e-9a0d-3f5b8e2c7a14\n",
+			"::stop-commands::6d1e3c9a-2b7f-4c1e-9a0d-3f5b8e2c7a14\n", 0},
+		{"no line end", noLineEnd, "::stop-commands::tok-1\n", "::stop-commands::tok-1\n", 0},
+		{"a path that does not exist", missing, "", noToken(missing), 2},
+		{"an empty file", empty, "", noToken(empty), 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newScriptRun(t)
+			stdout, code, stderr := r.source("token_file=" + shQuote(tc.path) + "; stop_commands")
+			if stdout != tc.stdout || code != tc.code || stderr != tc.stderr {
+				t.Errorf("stop_commands gave stdout %q, exit %d, stderr %q; want %q, %d, %q",
+					stdout, code, stderr, tc.stdout, tc.code, tc.stderr)
 			}
 		})
 	}
