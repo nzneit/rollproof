@@ -52,6 +52,10 @@ type fixture struct {
 	registries                        []map[string]string
 	images                            map[string]map[string]string
 	literal                           map[string]literalImage
+	// github gives the run its own files for GitHub's outputs and job summary, github-output and
+	// github-summary in its results folder, with GITHUB_ACTIONS true; every other run gets none
+	// (section 12).
+	github bool
 }
 
 // literalImage is an image a release's values name outright: its repository and digest.

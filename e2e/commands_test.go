@@ -61,7 +61,7 @@ func checkCommandsRecord(t *testing.T, rec record, roles ...string) {
 // word as the configuration writes it; kubectl exits with code 1 for an object it cannot find.
 func TestSetupCommandFails(t *testing.T) {
 	f := fixture{name: "setup-command-fails", setup: [][]string{{"kubectl", "get", "configmap", "rollproof-fixture-absent"}}}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 2, verdict: "not-verified", codes: []string{"setup-failed"}, decided: "setup-failed"})
 		checkSetupOutput(t, `configmaps "rollproof-fixture-absent" not found`)
 		const want = "setup[0] (kubectl) exited with code 1"
@@ -75,7 +75,7 @@ func TestSetupCommandFails(t *testing.T) {
 // Row 21. The first fixture through the commands driver, with all three commands: pass.
 func TestCommandsDriverWithAllThreeCommands(t *testing.T) {
 	f := fixture{name: "commands-driver-with-all-three-commands", commands: []string{"install", "deploy", "rollback"}}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 		rec := readRecord(t, outDir(t))
 		checkCommandsRecord(t, rec, "install", "deploy", "rollback")
@@ -90,7 +90,7 @@ func TestCommandsDriverWithAllThreeCommands(t *testing.T) {
 // Row 22. The same with install and deploy only: pass, reported as a deploy with no rollback.
 func TestCommandsDriverWithInstallAndDeployOnly(t *testing.T) {
 	f := fixture{name: "commands-driver-with-install-and-deploy-only", commands: []string{"install", "deploy"}}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: map[string]string{"steady": "pass", "deploy": "pass"}})
 		rec := readRecord(t, outDir(t))
 		checkCommandsRecord(t, rec, "install", "deploy")
@@ -107,7 +107,7 @@ func TestCommandsDriverWithInstallAndDeployOnly(t *testing.T) {
 // Row 29. A setup command makes the probe's namespace enforce the restricted level: pass.
 func TestSetupMakesTheProbeNamespaceRestricted(t *testing.T) {
 	f := fixture{name: "setup-makes-the-probe-namespace-restricted", setup: restrictProbeNamespace}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 		checkSetupOutput(t, "namespace/rollproof-probe labeled")
 		checkProbePodRestricted(t)

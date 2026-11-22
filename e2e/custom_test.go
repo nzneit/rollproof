@@ -200,7 +200,7 @@ func logInstallFailures(t *testing.T, rec record) {
 func TestCustomProbeGoesSilentOnTheCandidate(t *testing.T) {
 	f := fixture{name: "custom-probe-goes-silent-on-the-candidate",
 		custom: fixtureProbe(map[string]string{"VERSION": "candidate", "ON_VERSION": "silent"})}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 2, verdict: "not-verified", codes: []string{"probe-silent"}, decided: "probe-silent",
 			windows: map[string]string{"steady": "pass", "deploy": "not-verified", "rollback": "not-run"}})
 		rec := readRecord(t, outDir(t))
@@ -214,7 +214,7 @@ func TestCustomProbeGoesSilentOnTheCandidate(t *testing.T) {
 func TestCustomProbeExitsOnTheCandidate(t *testing.T) {
 	f := fixture{name: "custom-probe-exits-on-the-candidate",
 		custom: fixtureProbe(map[string]string{"VERSION": "candidate", "ON_VERSION": "exit"})}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 2, verdict: "not-verified", codes: []string{"probe-exited"}, decided: "probe-exited",
 			windows: map[string]string{"steady": "pass", "deploy": "not-verified", "rollback": "not-run"}})
 		rec := readRecord(t, outDir(t))
@@ -228,7 +228,7 @@ func TestCustomProbeExitsOnTheCandidate(t *testing.T) {
 // which workloads the probe reaches.
 func TestTCPLoopJudgesTheFirstFixture(t *testing.T) {
 	f := fixture{name: "tcp-loop-judges-the-first-fixture", custom: tcpProbe}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 		rec := readRecord(t, outDir(t))
 		checkCustomProbeRecord(t, rec, "deploy", "rollback")
@@ -244,7 +244,7 @@ func TestTCPLoopJudgesTheFirstFixture(t *testing.T) {
 // window nor a transition's holds one.
 func TestProbeFailsItsFirstFiveSeconds(t *testing.T) {
 	f := fixture{name: "probe-fails-its-first-five-seconds", custom: fixtureProbe(map[string]string{"FAIL_FIRST": "5s"})}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		rec := readRecord(t, outDir(t))
 		in := rec.Install
 		if in == nil || len(in.SettleRestartedBy) != 0 {
@@ -269,7 +269,7 @@ func TestProbeFailsItsFirstFiveSeconds(t *testing.T) {
 // failures from 15 s after its first observation on fall in the steady window.
 func TestProbeFailsItsFirstTwentySeconds(t *testing.T) {
 	f := fixture{name: "probe-fails-its-first-twenty-seconds", custom: fixtureProbe(map[string]string{"FAIL_FIRST": "20s"})}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		rec := readRecord(t, outDir(t))
 		in := rec.Install
 		if in == nil || len(in.SettleRestartedBy) != 0 {
@@ -301,7 +301,7 @@ func TestProbeFailsItsFirstTwentySeconds(t *testing.T) {
 func TestTCPLoopJudgesACandidateWithoutReadiness(t *testing.T) {
 	f := fixture{name: "tcp-loop-judges-a-candidate-without-readiness", custom: tcpProbe,
 		candidate: map[string]any{"readiness": false, "startDelay": "5s"}}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 1, verdict: "fail", codes: []string{"probe-failures"}, decided: "probe-failures", windows: failedDeploy})
 		rec := readRecord(t, outDir(t))
 		checkCustomProbeRecord(t, rec, "deploy")
@@ -315,7 +315,7 @@ func TestTCPLoopJudgesACandidateWithoutReadiness(t *testing.T) {
 // Row 27. A custom probe ignores SIGTERM: pass; the report says that the probe did not stop.
 func TestCustomProbeIgnoresSIGTERM(t *testing.T) {
 	f := fixture{name: "custom-probe-ignores-sigterm", custom: fixtureProbe(map[string]string{"IGNORE_TERM": "true"})}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 		rec := readRecord(t, outDir(t))
 		checkCustomProbeRecord(t, rec, "deploy", "rollback")
@@ -333,7 +333,7 @@ func TestCustomProbeIgnoresSIGTERM(t *testing.T) {
 // loop of section 6, as a custom probe, judges the run: pass.
 func TestTCPLoopInARestrictedProbeNamespace(t *testing.T) {
 	f := fixture{name: "tcp-loop-in-a-restricted-probe-namespace", custom: tcpProbe, setup: restrictProbeNamespace}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 		checkSetupOutput(t, "namespace/rollproof-probe labeled")
 		checkCustomProbeRecord(t, readRecord(t, outDir(t)), "deploy", "rollback")

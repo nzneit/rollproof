@@ -5,15 +5,17 @@ package e2e
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
-// underBothHelms runs f once with each Helm major, as two subtests, and hands
+// underEachHelm runs f once with each Helm major that ROLLPROOF_E2E_HELM selects
+// (majors), each as a subtest named after its binary, helm-3 or helm-4, and hands
 // each result to check.
-func underBothHelms(t *testing.T, f fixture, check func(t *testing.T, r result)) {
-	for _, helm := range []string{"helm-3", "helm-4"} {
+func underEachHelm(t *testing.T, f fixture, check func(t *testing.T, r result)) {
+	for _, helm := range majors {
 		t.Run(helm, func(t *testing.T) {
 			g := f
 			g.helm = helm
@@ -25,7 +27,7 @@ func underBothHelms(t *testing.T, f fixture, check func(t *testing.T, r result))
 // Both releases report ready only when they can serve, and after SIGTERM
 // serve on and then drain: pass.
 func TestFirstFixture(t *testing.T) {
-	underBothHelms(t, fixture{name: "first"}, func(t *testing.T, r result) {
+	underEachHelm(t, fixture{name: "first", github: true}, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass",
 			windows: map[string]string{"steady": "pass", "deploy": "pass", "rollback": "pass"}})
 		seen := 0
@@ -62,6 +64,15 @@ func TestFirstFixture(t *testing.T) {
 			t.Logf("install window: %d of %d checks failed %v, the last %v before the steady window",
 				in.Failed, in.Checks, in.FailedByClass, in.Settled.Sub(*in.LastFailure))
 		}
+		sum := checkGitHubFiles(t, outDir(t), "PASS", "pass")
+		for _, line := range []string{
+			"| window | length | checks | failed | after finish | slowest | behind | result |",
+			"| transition | workload | probed | pods replaced | quickest stop |",
+		} {
+			if !slices.Contains(strings.Split(sum, "\n"), line) {
+				t.Errorf("the job summary holds no line %q:\n%s", line, sum)
+			}
+		}
 	})
 }
 
@@ -70,7 +81,7 @@ func TestFirstFixture(t *testing.T) {
 func TestCandidateWithoutReadiness(t *testing.T) {
 	f := fixture{name: "candidate-without-readiness",
 		candidate: map[string]any{"readiness": false, "startDelay": "5s"}}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 1, verdict: "fail", codes: []string{"probe-failures"}, decided: "probe-failures",
 			windows: map[string]string{"steady": "pass", "deploy": "fail", "rollback": "not-run"}})
 	})
@@ -79,7 +90,7 @@ func TestCandidateWithoutReadiness(t *testing.T) {
 // The candidate exits on SIGTERM: fail in the rollback window.
 func TestCandidateExitsOnSIGTERM(t *testing.T) {
 	f := fixture{name: "candidate-exits-on-sigterm", candidate: map[string]any{"shutdown": "exit"}}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 1, verdict: "fail", codes: []string{"probe-failures"}, decided: "probe-failures",
 			windows: map[string]string{"steady": "pass", "deploy": "pass", "rollback": "fail"}})
 	})
@@ -93,7 +104,7 @@ func TestNoRoomForTheExtraPod(t *testing.T) {
 		candidate: map[string]any{"replicas": 3},
 		workers:   3,
 		limits:    map[string]string{"timeout": "90s"}}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 1, verdict: "fail",
 			codes: []string{"pod-unschedulable", "transition-stalled"}, decided: "transition-stalled",
 			windows: map[string]string{"steady": "pass", "deploy": "fail", "rollback": "not-run"}})
@@ -105,7 +116,7 @@ func TestNoRoomForTheExtraPod(t *testing.T) {
 // the probe started.
 func TestPreviousFailsEveryRequest(t *testing.T) {
 	f := fixture{name: "previous-fails-every-request", previous: map[string]any{"failWork": true}}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 2, verdict: "not-verified", codes: []string{"steady-not-clean"}, decided: "steady-not-clean",
 			windows: map[string]string{"steady": "not-verified", "deploy": "not-run", "rollback": "not-run"}})
 		got := readInstall(t, outDir(t))
@@ -144,7 +155,7 @@ const oldestNodeImage = "kindest/node:v1.34.11@sha256:44e222ee2132dab25ff8730168
 // The first fixture on the oldest node image that the linked kind release lists: pass.
 func TestFirstFixtureOnTheOldestNodeImage(t *testing.T) {
 	f := fixture{name: "first-on-the-oldest-node-image", nodeImage: oldestNodeImage}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 		c := readRecord(t, outDir(t)).Cluster
 		if c.Kubernetes != "v1.34.11" || c.NodeImage != oldestNodeImage {
@@ -156,7 +167,7 @@ func TestFirstFixtureOnTheOldestNodeImage(t *testing.T) {
 // Row 5. The previous release exits on SIGTERM: fail, in the deploy window; the rollback is not run.
 func TestPreviousExitsOnSIGTERM(t *testing.T) {
 	f := fixture{name: "previous-exits-on-sigterm", previous: map[string]any{"shutdown": "exit"}}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 1, verdict: "fail", codes: []string{"probe-failures"}, decided: "probe-failures", windows: failedDeploy})
 	})
 }
@@ -164,7 +175,7 @@ func TestPreviousExitsOnSIGTERM(t *testing.T) {
 // Row 8. The deploy replaces no pod: not verified.
 func TestDeployReplacesNoPod(t *testing.T) {
 	f := fixture{name: "deploy-replaces-no-pod", candidateRunsPrevious: true}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 2, verdict: "not-verified", codes: []string{"no-pod-replaced"}, decided: "no-pod-replaced",
 			windows: map[string]string{"steady": "pass", "deploy": "not-verified", "rollback": "not-run"}})
 	})
@@ -175,7 +186,7 @@ func TestDeployReplacesNoPod(t *testing.T) {
 func TestPreviousNeverReady(t *testing.T) {
 	f := fixture{name: "previous-never-ready", previous: map[string]any{"startDelay": "1h"},
 		limits: map[string]string{"timeout": "90s"}}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 2, verdict: "not-verified", codes: []string{"install-failed"}, decided: "install-failed"})
 	})
 }
@@ -183,7 +194,7 @@ func TestPreviousNeverReady(t *testing.T) {
 // Row 11. No previous release is named: pass, reported as restart only.
 func TestNoPreviousRelease(t *testing.T) {
 	f := fixture{name: "no-previous-release", noPrevious: true}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: map[string]string{"steady": "pass", "restart": "pass"}})
 		rec := readRecord(t, outDir(t))
 		tr := rec.transition(t, "restart")
@@ -207,7 +218,7 @@ func TestNoPreviousRelease(t *testing.T) {
 func TestBothReleasesEndWithoutDraining(t *testing.T) {
 	values := map[string]any{"serveAfterTerm": "5s", "drainDeadline": "0s"}
 	f := fixture{name: "both-releases-end-without-draining", previous: values, candidate: values}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 		seen := 0
 		for _, tr := range readTransitions(t, outDir(t)) {
@@ -233,7 +244,7 @@ func TestSecondRolloutAfterTheFirstFinished(t *testing.T) {
 	var restarted time.Time
 	f := fixture{name: "second-rollout-after-the-first-finished",
 		act: restartAfterTheDeploysFirstFinish(5*time.Second, &restarted)}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 		rec := readRecord(t, outDir(t))
 		tr := rec.transition(t, "deploy")
@@ -263,9 +274,11 @@ func TestSecondRolloutAfterTheFirstFinished(t *testing.T) {
 // Row 14. The chart denies traffic by default, and the test's values let the probe in: pass.
 // The control comes first (decision 24): the same chart with the policy that denies and without
 // the rule that lets the probe in must not pass, or the row would pass whether or not kind's
-// network plugin enforces the policy. The control runs once, under Helm 3: it tests the cluster's
-// network plugin, not Helm. A control that does not give its expected result stops the test
-// before the row runs.
+// network plugin enforces the policy. The control runs in every run of this test, under Helm 3,
+// whatever ROLLPROOF_E2E_HELM selects: it tests the cluster's network plugin, not Helm, and each
+// job of the suite's workflow runs on its own runner image and shows there that the plugin
+// enforces the policy. A control that does not give its expected result stops the test before the
+// row runs.
 func TestChartDeniesTrafficByDefault(t *testing.T) {
 	controlled := t.Run("control", func(t *testing.T) {
 		denied := map[string]any{"denyIngress": true, "allowProbe": false}
@@ -281,7 +294,7 @@ func TestChartDeniesTrafficByDefault(t *testing.T) {
 	}
 	values := map[string]any{"denyIngress": true, "allowProbe": true}
 	f := fixture{name: "chart-denies-traffic-by-default", previous: values, candidate: values}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 	})
 }
@@ -290,7 +303,7 @@ func TestChartDeniesTrafficByDefault(t *testing.T) {
 func TestStatefulSet(t *testing.T) {
 	values := map[string]any{"workload": "StatefulSet"}
 	f := fixture{name: "statefulset", previous: values, candidate: values}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 		rec := readRecord(t, outDir(t))
 		for _, name := range []string{"deploy", "rollback"} {
@@ -305,7 +318,7 @@ func TestStatefulSet(t *testing.T) {
 func TestDaemonSet(t *testing.T) {
 	values := map[string]any{"workload": "DaemonSet"}
 	f := fixture{name: "daemonset", previous: values, candidate: values}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 		rec := readRecord(t, outDir(t))
 		for _, name := range []string{"deploy", "rollback"} {
@@ -325,7 +338,7 @@ func TestDaemonSet(t *testing.T) {
 func TestHooksLongerThanTheSettleTime(t *testing.T) {
 	values := map[string]any{"hooks": true, "hookSleep": "20s"}
 	f := fixture{name: "hooks-longer-than-the-settle-time", previous: values, candidate: values}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 		rec := readRecord(t, outDir(t))
 		if rec.Install == nil {
@@ -397,7 +410,7 @@ func TestCandidateFailsAfterTheRolloutFinished(t *testing.T) {
 	f := fixture{name: "candidate-fails-after-the-rollout-finished",
 		candidate: map[string]any{"failAfter": "20s", "failFor": "5s"},
 		limits:    map[string]string{"settle": "30s"}}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 1, verdict: "fail", codes: []string{"probe-failures"}, decided: "probe-failures", windows: failedDeploy})
 		if d := readRecord(t, outDir(t)).window(t, "deploy"); d.Failed == 0 || d.FailedAfterFinish != d.Failed {
 			t.Errorf("deploy: %d failed, %d after finish; want every failure after finish", d.Failed, d.FailedAfterFinish)
@@ -408,7 +421,7 @@ func TestCandidateFailsAfterTheRolloutFinished(t *testing.T) {
 // Row 25. A value breaks the candidate chart's schema: fail, command-failed.
 func TestCandidateValueBreaksTheSchema(t *testing.T) {
 	f := fixture{name: "candidate-value-breaks-the-schema", candidate: map[string]any{"replicas": 0}}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 1, verdict: "fail", codes: []string{"command-failed"}, decided: "command-failed", windows: failedDeploy})
 		if tr := readRecord(t, outDir(t)).transition(t, "deploy"); string(tr.Command) != `"exit-nonzero"` {
 			t.Errorf("deploy: command %s, want \"exit-nonzero\"", tr.Command)
@@ -421,7 +434,7 @@ func TestCandidateValueBreaksTheSchema(t *testing.T) {
 // file is final and, with keepsCluster, that the cluster stayed; it removes it afterwards.
 func TestSIGINTDuringTheDeploy(t *testing.T) {
 	f := fixture{name: "sigint-during-the-deploy", act: interruptDuringTheDeploy, keepsCluster: true}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: -1, signal: "interrupt", verdict: "not-verified", codes: []string{"interrupted"}, decided: "interrupted",
 			windows: map[string]string{"steady": "pass", "deploy": "not-verified", "rollback": "not-run"}})
 	})
@@ -433,7 +446,7 @@ func TestCandidateChangesOnlyAnUnprobedWorkload(t *testing.T) {
 	f := fixture{name: "candidate-changes-only-an-unprobed-workload", candidateRunsPrevious: true,
 		previous:  map[string]any{"second": true, "secondRevision": "1"},
 		candidate: map[string]any{"second": true, "secondRevision": "2"}}
-	underBothHelms(t, f, func(t *testing.T, r result) {
+	underEachHelm(t, f, func(t *testing.T, r result) {
 		expect(t, r, result{exit: 0, verdict: "pass", windows: allPass})
 		rec := readRecord(t, outDir(t))
 		if w := rec.workload(t, "deploy", "deployment/orders"); w.PodsReplaced != 0 || w.Probed != "yes" {

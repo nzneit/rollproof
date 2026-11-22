@@ -47,7 +47,8 @@ type mirrorInputs struct {
 // throughTheMirror is the first fixture through the mirror, by decisions 16 to 21: docker.io and
 // the real host's stand-in with mirrors, a login and the CA; the previous image named after
 // docker.io; the candidate through images with as on docker.io; the setup commands of
-// mirrorSetup; Helm 3; limits.timeout 3m.
+// mirrorSetup; Helm 3; limits.timeout 3m; with files of its own for GitHub's outputs and summary,
+// which the search for the password reads.
 func throughTheMirror(in mirrorInputs) fixture {
 	return fixture{
 		name: "through the mirror",
@@ -64,6 +65,7 @@ func throughTheMirror(in mirrorInputs) fixture {
 		setup:  mirrorSetup(in),
 		helm:   "helm-3",
 		limits: map[string]string{"timeout": "3m"},
+		github: true,
 	}
 }
 
