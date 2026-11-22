@@ -38,6 +38,16 @@ func writeTestFile(t *testing.T, path, text string) {
 	}
 }
 
+// writeLogFile writes text to path, making its folders, and returns the error. A stub of kind's
+// calls runs on another goroutine than the test's, where t.Fatal is not allowed: it reports the
+// error with t.Errorf and returns it.
+func writeLogFile(path, text string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(text), 0o600)
+}
+
 // filesUnder returns the paths of the regular files under dir, relative to it and sorted.
 func filesUnder(t *testing.T, dir string) []string {
 	t.Helper()
@@ -78,8 +88,15 @@ func TestCollectLogsCopiesEveryFile(t *testing.T) {
 		if name != "rollproof-x" {
 			t.Errorf("kind's collection was given the cluster %q, want rollproof-x", name)
 		}
-		writeTestFile(t, filepath.Join(dir, "kind-version.txt"), "v0.33.0")
-		writeTestFile(t, filepath.Join(dir, "rollproof-x-control-plane", "kubelet.log"), "kubelet says")
+		for path, text := range map[string]string{
+			filepath.Join(dir, "kind-version.txt"):                         "v0.33.0",
+			filepath.Join(dir, "rollproof-x-control-plane", "kubelet.log"): "kubelet says",
+		} {
+			if err := writeLogFile(path, text); err != nil {
+				t.Errorf("kind's log collection: %v", err)
+				return err
+			}
+		}
 		return nil
 	}
 	var containers []string
@@ -161,7 +178,10 @@ func TestCollectLogsWithNoRegistry(t *testing.T) {
 	replaceLogSeams(t)
 	runDir, evDir := t.TempDir(), t.TempDir()
 	kindCollectLogs = func(_ *kindcluster.Provider, _, dir string) error {
-		writeTestFile(t, filepath.Join(dir, "kind-version.txt"), "v0.33.0")
+		if err := writeLogFile(filepath.Join(dir, "kind-version.txt"), "v0.33.0"); err != nil {
+			t.Errorf("kind's log collection: %v", err)
+			return err
+		}
 		return nil
 	}
 	containerLogs = func(Engine, context.Context, string) (string, bool, error) {

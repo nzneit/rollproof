@@ -281,6 +281,55 @@ func TestSetupStoppedBySignal(t *testing.T) {
 	}
 }
 
+// A signal while the cluster is made: the cluster unit returns as soon as the signal came, and the
+// run ends with a final result.json whose one reason is interrupted, before any window.
+func TestASignalWhileTheClusterIsMade(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.hooks["create"] = cancel
+	w.createErr = verdict.Condition{Code: verdict.ClusterFailed, Text: "create the kind cluster: context canceled"}
+	if code := w.run(ctx); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if !r.Final {
+		t.Error("result.json is not final")
+	}
+	if diff := cmp.Diff([]string{"interrupted"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	if window, _ := r.windowOf("interrupted"); window != "" {
+		t.Errorf("interrupted in window %q, want none", window)
+	}
+	if calls := w.calls.list(); slices.Contains(calls, "store") {
+		t.Errorf("the run went on after the signal: calls %q", calls)
+	}
+}
+
+// The same while the images are stored: storeFailed takes no logs once the signal came, and the
+// cluster stays for the next run.
+func TestASignalWhileTheImagesAreStored(t *testing.T) {
+	w := newWorld(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.hooks["store"] = cancel
+	w.cluster.storeErr = verdict.Condition{Code: verdict.ClusterFailed, Text: "the probe's image: context canceled"}
+	if code := w.run(ctx); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	r := w.result()
+	if !r.Final {
+		t.Error("result.json is not final")
+	}
+	if diff := cmp.Diff([]string{"interrupted"}, r.codes()); diff != "" {
+		t.Errorf("reasons (-want +got):\n%s", diff)
+	}
+	if calls := w.calls.list(); slices.Contains(calls, "deployer") || slices.Contains(calls, "delete") {
+		t.Errorf("the run went on after the signal, or deleted the cluster: calls %q", calls)
+	}
+}
+
 // A failed setup command is named in the reason by its path and its first word as the
 // configuration writes it, which the run takes from the index that Setup returns.
 func TestSetupFailureNamesTheCommand(t *testing.T) {

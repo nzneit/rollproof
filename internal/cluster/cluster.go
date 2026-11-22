@@ -72,6 +72,13 @@ var (
 	kindDelete = (*kindcluster.Provider).Delete
 )
 
+// The calls into kind that Create's node settings make. A test replaces them.
+var (
+	kindListNodes = (*kindcluster.Provider).ListNodes
+	nodeRole      = nodes.Node.Role
+	writeNodeFile = nodeutils.WriteFile
+)
+
 // pullImage is Create's pull of the node image, with the engine's check for an image that its
 // store holds. A test replaces it.
 var pullImage = Engine.pullIfMissing
@@ -160,6 +167,9 @@ type Cluster struct {
 // into the run's folder before kind creates the nodes; each node gets every ca
 // and settings file with rollproof.test's. A file that cannot be read or
 // written fails the step it belongs to.
+// Each call into kind runs through untilDone: when ctx ends while kind works,
+// Create stops waiting for kind and returns, and the next run removes what kind
+// made (section 10, "On a signal").
 func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	if err := remove(ctx, e, s.Name, s.RunDir); err != nil {
 		var c verdict.Condition
@@ -188,7 +198,8 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	// what the run made, unless s.Keep is set or ctx has ended. A kept cluster whose kind creation
 	// began ends the text with the sentence Kept gives, so that the console names its kubeconfig
 	// and context (section 9). When the removal fails, the text says that parts may be left, and
-	// the removal's error is joined to the Condition for the log.
+	// the removal's error is joined to the Condition for the log. A signal during the collection
+	// ends the clean-up there: the cluster stays for the next run to remove.
 	fail := func(step string, err error) (*Cluster, error) {
 		failure := verdict.Condition{Code: verdict.ClusterFailed, Text: step + ": " + err.Error()}
 		if ctx.Err() != nil {
@@ -198,6 +209,9 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 			if cerr := collectLogs(ctx, e, c.provider, s.Name, s.RunDir, s.Evidence); cerr != nil {
 				failure.Text += LogsNotCollected + cerr.Error()
 			}
+		}
+		if ctx.Err() != nil {
+			return nil, failure
 		}
 		if s.Keep {
 			if kindBegun {
@@ -255,37 +269,7 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 		return fail("start the registry", err)
 	}
 
-	listed, err := c.provider.ListNodes(s.Name)
-	if err != nil {
-		return fail("write the node settings", err)
-	}
-	// cas holds each entry's ca, at the entry's index, read once for every node.
-	cas := make([][]byte, len(s.Registries))
-	for i, r := range s.Registries {
-		if r.CA == "" {
-			continue
-		}
-		if cas[i], err = os.ReadFile(r.CA); err != nil {
-			return fail("write the node settings", fmt.Errorf("registries[%d].ca: %w", i, err))
-		}
-	}
-	for _, n := range listed {
-		if err := writeRegistryFiles(n, s.Registries, cas, s.AsHosts, c.NodeRegistry); err != nil {
-			return fail("write the node settings", fmt.Errorf("node %s: %w", n, err))
-		}
-		if err := nodeutils.WriteFile(n, settingsPath(TestHost), HostsTOML(c.NodeRegistry)); err != nil {
-			return fail("write the node settings", fmt.Errorf("node %s: %w", n, err))
-		}
-		var out bytes.Buffer
-		if err := n.CommandContext(ctx, "sysctl", "-w", unansweredAttempt).SetStdout(&out).SetStderr(&out).Run(); err != nil {
-			err = fmt.Errorf("node %s: sysctl -w %s: %w", n, unansweredAttempt, err)
-			if said := oneLine(out.Bytes()); said != "" {
-				err = fmt.Errorf("%w: %s", err, said)
-			}
-			return fail("write the node settings", err)
-		}
-	}
-	if c.nodes, err = byRole(listed); err != nil {
+	if c.nodes, err = writeNodeSettings(ctx, c.provider, s.Name, s.Registries, s.AsHosts, c.NodeRegistry); err != nil {
 		return fail("write the node settings", err)
 	}
 
@@ -316,6 +300,58 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	return c, nil
 }
 
+// writeNodeSettings writes the node settings into every node of the cluster name:
+// each entry's ca and settings file, rollproof.test's settings file, and the
+// kernel's setting for an attempt to connect that had no answer; and returns the
+// nodes, the control-plane node first. A ca that cannot be read fails it before
+// any node is listed, with the entry's index. Its calls into kind take no
+// context, so they run through untilDone: when ctx ends, it returns ctx's error at
+// once.
+func writeNodeSettings(ctx context.Context, p *kindcluster.Provider, name string, regs []config.Registry, asHosts []string, runRegistry string) ([]nodes.Node, error) {
+	// cas holds each entry's ca, at the entry's index, read once for every node.
+	cas := make([][]byte, len(regs))
+	for i, r := range regs {
+		if r.CA == "" {
+			continue
+		}
+		var err error
+		if cas[i], err = os.ReadFile(r.CA); err != nil {
+			return nil, fmt.Errorf("registries[%d].ca: %w", i, err)
+		}
+	}
+	// sorted is written by untilDone's goroutine and read only when untilDone returned nil, after
+	// that goroutine handed its result back.
+	var sorted []nodes.Node
+	err := untilDone(ctx, func() error {
+		listed, err := kindListNodes(p, name)
+		if err != nil {
+			return err
+		}
+		for _, n := range listed {
+			if err := writeRegistryFiles(n, regs, cas, asHosts, runRegistry); err != nil {
+				return fmt.Errorf("node %s: %w", n, err)
+			}
+			if err := writeNodeFile(n, settingsPath(TestHost), HostsTOML(runRegistry)); err != nil {
+				return fmt.Errorf("node %s: %w", n, err)
+			}
+			var out bytes.Buffer
+			if err := n.CommandContext(ctx, "sysctl", "-w", unansweredAttempt).SetStdout(&out).SetStderr(&out).Run(); err != nil {
+				err = fmt.Errorf("node %s: sysctl -w %s: %w", n, unansweredAttempt, err)
+				if said := oneLine(out.Bytes()); said != "" {
+					err = fmt.Errorf("%w: %s", err, said)
+				}
+				return err
+			}
+		}
+		sorted, err = byRole(listed)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return sorted, nil
+}
+
 // writeRegistryFiles writes into node n, by decision 10, each entry's ca, then the settings file
 // of each entry's host and of each host of asHosts that no entry names. cas holds each entry's ca
 // as read, at the entry's index. The settings of a host of asHosts try the run's registry, at
@@ -323,7 +359,7 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 func writeRegistryFiles(n nodes.Node, regs []config.Registry, cas [][]byte, asHosts []string, runRegistry string) error {
 	for i, r := range regs {
 		if r.CA != "" {
-			if err := nodeutils.WriteFile(n, caPath(r.Host), string(cas[i])); err != nil {
+			if err := writeNodeFile(n, caPath(r.Host), string(cas[i])); err != nil {
 				return err
 			}
 		}
@@ -340,7 +376,7 @@ func writeRegistryFiles(n nodes.Node, regs []config.Registry, cas [][]byte, asHo
 			run = runRegistry
 		}
 		if text := HostSettings(r, run); text != "" {
-			if err := nodeutils.WriteFile(n, settingsPath(r.Host), text); err != nil {
+			if err := writeNodeFile(n, settingsPath(r.Host), text); err != nil {
 				return err
 			}
 		}
@@ -358,13 +394,14 @@ func settingsPath(host string) string {
 // kubeconfig, whatever the options say about keeping nodes, and tries again, createAttempts
 // times in all. The error is that of the last attempt, its text unchanged; a delete that fails
 // ends the attempts, and its error is joined, after "; ", to that of the attempt before it.
+// kind's Create and Delete run through untilDone: when ctx ends during one, its error is ctx's.
 func createKind(ctx context.Context, p *kindcluster.Provider, name, kubeconfig string, options ...kindcluster.CreateOption) error {
 	for attempt := 1; ; attempt++ {
-		err := kindCreate(p, name, options...)
+		err := untilDone(ctx, func() error { return kindCreate(p, name, options...) })
 		if err == nil || attempt == createAttempts || ctx.Err() != nil || !strings.Contains(err.Error(), logLineMissed) {
 			return err
 		}
-		if derr := kindDelete(p, name, kubeconfig); derr != nil {
+		if derr := untilDone(ctx, func() error { return kindDelete(p, name, kubeconfig) }); derr != nil {
 			return join(err, fmt.Errorf("delete the failed attempt %d: %w", attempt, derr))
 		}
 	}
@@ -374,7 +411,7 @@ func createKind(ctx context.Context, p *kindcluster.Provider, name, kubeconfig s
 func byRole(listed []nodes.Node) ([]nodes.Node, error) {
 	controlPlane := map[string]bool{}
 	for _, n := range listed {
-		role, err := n.Role()
+		role, err := nodeRole(n)
 		if err != nil {
 			return nil, fmt.Errorf("the role of node %s: %w", n, err)
 		}
@@ -565,6 +602,8 @@ func (c *Cluster) Delete(ctx context.Context) error {
 // remove deletes the kind cluster name, the registry container NAME-registry with its volumes,
 // and runDir, going on after an error and joining the errors with "; ". It refuses, with
 // InternalError, a name without namePrefix and a runDir whose last element is not the name.
+// kind's delete runs through untilDone: when ctx ends during it, its error is ctx's, and kind's
+// delete goes on alone.
 func remove(ctx context.Context, e Engine, name, runDir string) error {
 	if !strings.HasPrefix(name, namePrefix) {
 		return verdict.Condition{Code: verdict.InternalError, Text: "refused to remove a cluster whose name does not start with " + namePrefix}
@@ -578,7 +617,7 @@ func remove(ctx context.Context, e Engine, name, runDir string) error {
 	if err := os.Remove(kubeconfig + ".lock"); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		errs = append(errs, err)
 	}
-	if err := kindDelete(e.provider(), name, kubeconfig); err != nil {
+	if err := untilDone(ctx, func() error { return kindDelete(e.provider(), name, kubeconfig) }); err != nil {
 		errs = append(errs, fmt.Errorf("delete the kind cluster %s: %w", name, err))
 	}
 	if err := e.removeContainer(ctx, name+"-registry"); err != nil {

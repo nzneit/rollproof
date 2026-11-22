@@ -205,36 +205,40 @@ func TestFailedClientError(t *testing.T) {
 	cleanUp := errors.New("the engine is gone")
 	noLogs := "; the cluster's logs were not all collected: no nodes"
 	for _, tc := range []struct {
-		name        string
-		keep        bool
-		cancelled   bool
-		collectErr  error
-		deleteErr   error
-		wantCollect int
-		wantCalls   int
-		wantOrder   []string
-		wantText    string
-		wantJoined  string
+		name         string
+		keep         bool
+		cancelled    bool
+		cancelDuring string // "collect" or "delete": that call cancels the run's context and returns its error
+		collectErr   error
+		deleteErr    error
+		wantCollect  int
+		wantCalls    int
+		wantOrder    []string
+		wantText     string
+		wantJoined   string
 	}{
-		{"kept", true, false, nil, cleanUp, 1, 0, []string{"collect"},
+		{"kept", true, false, "", nil, cleanUp, 1, 0, []string{"collect"},
 			reached + ". The cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x", ""},
-		{"the run's context has ended", false, true, nil, cleanUp, 0, 0, nil, reached, ""},
-		{"the run's context has ended, and the cluster is kept", true, true, nil, cleanUp, 0, 0, nil,
+		{"the run's context has ended", false, true, "", nil, cleanUp, 0, 0, nil, reached, ""},
+		{"the run's context has ended, and the cluster is kept", true, true, "", nil, cleanUp, 0, 0, nil,
 			reached + ". The cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x", ""},
-		{"the delete succeeds", false, false, nil, nil, 1, 1, []string{"collect", "delete"}, reached, ""},
-		{"the delete fails", false, false, nil, cleanUp, 1, 1, []string{"collect", "delete"}, left,
+		{"the delete succeeds", false, false, "", nil, nil, 1, 1, []string{"collect", "delete"}, reached, ""},
+		{"the delete fails", false, false, "", nil, cleanUp, 1, 1, []string{"collect", "delete"}, left,
 			"the clean-up after it failed: the engine is gone"},
-		{"the logs cannot be collected", false, false, errors.New("no nodes"), nil, 1, 1,
+		{"the logs cannot be collected", false, false, "", errors.New("no nodes"), nil, 1, 1,
 			[]string{"collect", "delete"}, reached + noLogs, ""},
-		{"the logs cannot be collected, and the cluster is kept", true, false, errors.New("no nodes"), nil, 1, 0,
+		{"the logs cannot be collected, and the cluster is kept", true, false, "", errors.New("no nodes"), nil, 1, 0,
 			[]string{"collect"},
 			reached + noLogs + ". The cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x", ""},
+		{"a signal during the collection", false, false, "collect", nil, nil, 1, 0, []string{"collect"},
+			reached + "; the cluster's logs were not all collected: context canceled", ""},
+		{"a signal during the delete", false, false, "delete", nil, nil, 1, 1, []string{"collect", "delete"}, left,
+			"the clean-up after it failed: context canceled"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			if tc.cancelled {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
 			var order []string
@@ -242,12 +246,20 @@ func TestFailedClientError(t *testing.T) {
 			collect := func(context.Context) error {
 				order = append(order, "collect")
 				collectCalls++
+				if tc.cancelDuring == "collect" {
+					cancel()
+					return ctx.Err()
+				}
 				return tc.collectErr
 			}
 			calls := 0
 			del := func(context.Context) error {
 				order = append(order, "delete")
 				calls++
+				if tc.cancelDuring == "delete" {
+					cancel()
+					return ctx.Err()
+				}
 				return tc.deleteErr
 			}
 			err := failedClientError(ctx, tc.keep, kept, collect, del, clientErr)
@@ -282,29 +294,35 @@ func TestStoreFailedTakesTheLogs(t *testing.T) {
 	internal := verdict.Condition{Code: verdict.InternalError, Text: "boom"}
 	noLogs := "; the cluster's logs were not all collected: no nodes"
 	for _, tc := range []struct {
-		name       string
-		err        error
-		cancelled  bool
-		collectErr error
-		wantCalls  int
-		wantErr    error  // the error that must come back unchanged
-		wantText   string // the condition's text, when the error is replaced
+		name         string
+		err          error
+		cancelled    bool
+		cancelDuring bool // the collection cancels the run's context and returns its error
+		collectErr   error
+		wantCalls    int
+		wantErr      error  // the error that must come back unchanged
+		wantText     string // the condition's text, when the error is replaced
 	}{
-		{"a cluster-failed error", failed, false, nil, 1, failed, ""},
-		{"the logs cannot be collected", failed, false, errors.New("no nodes"), 1, nil, failed.Text + noLogs},
-		{"an internal-error error", internal, false, nil, 0, internal, ""},
-		{"the run's context has ended", failed, true, nil, 0, failed, ""},
+		{"a cluster-failed error", failed, false, false, nil, 1, failed, ""},
+		{"the logs cannot be collected", failed, false, false, errors.New("no nodes"), 1, nil, failed.Text + noLogs},
+		{"an internal-error error", internal, false, false, nil, 0, internal, ""},
+		{"the run's context has ended", failed, true, false, nil, 0, failed, ""},
+		{name: "a signal during the collection", err: failed, cancelDuring: true, wantCalls: 1,
+			wantText: failed.Text + "; the cluster's logs were not all collected: context canceled"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			if tc.cancelled {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
 			calls := 0
 			collect := func(context.Context) error {
 				calls++
+				if tc.cancelDuring {
+					cancel()
+					return ctx.Err()
+				}
 				return tc.collectErr
 			}
 			got := storeFailed(ctx, tc.err, collect)

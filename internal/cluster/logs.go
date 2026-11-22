@@ -39,13 +39,19 @@ func (e Engine) logs(ctx context.Context, container string) (log string, found b
 // collectLogs writes kind's logs of the cluster's nodes and the registry container's log into
 // evidence: kind's into a folder under runDir, copied file by file to kind/<path> and the folder
 // then removed, and the registry's as registry.log. It goes on after an error and joins them. A
-// nil evidence collects nothing.
+// nil evidence collects nothing. kind's collection runs through untilDone: when ctx ends during
+// it, collectLogs returns ctx's error at once, copies nothing and does not take the registry's
+// log; the half-written folder stays in the run's folder, which the next run removes.
 func collectLogs(ctx context.Context, e Engine, p *kindcluster.Provider, name, runDir string, evidence func(string) (io.WriteCloser, error)) error {
 	if evidence == nil {
 		return nil
 	}
 	dir := filepath.Join(runDir, "kind-logs")
-	errs := []error{kindCollectLogs(p, name, dir), copyLogs(evidence, dir)}
+	collectErr := untilDone(ctx, func() error { return kindCollectLogs(p, name, dir) })
+	if err := ctx.Err(); err != nil {
+		return err // kind may still be writing into dir
+	}
+	errs := []error{collectErr, copyLogs(evidence, dir)}
 	if err := os.RemoveAll(dir); err != nil {
 		errs = append(errs, err)
 	}
@@ -62,7 +68,8 @@ func collectLogs(ctx context.Context, e Engine, p *kindcluster.Provider, name, r
 // CollectLogs writes kind's logs of the cluster's nodes and the registry container's log into the
 // cluster's evidence, for a set-up that failed after Create returned. A registry container that
 // the engine does not find gives no registry.log and no error. The error joins what could not be
-// collected; what could be is written.
+// collected; what could be is written. When ctx ends during kind's collection, the error is ctx's
+// and nothing is copied (collectLogs).
 func (c *Cluster) CollectLogs(ctx context.Context) error {
 	return collectLogs(ctx, c.Engine, c.provider, c.Name, c.RunDir, c.evidence)
 }
