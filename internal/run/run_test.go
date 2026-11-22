@@ -1729,8 +1729,10 @@ func TestARefusedFinalKeepsTheVerdictsClass(t *testing.T) {
 			if !strings.HasPrefix(w.stderr.String(), "rollproof: cannot write results: ") {
 				t.Errorf("stderr is %q", w.stderr.String())
 			}
-			if w.stdout.Len() != 0 {
-				t.Errorf("stdout is %q, want no console: the final file was not written", w.stdout.String())
+			// No console: the final file was not written. The one warning of the run, from the last
+			// write of windows.json into the folder that is gone, is told as a line of its own.
+			if !isWindowsWarningAlone(w.stdout.String()) {
+				t.Errorf("stdout is %q, want only the line of windows.json's warning", w.stdout.String())
 			}
 			if n := w.calls.count("delete"); n != 1 {
 				t.Errorf("Delete called %d times, want 1", n)
@@ -3544,6 +3546,11 @@ func TestWhatVerdictSaysAfterEachEnding(t *testing.T) {
 			if diff := cmp.Diff(row.verdicts, readOutputs(t, output)["verdict"]); diff != "" {
 				t.Errorf("verdict's values (-want +got):\n%s", diff)
 			}
+			if row.verdicts == nil {
+				if text := readFile(t, output); text != "" {
+					t.Errorf("the outputs file is %q, want it empty: no output before the results folder", text)
+				}
+			}
 			text := readFile(t, summary)
 			if row.summary && !strings.HasPrefix(text, "### rollproof: ") {
 				t.Errorf("the summary file holds no summary:\n%s", text)
@@ -3551,8 +3558,10 @@ func TestWhatVerdictSaysAfterEachEnding(t *testing.T) {
 			if !row.summary && text != "" {
 				t.Errorf("the summary file is not empty:\n%s", text)
 			}
-			if row.refused && w.stdout.Len() != 0 {
-				t.Errorf("stdout is %q, want empty: the final file was not written", w.stdout.String())
+			// For the refused rows no console is printed; the run's one warning, from the last write
+			// of windows.json into the folder that is gone, is told as a line of its own.
+			if row.refused && !isWindowsWarningAlone(w.stdout.String()) {
+				t.Errorf("stdout is %q, want only the line of windows.json's warning", w.stdout.String())
 			}
 		})
 	}
@@ -3746,8 +3755,8 @@ func TestAWarningAfterARefusedFinalWriteWritesNoFinalFile(t *testing.T) {
 		t.Errorf("exit %d, want 2", code)
 	}
 	const line = "warning: the cluster was not deleted: the engine did not answer"
-	if !slices.Contains(strings.Split(w.stdout.String(), "\n"), line) {
-		t.Errorf("stdout has no line %q:\n%s", line, w.stdout.String())
+	if n := countLines(w.stdout.String(), line); n != 1 {
+		t.Errorf("stdout holds the line %q %d times, want once:\n%s", line, n, w.stdout.String())
 	}
 	if diff := cmp.Diff([]string{"not-verified", "not-verified"}, readOutputs(t, output)["verdict"]); diff != "" {
 		t.Errorf("verdict's values (-want +got):\n%s", diff)
@@ -3755,4 +3764,91 @@ func TestAWarningAfterARefusedFinalWriteWritesNoFinalFile(t *testing.T) {
 	if r, err := w.readResult(); err == nil && r.Final {
 		t.Errorf("w.out holds a final result.json, verdict %q: the refused write was tried again", r.Verdict)
 	}
+}
+
+// countLines says how many lines of text are exactly line.
+func countLines(text, line string) int {
+	n := 0
+	for _, l := range strings.Split(text, "\n") {
+		if l == line {
+			n++
+		}
+	}
+	return n
+}
+
+// After a refused final write, a warning that arises later, here at the watcher's stop, is still
+// told once as a line of its own; no console block is printed, no summary written, and result.json
+// is not written again (section 8; decision 6).
+func TestAWarningAtTheWatchersStopAfterARefusedFinalWriteIsALine(t *testing.T) {
+	w := newWorld(t)
+	output, summary := w.gitHubFiles(t)
+	var podLog io.WriteCloser
+	w.hooks["watcher"] = func() { podLog, _ = w.evidence("pods/orders-a-1.log") }
+	w.hooks["end-commands"] = func() {
+		if err := os.RemoveAll(w.out); err != nil {
+			t.Error(err)
+		}
+	}
+	w.hooks["watch-stop"] = func() { // the file is closed under the follower, and its last write fails
+		_ = podLog.Close()
+		_, _ = podLog.Write([]byte("stopped\n"))
+	}
+	if code := w.run(context.Background()); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	const prefix = "warning: the evidence pods/orders-a-1.log could not be written: "
+	n := 0
+	for _, l := range strings.Split(w.stdout.String(), "\n") {
+		if strings.HasPrefix(l, prefix) {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("stdout holds %d lines that begin %q, want 1:\n%s", n, prefix, w.stdout.String())
+	}
+	if strings.Contains(w.stdout.String(), "rollproof: ") || strings.Contains(w.stdout.String(), "results: ") {
+		t.Errorf("stdout holds a console block:\n%s", w.stdout.String())
+	}
+	if text := readFile(t, summary); text != "" {
+		t.Errorf("the summary file is %q, want it empty", text)
+	}
+	if diff := cmp.Diff([]string{"not-verified", "not-verified"}, readOutputs(t, output)["verdict"]); diff != "" {
+		t.Errorf("verdict's values (-want +got):\n%s", diff)
+	}
+	if r, err := w.readResult(); err == nil && r.Final {
+		t.Errorf("w.out holds a final result.json, verdict %q: the refused write was tried again", r.Verdict)
+	}
+}
+
+// After a refused final write, the warning that the outputs could not be written at the first
+// moment is still told, once, so that an empty verdict is explained (section 8).
+func TestAnOutputsWarningAfterARefusedFinalWriteIsALine(t *testing.T) {
+	w := newWorld(t)
+	w.env = map[string]string{"GITHUB_ACTIONS": "true", "GITHUB_OUTPUT": filepath.Join(t.TempDir(), "no-such-file")}
+	w.hooks["end-commands"] = func() {
+		if err := os.RemoveAll(w.out); err != nil {
+			t.Error(err)
+		}
+	}
+	if code := w.run(context.Background()); code != 2 {
+		t.Errorf("exit %d, want 2", code)
+	}
+	const prefix = "warning: the step's outputs were not written: "
+	n := 0
+	for _, l := range strings.Split(w.stdout.String(), "\n") {
+		if strings.HasPrefix(l, prefix) {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("stdout holds %d lines that begin %q, want 1:\n%s", n, prefix, w.stdout.String())
+	}
+}
+
+// isWindowsWarningAlone says whether text is exactly one line, the warning that windows.json was not
+// written, as a run tells it after a refused final write whose results folder is gone.
+func isWindowsWarningAlone(text string) bool {
+	line, rest, ok := strings.Cut(text, "\n")
+	return ok && rest == "" && strings.HasPrefix(line, "warning: the evidence windows.json was not written: ")
 }

@@ -177,7 +177,14 @@ func Run(ctx context.Context, o Options, u Units) int {
 	if p := s.readerPanic(); p != nil {
 		s.toolFailed(p)
 	}
-	return s.finish()
+	code := s.finish()
+	if !s.finalWritten {
+		// After a refused final write completeEvidence did not run, so windows.json is written a last
+		// time here, as before, and a warning that this gives is told as a line, as the others were.
+		s.marks.end()
+		s.lateWarnings()
+	}
+	return code
 }
 
 // writer is what a run asks of the results folder: the final result.json, evidence files, a file
@@ -1013,9 +1020,10 @@ func (s *runState) toolFailed(caught any) {
 // evidence completed, and the warnings that this added told as lines of the console and of the
 // summary, with result.json written again; then the clean-up and the exit code. A refused final
 // write, returned or panicked, prints no console and writes no summary, and the outputs still say
-// the verdict that the exit code gives (section 8). A panic after the final file was written is a
-// warning: the verdict was decided already. The clean-up runs on every path, so that a report that
-// cannot be written does not leave a cluster behind.
+// the verdict that the exit code gives (section 8); the run's warnings are then told as lines alone,
+// in the clean-up. A panic after the final file was written is a warning: the verdict was decided
+// already. The clean-up runs on every path, so that a report that cannot be written does not leave
+// a cluster behind.
 func (s *runState) finish() (code int) {
 	refused := false
 	written := false // the final result.json is in place
@@ -1173,9 +1181,10 @@ func (s *runState) cleanUpQuietly() {
 	s.cleanUp()
 }
 
-// cleanUp performs step 15: the watcher is stopped, the warnings raised since
-// they were last told are told, the cluster is deleted unless it was asked
-// for or a signal ended the run, and an error is a warning.
+// cleanUp performs step 15: the watcher is stopped, the warnings that nothing
+// has told are told (after a refused final write, every warning of the run),
+// the cluster is deleted unless it was asked for or a signal ended the run, and
+// an error is a warning.
 func (s *runState) cleanUp() {
 	if s.watcher != nil {
 		s.watcher.Stop()
@@ -1223,30 +1232,22 @@ func (s *runState) signalAfterTheVerdict() {
 	s.warnAfterConsole(afterText)
 }
 
-// warnAfterConsole adds a warning that arose once the console text was printed, and tells it as
-// lateWarnings tells one. When the final result.json was refused, so that no console was printed
-// and no summary written, it prints the warning as a line of its own and does not write
-// result.json again: the first result.json, which says that the run did not finish, stays, so
-// that the file, the step's output and the exit code say the same.
+// warnAfterConsole adds a warning that arose once the console text was printed, or once the final
+// result.json was refused, and tells it as lateWarnings tells one.
 func (s *runState) warnAfterConsole(text string) {
 	s.warnings.add(text)
-	if s.finalWritten {
-		s.lateWarnings()
-		return
-	}
-	s.println(s.o.Stdout, "warning: "+text)
+	s.lateWarnings()
 }
 
-// lateWarnings tells the warnings that came after the console was printed: each as a line
-// "warning: TEXT" of the console and, masked, as a line of the job summary, in order; and then
-// writes result.json again, once, with all of them. A warning that arises while it tells them,
-// such as that the summary could not be written, is told in the same call. It does nothing when
-// the final result.json was never written: that write was refused, the console was not printed,
-// and the exit code says so.
+// lateWarnings tells the warnings of the run that nothing has told yet, in order, each as a line
+// "warning: TEXT" of standard output. When the final result.json was written, those are the ones
+// that came after the console was printed: each is also appended, masked, as a line of the job
+// summary, and result.json is then written again, once, with all of them. When the final write was
+// refused, no console was printed, so they are every warning of the run: they are told as lines
+// alone, with no summary and no second try of result.json, so that the first file, the step's
+// output and the exit code say the same (section 8; decision 6). A warning that arises while it
+// tells them, such as that the summary could not be written, is told in the same call.
 func (s *runState) lateWarnings() {
-	if !s.finalWritten {
-		return
-	}
 	told := false
 	for {
 		all := s.warnings.all()
@@ -1255,12 +1256,14 @@ func (s *runState) lateWarnings() {
 		}
 		for _, text := range all[s.warningsTold:] {
 			s.println(s.o.Stdout, "warning: "+text)
-			s.appendSummary(report.SummaryLine("warning: " + s.mask.String(text)))
+			if s.finalWritten {
+				s.appendSummary(report.SummaryLine("warning: " + s.mask.String(text)))
+			}
 		}
 		s.warningsTold = len(all)
 		told = true
 	}
-	if told {
+	if told && s.finalWritten {
 		s.rewriteFinal()
 	}
 }
