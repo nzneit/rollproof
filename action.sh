@@ -136,7 +136,7 @@ main() {
     args+=(--out "$ROLLPROOF_ACTION_OUT")
   fi
   cd "${GITHUB_WORKSPACE:-.}" || fail "the workspace ${GITHUB_WORKSPACE:-.} cannot be entered"
-  printf 'rollproof: the tool from %s, through %s\n' "$ref" "$engine" >&2
+  printf 'rollproof: the tool from %s, through %s\n' "$ref" "$engine" >&2 || true
   unset ROLLPROOF_ACTION_CONFIG ROLLPROOF_ACTION_IMAGE ROLLPROOF_ACTION_OUT \
     ROLLPROOF_ACTION_VERSION ROLLPROOF_ACTION_REPOSITORY ROLLPROOF_ACTION_DIGEST
   export KIND_EXPERIMENTAL_PROVIDER=$engine

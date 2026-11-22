@@ -182,7 +182,7 @@ func Open(out string, getenv func(string) string) (*Writer, error) {
 	var dir string
 	if out == "" {
 		base := os.TempDir()
-		if getenv("GITHUB_ACTIONS") == "true" && getenv("RUNNER_TEMP") != "" {
+		if GitHubActions(getenv) && getenv("RUNNER_TEMP") != "" {
 			base = getenv("RUNNER_TEMP")
 		}
 		d, err := os.MkdirTemp(base, "rollproof-results-")

@@ -124,7 +124,10 @@ func holdRunImages(t *testing.T) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), pullLimit)
-		out, err := exec.CommandContext(ctx, engine, "pull", ref).CombinedOutput()
+		pull := exec.CommandContext(ctx, engine, "pull", ref)
+		// A child of the engine that still holds the output pipe would keep Wait blocked past the limit.
+		pull.WaitDelay = 10 * time.Second
+		out, err := pull.CombinedOutput()
 		cut := ctx.Err() != nil
 		cancel()
 		if cut {
@@ -147,7 +150,10 @@ const (
 func inspectImage(ref string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), inspectLimit)
 	defer cancel()
-	return exec.CommandContext(ctx, engine, "image", "inspect", ref).Run()
+	inspect := exec.CommandContext(ctx, engine, "image", "inspect", ref)
+	// A child of the engine that outlives it would keep Wait blocked past the limit.
+	inspect.WaitDelay = 10 * time.Second
+	return inspect.Run()
 }
 
 // clearStandins removes the job's stand-ins before a run and again when the test ends; when the

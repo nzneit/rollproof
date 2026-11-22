@@ -267,10 +267,8 @@ type runState struct {
 	// finalWritten says that the final result.json is in place, so that a warning raised after it
 	// is printed and written again (lateWarnings).
 	finalWritten bool
-	// warningsWritten is how many of the run's warnings the last result.json written holds.
-	warningsWritten int
-	// warningsTold is how many of the run's warnings the console and the job summary have told;
-	// warningsWritten is how many the last result.json holds.
+	// warningsTold is how many of the run's warnings have been told: in the final result.json, the
+	// job summary and the console, or as a line.
 	warningsTold int
 	// outputsWarned and summaryWarned say that a failed write of that GitHub file was warned of
 	// already: each warns once in a run (decision 3).
@@ -1052,7 +1050,7 @@ func (s *runState) finish() (code int) {
 	// here then, so that its held-back tail reaches the file all the same.
 	defer s.closeProbeLog()
 	rec, n := s.recordAndWarnings()
-	if err := s.writeFinal(rec, n); err != nil {
+	if err := s.writeFinal(rec); err != nil {
 		// The console is not printed and the summary not written: they would claim more than the
 		// folder holds.
 		refused = true
@@ -1063,7 +1061,7 @@ func (s *runState) finish() (code int) {
 	s.finalWritten = true
 	s.writeOutputs(report.Output{Name: "verdict", Value: rec.Verdict})
 	masked := report.Mask(rec, s.mask)
-	s.appendSummary(report.Summary(masked))
+	s.summarize(masked)
 	fmt.Fprint(s.o.Stdout, report.Console(masked))
 	s.warningsTold = n
 	s.completeEvidence()
@@ -1109,14 +1107,26 @@ func (s *runState) appendSummary(text string) {
 	}
 }
 
-// writeFinal writes rec, which holds the first n of the run's warnings, as the final result.json,
-// and when that worked keeps n as the warnings written.
-func (s *runState) writeFinal(rec report.Run, n int) error {
-	if err := s.w.Final(rec); err != nil {
-		return err
+// summarize renders rec as the job summary and appends it through s.gh; it renders nothing when the
+// run has no GitHub files (s.gh is nil). A panic while the summary is rendered or appended is a warning,
+// summaryNotWritten and the panic's text, once in a run as a failed write of the summary is, so
+// that a feature for GitHub alone cannot take away the console that follows it.
+func (s *runState) summarize(rec report.Run) {
+	if s.gh == nil {
+		return
 	}
-	s.warningsWritten = n
-	return nil
+	defer func() {
+		if p := recover(); p != nil && !s.summaryWarned {
+			s.summaryWarned = true
+			s.warnings.add(summaryNotWritten + panicText(p))
+		}
+	}()
+	s.appendSummary(report.Summary(rec))
+}
+
+// writeFinal writes rec as the final result.json.
+func (s *runState) writeFinal(rec report.Run) error {
+	return s.w.Final(rec)
 }
 
 // recordAndWarnings returns the report's record of the run so far, and how many of the run's
@@ -1272,15 +1282,18 @@ func (s *runState) lateWarnings() {
 // allowed to escape: it would panic inside a deferred function.
 func (s *runState) rewriteFinal() {
 	defer func() { _ = recover() }()
-	if err := s.writeFinal(s.recordAndWarnings()); err != nil {
+	rec, _ := s.recordAndWarnings()
+	if err := s.writeFinal(rec); err != nil {
 		s.println(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
 	}
 }
 
-// println writes line and a line end to out, masked by the run's masker, which leaves it as it is
-// before the configuration has loaded. Every line the run prints but the console's goes through it.
+// println writes line and a line end to out: masked by the run's masker, which leaves it as it is
+// before the configuration has loaded, and then cleaned as one line of the console
+// (report.ConsoleLine), so that no text in it can split or redraw the line. Every line the run
+// prints but the console's goes through it.
 func (s *runState) println(out io.Writer, line string) {
-	fmt.Fprintln(out, s.mask.String(line))
+	fmt.Fprintln(out, report.ConsoleLine(s.mask.String(line)))
 }
 
 // readerPanic gives the value of a panic that stopped the event reader, once.

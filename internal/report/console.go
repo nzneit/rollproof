@@ -100,6 +100,13 @@ func clean(s string) string {
 	}, s)
 }
 
+// ConsoleLine returns text as one line of a terminal, cleaned as Console cleans text: a
+// line that the run prints outside the console's blocks goes through it, so that no text
+// from outside the tool can split or redraw it (section 10).
+func ConsoleLine(text string) string {
+	return clean(text)
+}
+
 func isControl(r rune) bool {
 	return unicode.Is(unicode.Cc, r) || r == '\u2028' || r == '\u2029' ||
 		(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069')
@@ -717,7 +724,7 @@ func exercisedLists(r Run) []string {
 // exercisedItems is what the lists of a pass hold: for each transition that ran, its name and what
 // it exercised, in order; and each line of what was not exercised, the lines of a restart-only run
 // or of a deploy with no rollback first.
-func exercisedItems(r Run) (exercised [][2]string, notExercised []string) {
+func exercisedItems(r Run) (exercised [][2]string, notList []string) {
 	for _, tr := range r.Transitions {
 		if windowNotRun(r, tr.Name) {
 			continue
@@ -737,12 +744,12 @@ func exercisedItems(r Run) (exercised [][2]string, notExercised []string) {
 		exercised = append(exercised, [2]string{tr.Name, text})
 	}
 	if hasWindowThatRan(r, "restart") && !hasWindowThatRan(r, "deploy") {
-		notExercised = append(notExercised, "a deploy to another release and a rollback, because only a restart was tested")
+		notList = append(notList, "a deploy to another release and a rollback, because only a restart was tested")
 	}
 	if hasWindowThatRan(r, "deploy") && !hasWindowThatRan(r, "rollback") {
-		notExercised = append(notExercised, "the candidate's shutdown and the installed release's start-up, because the run has no rollback")
+		notList = append(notList, "the candidate's shutdown and the installed release's start-up, because the run has no rollback")
 	}
-	return exercised, append(notExercised, notExercisedBy(r)...)
+	return exercised, append(notList, notExercisedBy(r)...)
 }
 
 // notExercisedBy is the fixed list of what a pass did not exercise. With a custom probe, the

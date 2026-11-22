@@ -382,6 +382,8 @@ func runFixture(t *testing.T, f fixture) result {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// A child of the tool that still holds a pipe would keep Wait blocked past the context's limit.
+	cmd.WaitDelay = 10 * time.Second
 	// While SIGINT is handled here, the tool starts with SIGINT at its default action, also when
 	// go test was started with SIGINT ignored.
 	c := make(chan os.Signal, 1)
@@ -401,9 +403,10 @@ func runFixture(t *testing.T, f fixture) result {
 	acted, actErr := act(f, newRunning(cmd.Process, env), filepath.Join(out, "evidence", "windows.json"), ended, 100*time.Millisecond)
 	runErr := <-ended
 	// On GitHub's runner the lines of this log are read for workflow commands too: go test
-	// indents them, and the runner trims that. So the first logged stop line of a run with
-	// GITHUB_ACTIONS true stops the runner's commands for the rest of the go test step, which
-	// prints none (design, section 12, "The suite's workflow").
+	// indents them, and the runner trims that. So the logged stop lines of a run with
+	// GITHUB_ACTIONS true keep the runner's commands stopped for the rest of the go test step,
+	// which prints none: the logged resume line is followed at once by the run's stop line of
+	// standard error, which stops them again (design, section 12, "The suite's workflow").
 	t.Logf("%s (%s):\n%s%s", f.name, f.helm, stdout.String(), stderr.String())
 	if err := os.WriteFile(filepath.Join(out, "console.txt"), stdout.Bytes(), 0o644); err != nil {
 		t.Errorf("%s (%s): console.txt: %v", f.name, f.helm, err)

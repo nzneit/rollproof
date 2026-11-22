@@ -73,10 +73,11 @@ func runEnv(base []string, helmDir string, gh *githubFiles) []string {
 	return append(env, "PATH="+helmDir+path)
 }
 
-// readGitHubOutputs reads an outputs file in the delimiter form and in the plain
-// form NAME=VALUE, and gives each name's values in the order they were written. A
-// line that is neither, or a delimiter that never comes, is an error that names
-// the file and the line.
+// readGitHubOutputs reads an outputs file in the delimiter form, the only form the
+// tool writes, and gives each name's values in the order they were written. A line
+// outside a value that is not NAME<<DELIMITER, the plain form NAME=VALUE among
+// them, or a delimiter that never comes, is an error that names the file and the
+// line.
 func readGitHubOutputs(path string) (map[string][]string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -106,11 +107,7 @@ func readGitHubOutputs(path string) (map[string][]string, error) {
 			outs[name] = append(outs[name], strings.Join(value, "\n"))
 			continue
 		}
-		if name, value, ok := strings.Cut(line, "="); ok && name != "" {
-			outs[name] = append(outs[name], value)
-			continue
-		}
-		return nil, fmt.Errorf("%s line %d: %q is neither NAME<<DELIMITER nor NAME=VALUE", path, i+1, line)
+		return nil, fmt.Errorf("%s line %d: %q is not NAME<<DELIMITER", path, i+1, line)
 	}
 	return outs, nil
 }
@@ -229,8 +226,12 @@ func workflowCommandFaults(stdout, stderr string, onGitHub, bySignal bool) []str
 }
 
 // streamLines gives the lines of a stream's text: the text without its last line
-// end, split at each line end; none for an empty text.
+// end, split at each line end; none for an empty text. A line ends at CR LF, at
+// LF and at a lone CR, as the runner's reader ends a line, so that a line after a
+// lone carriage return is judged as the runner would read it.
 func streamLines(s string) []string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
 	s = strings.TrimSuffix(s, "\n")
 	if s == "" {
 		return nil
@@ -391,6 +392,8 @@ func TestWorkflowCommandFaults(t *testing.T) {
 			[]string{`stdout holds the line "::ABCDEFGHIJKLMNOPQRSTUVWXYZ::", though a signal ended the run`}},
 		{"a resume line on stderr", out, stop + "\n" + resume + "\n", true, false,
 			[]string{`stderr holds the line "::ABCDEFGHIJKLMNOPQRSTUVWXYZ::", which only stdout's last line may be`}},
+		{"off GitHub, a line after a lone carriage return", "rollproof: PASS\rnext\r::error::x\n", "", false, false,
+			[]string{`stdout holds the line "::error::x", which begins "::", though GITHUB_ACTIONS is not true`}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if diff := cmp.Diff(c.want, workflowCommandFaults(c.stdout, c.stderr, c.onGitHub, c.signal)); diff != "" {
@@ -413,8 +416,6 @@ func TestReadGitHubOutputs(t *testing.T) {
 		name, content string
 		want          map[string][]string
 	}{
-		{"both forms", "out<<D1\n/tmp/r\nD1\nverdict<<D2\nnot-verified\nD2\nverdict=pass\n",
-			map[string][]string{"out": {"/tmp/r"}, "verdict": {"not-verified", "pass"}}},
 		{"a value of two lines", "x<<E\na\nb\nE\n", map[string][]string{"x": {"a\nb"}}},
 		{"an empty file", "", map[string][]string{}},
 	} {
@@ -434,7 +435,9 @@ func TestReadGitHubOutputs(t *testing.T) {
 	for _, c := range []struct {
 		name, content, holds string
 	}{
-		{"a line that is no output", "good=1\nno separator\n", "line 2"},
+		{"the plain form after the delimiter form", "out<<D1\n/tmp/r\nD1\nverdict<<D2\nnot-verified\nD2\nverdict=pass\n",
+			`line 7: "verdict=pass" is not NAME<<DELIMITER`},
+		{"a line in the plain form", "good=1\nno separator\n", `line 1: "good=1" is not NAME<<DELIMITER`},
 		// The delimiter quoted, so that a path that holds the letter cannot pass for it.
 		{"a delimiter that never comes", "x<<E\na\n", `"E"`},
 	} {

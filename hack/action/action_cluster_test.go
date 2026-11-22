@@ -348,10 +348,11 @@ func waitForRegistry(t *testing.T, registry string, limit time.Duration) {
 	}
 }
 
-// readGitHubOutputs reads an outputs file in the delimiter form and in the plain
-// form NAME=VALUE, and gives each name's values in the order they were written. A
-// line that is neither, or a delimiter that never comes, is an error that names
-// the file and the line.
+// readGitHubOutputs reads an outputs file in the delimiter form, the only form the
+// tool writes, and gives each name's values in the order they were written. A line
+// outside a value that is not NAME<<DELIMITER, the plain form NAME=VALUE among
+// them, or a delimiter that never comes, is an error that names the file and the
+// line.
 func readGitHubOutputs(path string) (map[string][]string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -381,11 +382,7 @@ func readGitHubOutputs(path string) (map[string][]string, error) {
 			outs[name] = append(outs[name], strings.Join(value, "\n"))
 			continue
 		}
-		if name, value, ok := strings.Cut(line, "="); ok && name != "" {
-			outs[name] = append(outs[name], value)
-			continue
-		}
-		return nil, fmt.Errorf("%s line %d: %q is neither NAME<<DELIMITER nor NAME=VALUE", path, i+1, line)
+		return nil, fmt.Errorf("%s line %d: %q is not NAME<<DELIMITER", path, i+1, line)
 	}
 	return outs, nil
 }

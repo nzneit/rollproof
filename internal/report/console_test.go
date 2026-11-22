@@ -636,6 +636,22 @@ func TestClean(t *testing.T) {
 	}
 }
 
+// ConsoleLine gives one line of a terminal, a space for each line end and control, as clean does;
+// a text with none is returned as it is.
+func TestConsoleLine(t *testing.T) {
+	sep := string(rune(0x2028))
+	for _, c := range []struct{ name, in, want string }{
+		{"CR LF, a lone CR, a lone LF, a tab and a line separator", "a\r\nb\rc\nd\te" + sep + "f", "a b c d e f"},
+		{"none of them", "warning: the cluster was not deleted", "warning: the cluster was not deleted"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ConsoleLine(c.in); got != c.want {
+				t.Errorf("ConsoleLine(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 // Two classes whose names clean to one name are one class on the console: their counts are added,
 // so that they still sum to the failed checks.
 func TestCleanClassesAddsCountsThatCleanToOneName(t *testing.T) {

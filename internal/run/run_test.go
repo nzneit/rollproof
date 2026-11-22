@@ -3702,6 +3702,90 @@ func TestALateWarningIsALineOfTheSummary(t *testing.T) {
 	}
 }
 
+// summaryPanicker stands for GitHub's files: its AppendSummary panics with "the summary broke" at
+// its first call and records the text of each later call.
+type summaryPanicker struct {
+	calls int
+	later []string
+}
+
+// WriteOutputs writes nothing and returns nil.
+func (g *summaryPanicker) WriteOutputs(...report.Output) error { return nil }
+
+// AppendSummary panics at its first call and records text at each later one.
+func (g *summaryPanicker) AppendSummary(text string) error {
+	g.calls++
+	if g.calls == 1 {
+		panic("the summary broke")
+	}
+	g.later = append(g.later, text)
+	return nil
+}
+
+// A panic while the job summary is rendered or appended is a warning, as a failed write of it is:
+// the console is printed all the same, the exit code is the verdict's, and the warning is told
+// after the console as every late warning is (section 10, rule 10).
+func TestAPanicInTheSummaryStillPrintsTheConsole(t *testing.T) {
+	w := newWorld(t)
+	fake := &summaryPanicker{}
+	was := gitHubOf
+	gitHubOf = func(func(string) string) gitHubFiles { return fake }
+	defer func() { gitHubOf = was }()
+	if code := w.run(context.Background()); code != 0 {
+		t.Errorf("exit %d, want 0, the pass's code\n%s", code, w.stdout.String())
+	}
+	const warning = "the job summary was not written: the summary broke"
+	lines := strings.Split(strings.TrimSuffix(w.stdout.String(), "\n"), "\n")
+	first := slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(l, "rollproof: PASS") })
+	if first < 0 {
+		t.Fatalf("stdout has no line that begins %q, the console's first:\n%s", "rollproof: PASS", w.stdout.String())
+	}
+	last := -1
+	for i, l := range lines {
+		if strings.HasPrefix(l, "results: ") {
+			last = i
+		}
+	}
+	if last < first {
+		t.Fatalf("stdout has no line of the console's results after its first line:\n%s", w.stdout.String())
+	}
+	if diff := cmp.Diff([]string{"warning: " + warning}, lines[last+1:]); diff != "" {
+		t.Errorf("stdout's lines after the console (-want +got):\n%s", diff)
+	}
+	r := w.result()
+	if r.Verdict != "pass" || !r.Final {
+		t.Errorf("result.json: verdict %q, final %v, want a final pass", r.Verdict, r.Final)
+	}
+	if diff := cmp.Diff([]string{warning}, r.Warnings); diff != "" {
+		t.Errorf("result.json's warnings (-want +got):\n%s", diff)
+	}
+	if len(fake.later) != 1 || !strings.Contains(fake.later[0], "warning: "+warning) {
+		t.Errorf("the summary's later calls are %q, want one that holds the warning's line", fake.later)
+	}
+}
+
+// A late warning whose text holds a line end or a lone carriage return is printed as one line, as
+// the console's text is cleaned (section 10).
+func TestALateWarningIsOneLineOfTheConsole(t *testing.T) {
+	w := newWorld(t)
+	w.cluster.deleteErr = errors.New("first\nsecond\rthird")
+	if code := w.run(context.Background()); code != 0 {
+		t.Errorf("exit %d, want 0\n%s", code, w.stdout.String())
+	}
+	var warnings []string
+	for _, l := range strings.FieldsFunc(w.stdout.String(), func(r rune) bool { return r == '\n' || r == '\r' }) {
+		if strings.HasPrefix(l, "second") || strings.HasPrefix(l, "third") {
+			t.Errorf("stdout holds the line %q alone", l)
+		}
+		if strings.HasPrefix(l, "warning: ") {
+			warnings = append(warnings, l)
+		}
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "first second third") {
+		t.Errorf("stdout's lines that begin %q are %q, want one that holds %q", "warning: ", warnings, "first second third")
+	}
+}
+
 // The final result.json, the second verdict, the summary and the console come before the
 // evidence is completed, so that a run that is cancelled on GitHub has them (section 10;
 // decision 6).

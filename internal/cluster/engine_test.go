@@ -4,6 +4,8 @@ package cluster
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -220,7 +222,13 @@ func TestNodeImageAsksTheEngineByItsName(t *testing.T) {
 		if got != named {
 			t.Errorf("nodeImage(%s) = %q, want %q", binary, got, named)
 		}
-		if b, err := os.ReadFile(log); err == nil && len(b) != 0 {
+		// Only a log that does not exist says that the engine was not asked.
+		b, err := os.ReadFile(log)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			t.Errorf("the log of %s: %v", binary, err)
+		case len(b) != 0:
 			t.Errorf("%s was asked %q, want nothing for a name with a digest", binary, b)
 		}
 	}
