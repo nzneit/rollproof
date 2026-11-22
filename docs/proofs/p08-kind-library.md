@@ -188,7 +188,7 @@ The cause, found on 2026-11-21 by reading nerdctl's source after step 5's e2e ru
 
 ## Docker
 
-Run once on 2026-11-22, in run 45014226495 of the workflow `.github/workflows/rollproof-proofs.yml` at commit `cd7bc1f6eb0635c75832de73c47464ed9c026b32`, started with `gh workflow run rollproof-proofs.yml --ref rollproof-step6-design -f part=all`: job `proofs` (job 137182961058), its step "kind as a library, on Docker", from 10:48:46 to 10:51:19 UTC.
+Run once on 2026-11-22, in run 45014226495 of the workflow `.github/workflows/rollproof-proofs.yml` at commit `cd7bc1f6eb0635c75832de73c47464ed9c026b32`, started with `gh workflow run rollproof-proofs.yml --ref rollproof-step6-design -f part=all`: job `proofs` (job 137182961058), its step "kind as a library, on Docker", from 10:48:46 to 10:51:19 UTC. The job's log runs from 10:48:43 to 10:52:44 UTC, with `p01-registry-order` as the step after this one.
 
 **Machine and versions.**
 
