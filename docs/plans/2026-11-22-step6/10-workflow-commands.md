@@ -2,7 +2,7 @@
 
 Read section 8 ("The action", whole, and its paragraph "Workflow commands"), section 10 ("Console", its bullet on standard error; "On a signal"), section 12 (the bullet "The lines for GitHub's workflow commands"), section 14, point 33, and decisions 17, 21 and 26 of the README, before this task. It comes after Task 12 and before Task 13, whose local runs (its Step 1) are the first fixture runs after it.
 
-Unlike Tasks 1 to 12, every command of this task runs from the repository root: Go commands as `go -C projects/rollproof …`, paths in full.
+Unlike Tasks 2 to 12, every command of this task runs from the repository root: Go commands as `go -C projects/rollproof …`, paths in full.
 
 ### Task 14: stop the runner's workflow commands around what `rollproof run` and `action.sh` print, resume them when the tool ends by itself, and check both lines in the harness
 
@@ -424,7 +424,7 @@ The faults' texts are those of `TestWorkflowCommandFaults`, in this order: each 
 	}
 ```
 
-and `runFixture`'s comment gains, after "…its standard error as stderr.txt.", the sentence "It checks the lines for GitHub's workflow commands in both streams by the run's own GITHUB_ACTIONS (workflowCommandFaults)." Above the `t.Logf` that logs the run's two streams, and above the one in `TestTheScriptRunsTheToolFromItsImage` (`hack/action/action_cluster_test.go`), a comment says that on GitHub's runner the lines of that log are read for workflow commands too, since `go test` indents them and the runner trims that, so the first logged stop line stops the runner's commands for the rest of the `go test` step, which prints none (design, section 12, "The suite's workflow").
+and `runFixture`'s comment gains, after "…its standard error as stderr.txt.", the sentence "It checks the lines for GitHub's workflow commands in both streams by the run's own GITHUB_ACTIONS (workflowCommandFaults)." Above the `t.Logf` that logs the run's two streams, and above the one in `TestTheScriptRunsTheToolFromItsImage` (`hack/action/action_cluster_test.go`), a comment says that on GitHub's runner the lines of that log are read for workflow commands too, since `go test` indents them and the runner trims that, so the logged stop lines keep the runner's commands stopped for the rest of the `go test` step, which prints none (design, section 12, "The suite's workflow").
 
 `README.md`, in the section "On GitHub Actions", after the sentence "The job summary holds the console's report as Markdown, with every text from the cluster, the commands and the configuration inside code.", in the same paragraph:
 
@@ -468,6 +468,6 @@ git add projects/rollproof/cmd/rollproof/workflowcommands.go projects/rollproof/
 git commit -F MESSAGE
 ```
 
-MESSAGE is a file outside the tracked tree that holds the subject, "Stop GitHub's workflow commands before anything the tool or the action's script prints, resume them when the tool ends by itself, and check both lines in the suite's harness", an empty line, and the table of the error paths and special-case branches that the change adds (the script's failure for no token; the wrapper's paths off GitHub, after a signal and after a panic), as the run's rules for a commit ask.
+MESSAGE is a file outside the tracked tree that holds the subject, "Stop GitHub's workflow commands before anything the tool or the action's script prints, resume them when the tool ends by itself, and check both lines in the suite's harness", an empty line, and the table of the error paths and special-case branches that the change adds (the script's failure for no token; the wrapper's paths off GitHub, after a signal and after a panic), as the run's rules for a commit ask. The fix round after this task's reviews is a commit of its own, with a table of its own: the script's two failed writes of the stop line, and `fail` when its own message cannot be written.
 
 The message carries no attribution to an AI tool: no `Co-Authored-By` trailer that names one, no "Generated with" line, no session link, whatever a tool's harness asks (Global Constraints).

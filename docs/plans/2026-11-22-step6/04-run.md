@@ -53,6 +53,8 @@ func (s *runState) finish() (code int) {
 			s.warnAfterConsole("the tool failed after the verdict was decided: " + panicText(p))
 			return
 		}
+		// A panic before the final file was written leaves the first file, which says that the run
+		// did not finish. That is the refused write (section 8).
 		refused = true
 		s.println(s.o.Stderr, "rollproof: cannot write results: "+panicText(p))
 		code = s.refusedWrite()
@@ -62,6 +64,8 @@ func (s *runState) finish() (code int) {
 	defer s.closeProbeLog()
 	rec, n := s.recordAndWarnings()
 	if err := s.writeFinal(rec, n); err != nil {
+		// The console is not printed and the summary not written: they would claim more than the
+		// folder holds.
 		refused = true
 		s.println(s.o.Stderr, "rollproof: cannot write results: "+err.Error())
 		return s.refusedWrite()
@@ -80,7 +84,8 @@ func (s *runState) finish() (code int) {
 
 // refusedWrite gives the exit code of a run whose final result.json could not be written, 1 for a
 // fail that was already decided and 2 otherwise, and writes the verdict that code stands for as the
-// step's output: fail or not-verified (section 8).
+// step's output: fail or not-verified (section 8). A pass whose result.json could not be written
+// cannot be vouched for.
 func (s *runState) refusedWrite() int
 ```
 
@@ -310,7 +315,7 @@ func TestASignalEndsTheToolByItAfterARefusedWrite(t *testing.T) {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `go test ./internal/run/ ./cmd/rollproof/ -run 'TestTheOutputsAtBothMoments|TestWhatVerdictSaysAfterEachEnding|TestNothingIsWrittenForGitHubWithoutItsVariables|TestAGitHubFileThatCannotBeWrittenIsAWarning|TestTheSummaryIsAppendedOnce|TestALateWarningIsALineOfTheSummary|TestTheResultsComeBeforeTheEvidence|TestAWarningAfterARefusedFinalWriteWritesNoFinalFile|TestPasswordsAreMaskedEverywhere|TestASignalEndsTheToolByItAfterARefusedWrite' -v`
+Run: `go test ./internal/run/ ./cmd/rollproof/ -run 'TestTheOutputsAtBothMoments|TestWhatVerdictSaysAfterEachEnding|TestNothingIsWrittenForGitHubWithoutItsVariables|TestAGitHubFileThatCannotBeWrittenIsAWarning|TestTheSummaryIsAppendedOnce|TestALateWarningIsALineOfTheSummary|TestTheResultsComeBeforeTheEvidence|TestAWarningAfterARefusedFinalWriteWritesNoFinalFile|TestAWarningAtTheWatchersStopAfterARefusedFinalWriteIsALine|TestAnOutputsWarningAfterARefusedFinalWriteIsALine|TestPasswordsAreMaskedEverywhere|TestASignalEndsTheToolByItAfterARefusedWrite' -v`
 Expected: FAIL: `gitHubOf` and `gitHubFiles` are not defined in `internal/run`. `TestASignalEndsTheToolByItAfterARefusedWrite` passes already: it pins `endProcess`'s rule for this case.
 
 - [ ] **Step 3: Implement the changes above, each named one with its interface comment**

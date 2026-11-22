@@ -103,7 +103,7 @@ Ask for the maintainer's word for these three, and do none of them before it:
 
 The pull request runs the host's `citations` workflow, and the merge runs it once more on `main`: about 1 billed minute each.
 
-**State while it waits:** the commit exists on the local branch `rollproof-step6-stubs`; nothing is on GitHub. Tasks 2 to 12 go on.
+**State while it waits:** the commit exists on the local branch `rollproof-step6-stubs`; nothing is on GitHub. Tasks 2 to 12 and 14 go on.
 
 - [ ] **Step 7: After the merge, take `main` into the step's branch**
 

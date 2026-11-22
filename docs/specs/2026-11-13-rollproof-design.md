@@ -1578,9 +1578,10 @@ first line on standard error, before anything else, a usage error included, with
 anew for each run from the system's random source. The runner then reads no command until a
 line `::TOKEN::`. The tool prints that line last on standard output when it ends by itself,
 whatever its exit code, so that a step that calls the tool from a script of its own can use
-commands again afterwards. It does not print it when it ends by a signal, and elsewhere than on
-GitHub Actions it prints neither line. The runner reads the two streams each in its own order,
-so each needs its own first line; the second that the runner meets is a plain line. The action's
+commands again afterwards. It does not print it when it ends by a signal, nor after a crash
+that escapes its run, and elsewhere than on GitHub Actions it prints neither line. The runner
+reads the two streams each in its own order, so each needs its own first line; the second that
+the runner meets is a plain line. The action's
 script prints the same line on both streams with a token of its own, once it knows that the
 runner is Linux and before any line that can hold an input or an engine's output, and never
 resumes: after its `exec` the step is the tool, whose own lines the runner then shows as plain
@@ -2166,16 +2167,18 @@ results: /tmp/rollproof-results-7f3a
     every warning.
   - On GitHub Actions the line that stops the runner's workflow commands comes first on
     standard output and on standard error, and the line that resumes them comes last on
-    standard output, after the results line and any warning after it, unless a signal ended the
-    run (section 8, "Workflow commands"). Neither is part of the console's blocks, and the
-    summary holds neither.
+    standard output, after everything else that the run prints there, unless a signal or a
+    crash ended the run (section 8, "Workflow commands"). Neither is part of the console's
+    blocks, and the summary holds neither.
   - Standard error holds what is not the console: the usage text and the command line's errors,
     before a run; the line `rollproof: cannot write results: …` when the results folder cannot
     be opened, when the final `result.json` cannot be written, and when it cannot be written
     again after a warning that came later; and the log of the Kubernetes client library, which
     writes there a warning that the API server sends with a response, its text quoted on one
-    line (section 16). After the verdict the tool's own line is the only one of its own, and its
-    text is the results folder's path and the system's error. A line of the library's log can
+    line (section 16); and, for a crash that escapes the run, the trace that Go's runtime
+    writes. After the verdict the tool's own lines there are those on `result.json`: their text
+    is the results folder's path and the system's error, or, where the write of the final file
+    itself crashed, that crash's text. A line of the library's log can
     come while the evidence is completed and the watcher stops, and its text is the API
     server's: it cannot begin with `::`, but it can hold `##[`. Either can reach GitHub's runner
     after the line that resumes its commands (section 14, point 33). Whether the library's
@@ -2398,12 +2401,16 @@ A line leaves the list when a fixture shows the tool catching what it names.
   services that those hosts name. Helm's pulls, with the caller's own logins. Nothing else.
 - A registry password arrives only through an environment variable. It is masked, in its plain
   and its encoded form, in everything the tool writes but the step's outputs on GitHub, which
-  hold no value of the configuration. Nothing else is masked (section 8). This rule has not had
-  a security review (section 14).
+  hold no value of the configuration, and the client library's log on standard error, which
+  holds the API server's warnings (section 8). Nothing else is masked. This rule has not had a
+  security review (section 14).
 - On GitHub the tool's first lines, and the action's, stop the runner from reading a workflow
   command in what they print, so that text from a chart, a command or the API server cannot
-  become one (section 8). A line on standard error just before the tool's end can still be read
-  (section 10). This has not had a security review either (section 14, point 13).
+  become one (section 8). Two things stay open where a step of the caller's own script runs
+  the tool: a line on standard error just before the tool's end can still be read (section
+  10), and after a run that ends at once the runner may read no later command of that script,
+  an `::add-mask::` among them (section 8). This has not had a security review either (section
+  14, point 13).
 - The credentials file mounted into the nodes holds only the hosts the configuration lists. It
   lives in the run's folder and is removed with the cluster. While the cluster lives, every pod
   in it can read the file (section 9), so the credentials should be able to read only, and
@@ -2619,13 +2626,15 @@ summary is not the sum of its runs' summaries; of the suite's tests, the first f
 sets the three variables of section 8 for its run, with files of its own for both, which it
 reads. Each job gives `go test` a time limit below its own, so that the test's report is not
 cut off. `go test` logs each run's two streams with their lines indented, and the runner trims
-a line before it parses it, so the first stop line that is logged stops the runner's workflow
-commands for the rest of that `go test` step; the same holds in the mirror job, and in the
-first job for the log of the action's script. Those steps print no command, so nothing is lost
-(section 8, "Workflow commands"). A job that fails uploads the results folders of its runs,
-kept for three days; a job that passes uploads nothing. From the first fixture's time on a
-hosted runner, one run of the workflow is about 172 to 205 billed minutes, and about 1 hour 30
-minutes to 1 hour 50 minutes from its start to its end (section 14, point 32).
+a line before it parses it, so the stop lines that are logged keep the runner's workflow
+commands stopped for the rest of that `go test` step: a logged resume line is followed at once
+by the run's stop line of standard error, which stops them again. The same holds in the mirror
+job, and in the first job for the log of the action's script, whose stop line is never
+resumed. Those steps print no command, so nothing is lost (section 8, "Workflow commands"). A
+job that fails uploads the results folders of its runs, kept for three days; a job that passes
+uploads nothing. From the first fixture's time on a hosted runner, one run of the workflow is
+about 172 to 205 billed minutes, and about 1 hour 30 minutes to 1 hour 50 minutes from its
+start to its end (section 14, point 32).
 
 **The mirror job.** A registry inside the job stands for an organization's mirror. It needs a
 login, it sits under a path of its host, and it serves TLS from a private authority. The previous
@@ -2926,7 +2935,7 @@ which point.
     outside the tool from changing a run's page, which renders it as Markdown with some HTML
     (section 10; the plan for step 6 gives the rule in one of its decisions). So does the way
     the tool and the action keep GitHub's runner from reading a workflow command in what they
-    print, and the line that can still be read (point 33). So do
+    print, and the two things that stay open there (point 33). So do
     five facts of section 11: the change under test runs with the
     job's power, every pod in the cluster can read the nodes' credentials, a registry entry's
     credentials reach its mirror and the token service that a challenge names, a chart's own pull
@@ -3808,7 +3817,8 @@ and in the copies of the project's own dependencies that its `go.sum` names, for
 read the runner's places for a line's parsing, the stop and the resume first. An AI agent on an
 Opus model then read them again, with the others of the two rows below, and wrote the
 amendment. The session opened every place that point 33 names once more, and the client
-library's two, and found what the agent reported. One trial on the workstation: bash 5.3.20's
+library's (`rest/warnings.go`, lines 45 and 103 to 107; `klog.go`, lines 441, 835 to 840 and
+916 to 921), and found what the agent reported. One trial on the workstation: bash 5.3.20's
 `read` takes a token from `/proc/sys/kernel/random/uuid`, and from a file with no line end.
 Nothing else was run.
 
