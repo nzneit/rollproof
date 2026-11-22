@@ -620,10 +620,10 @@ func outDir(t *testing.T) string {
 // run whose verdict is value (pass, fail or not-verified), and whose first line
 // writes word (PASS, FAIL or NOT VERIFIED), writes: the output out once, as out,
 // and verdict as not-verified and then value; and a summary whose first line
-// begins "### rollproof: " + word and which holds the line "results: " + out
-// followed by the fence that closes its block, not necessarily at its end: a
-// warning after the console is appended after that block. It returns the
-// summary.
+// begins "### rollproof: " + word, the only line that begins "### rollproof: ",
+// and which holds the line "results: " + out followed by the fence that closes
+// its block exactly once, not necessarily at its end: a warning after the console
+// is appended after that block (summaryFaults judges it). It returns the summary.
 func checkGitHubFiles(t *testing.T, out, word, value string) (summary string) {
 	t.Helper()
 	outputs, err := readGitHubOutputs(filepath.Join(out, "github-output"))
@@ -640,16 +640,16 @@ func checkGitHubFiles(t *testing.T, out, word, value string) (summary string) {
 		t.Fatalf("the job summary: %v", err)
 	}
 	summary = string(b)
-	first, _, _ := strings.Cut(summary, "\n")
-	if heading := "### rollproof: " + word; !strings.HasPrefix(first, heading) {
-		t.Errorf("the job summary's first line is %q, want one that begins %q:\n%s", first, heading, summary)
-	}
 	// A warning after the console is appended after the results block, so the summary need not
 	// end with it. The fence is three backticks unless a line of that block holds a run of three
 	// or more backticks. Its lines are the run's reasons with their details, its warnings and the
 	// results line, and no run that calls this is expected to hold such a run of backticks.
-	if results := "results: " + out + "\n```\n"; !strings.Contains(summary, results) {
-		t.Errorf("the job summary holds no line %q followed by the fence that closes its block:\n%s", "results: "+out, summary)
+	faults := summaryFaults(summary, out, word)
+	for _, fault := range faults {
+		t.Errorf("the job summary: %s", fault)
+	}
+	if len(faults) > 0 {
+		t.Logf("the job summary:\n%s", summary)
 	}
 	return summary
 }

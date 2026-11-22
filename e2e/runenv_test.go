@@ -113,6 +113,31 @@ func readGitHubOutputs(path string) (map[string][]string, error) {
 	return outs, nil
 }
 
+// summaryFaults judges the text of a run's job summary against the results folder
+// out and the word of its first line (PASS, FAIL or NOT VERIFIED), and gives the
+// faults it finds, none for a good summary: the first line does not begin
+// "### rollproof: " + word; more or fewer than one line begins "### rollproof: ";
+// the line "results: " + out followed by the line of the fence does not stand
+// exactly once. Blocks after the results block, such as a warning's, are no fault.
+func summaryFaults(summary, out, word string) []string {
+	var faults []string
+	first, _, _ := strings.Cut(summary, "\n")
+	if heading := "### rollproof: " + word; !strings.HasPrefix(first, heading) {
+		faults = append(faults, fmt.Sprintf("the summary's first line is %q, want one that begins %q", first, heading))
+	}
+	// A leading line end puts the first line, too, at a line's start for the counts.
+	lines := "\n" + summary
+	if n := strings.Count(lines, "\n### rollproof: "); n != 1 {
+		faults = append(faults, fmt.Sprintf("the summary holds %d lines that begin %q, want exactly one", n, "### rollproof: "))
+	}
+	// The fence is three backticks unless a line of the results block holds a run of three or
+	// more backticks; no run that is judged here is expected to hold one.
+	if n := strings.Count(lines, "\nresults: "+out+"\n```\n"); n != 1 {
+		faults = append(faults, fmt.Sprintf("the summary holds the line %q followed by the fence %d times, want exactly once", "results: "+out, n))
+	}
+	return faults
+}
+
 func TestHelmMajors(t *testing.T) {
 	for _, c := range []struct {
 		value string
@@ -142,7 +167,6 @@ func TestHelmMajors(t *testing.T) {
 func TestRunEnvKeepsTheJobsGitHubFilesOut(t *testing.T) {
 	base := []string{"HOME=/home/u", "PATH=/usr/bin:/bin", "GITHUB_ACTIONS=true",
 		"GITHUB_OUTPUT=/runner/out", "GITHUB_STEP_SUMMARY=/runner/sum", "CI=true"}
-	before := slices.Clone(base)
 	for _, c := range []struct {
 		name string
 		base []string
@@ -155,13 +179,48 @@ func TestRunEnvKeepsTheJobsGitHubFilesOut(t *testing.T) {
 			[]string{"HOME=/home/u", "PATH=/usr/bin:/bin", "CI=true", "GITHUB_ACTIONS=true",
 				"GITHUB_OUTPUT=/r/github-output", "GITHUB_STEP_SUMMARY=/r/github-summary", "PATH=/helm:/usr/bin:/bin"}},
 		{"no PATH in base", []string{"HOME=/h"}, nil, []string{"HOME=/h", "PATH=/helm"}},
+		{"an empty PATH in base", []string{"HOME=/h", "PATH="}, nil, []string{"HOME=/h", "PATH=", "PATH=/helm"}},
 	} {
+		before := slices.Clone(c.base)
 		if diff := cmp.Diff(c.want, runEnv(c.base, "/helm", c.gh)); diff != "" {
 			t.Errorf("%s: runEnv (-want +got):\n%s", c.name, diff)
 		}
+		if diff := cmp.Diff(before, c.base); diff != "" {
+			t.Errorf("%s: runEnv changed base (-before +after):\n%s", c.name, diff)
+		}
 	}
-	if diff := cmp.Diff(before, base); diff != "" {
-		t.Errorf("runEnv changed base (-before +after):\n%s", diff)
+}
+
+func TestSummaryFaults(t *testing.T) {
+	const out = "/tmp/r"
+	good := "### rollproof: PASS `orders (Helm) on Kubernetes v1.37.0 in kind`\n" +
+		"\n```\nreleases    previous   orders 1.4.2\n```\n" +
+		"\n| window | length | result |\n| --- | ---: | --- |\n| steady | 10.0 s | pass |\n" +
+		"\n```\nresults: " + out + "\n```\n"
+	warning := "\n```\nwarning: the run's cluster was not deleted: gone\n```\n"
+	const heading = `the summary holds 2 lines that begin "### rollproof: ", want exactly one`
+	const results = "the summary holds the line \"results: /tmp/r\" followed by the fence %d times, want exactly once"
+	for _, c := range []struct {
+		name, summary, word string
+		want                []string
+	}{
+		{"a good summary", good, "PASS", nil},
+		{"a warning appended after the results block", good + warning, "PASS", nil},
+		{"the summary twice", good + good, "PASS", []string{heading, fmt.Sprintf(results, 2)}},
+		{"no results line", strings.Replace(good, "results: "+out+"\n", "", 1), "PASS",
+			[]string{fmt.Sprintf(results, 0)}},
+		{"a first line that is not the heading", "notice\n" + good, "PASS",
+			[]string{"the summary's first line is \"notice\", want one that begins \"### rollproof: PASS\""}},
+		{"another word", good, "FAIL",
+			[]string{"the summary's first line is \"### rollproof: PASS `orders (Helm) on Kubernetes v1.37.0 in kind`\", want one that begins \"### rollproof: FAIL\""}},
+		{"a results line that names another folder", strings.Replace(good, "results: "+out, "results: /tmp/other", 1), "PASS",
+			[]string{fmt.Sprintf(results, 0)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if diff := cmp.Diff(c.want, summaryFaults(c.summary, out, c.word)); diff != "" {
+				t.Errorf("summaryFaults (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
