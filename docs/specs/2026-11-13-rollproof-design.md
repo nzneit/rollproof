@@ -66,9 +66,11 @@ cold reading of this text and a reading of the source of GitHub's runner left mo
 build order gives to that step, and runs on GitHub's hosted runners on 2026-11-22 settled points
 3, 4 and 20. The maintainer ruled on four choices that day. The drafting session made the smaller
 ones, and the maintainer may strike any of them (point 32). A cold re-read of that amendment
-found 24 places, a check of their corrections found 12 more, and the writing of the plan found
-11. This text carries the corrections that are the text's. Point 32 holds the choice that is
-left to the maintainer, and the rest are the plan's, which lists them.
+found 24 places, a check of their corrections found 12 more, the writing of the plan found 11,
+and a last read of those corrections found 6 in this text. This text carries the corrections
+that are the text's, and the rest are the plan's, which lists them. Once the plan was written,
+the maintainer made the choice that point 32 had left open, and kept one choice of the plan
+that costs minutes (point 32).
 
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
 Fable model wrote each of the first two reviews. AI agents on an Opus model gathered the evidence,
@@ -1422,8 +1424,8 @@ any configuration never quotes a value. The tool masks every such password in ev
 writes, in its plain form and in the encoded form in which the nodes' credentials file holds it.
 That includes the output of commands and the pod logs that it copies into the evidence. The
 step's outputs on GitHub are the one thing it does not mask: they hold a word of the verdict's
-vocabulary and the results folder's path as the caller gave it, and the first of them is written
-before the configuration is read.
+vocabulary and the results folder's absolute path, which the tool makes from the caller's
+`--out` or chooses itself, and the first of them is written before the configuration is read.
 
 The tool masks nothing else. A chart value or a probe header's value is written as it was given,
 so a caller who passes a real secret there keeps the evidence to themselves. GitHub's own masking
@@ -1516,11 +1518,11 @@ that the final `result.json` holds, and the tool ends by the signal (section 10)
 `not-verified` otherwise, as the exit code is then 1 or 2; after a signal the tool ends by the
 signal then too. A run that is killed before it writes `verdict` the second time leaves
 `not-verified`, which a caller reads as a run that did not finish. An empty `verdict` means that
-the tool could not open the results folder, or never started: the action stopped before it, on a
-runner that is not Linux or has no engine, or on an image that could not be pulled. A caller
-treats an empty `verdict` as not verified. An output that cannot be written is a warning and
-changes no verdict (section 10, rule 10); when the outputs' file cannot be written at all,
-`verdict` stays empty although the tool ran, and the console's warning says so.
+the tool could not open the results folder or write the outputs, or never started: the action
+stopped before it, on a runner that is not Linux or has no engine, or on an image that could not
+be pulled. A caller treats an empty `verdict` as not verified. An output that cannot be written
+is a warning and changes no verdict (section 10, rule 10); when the outputs' file cannot be
+written at all, `verdict` stays empty although the tool ran, and the console's warning says so.
 
 How the tool reaches the runner: the action checks that the runner is Linux, finds the container
 engine, pulls the tool's image by digest and copies the binary out of it. It finds the engine as
@@ -2330,8 +2332,8 @@ A line leaves the list when a fixture shows the tool catching what it names.
 - **No diagnosis.** The report says which pods were starting or stopping when the first failure
   came, and the timeline shows the rest. The tool does not guess the cause.
 - **Workload logs are the workload's own text.** The tool masks registry passwords everywhere it
-  writes, the pod logs it copies included, and nothing else in them. The caller decides whether
-  to upload the evidence.
+  writes but the step's outputs (section 8), the pod logs it copies included, and nothing else
+  in them. The caller decides whether to upload the evidence.
 
 ## 11. Security
 
@@ -2348,8 +2350,9 @@ A line leaves the list when a fixture shows the tool catching what it names.
   images that no entry names, each with its entry's credentials when it has them, and the token
   services that those hosts name. Helm's pulls, with the caller's own logins. Nothing else.
 - A registry password arrives only through an environment variable. It is masked, in its plain
-  and its encoded form, in everything the tool writes. Nothing else is masked (section 8). This
-  rule has not had a security review (section 14).
+  and its encoded form, in everything the tool writes but the step's outputs on GitHub, which
+  hold no value of the configuration. Nothing else is masked (section 8). This rule has not had
+  a security review (section 14).
 - The credentials file mounted into the nodes holds only the hosts the configuration lists. It
   lives in the run's folder and is removed with the cluster. While the cluster lives, every pod
   in it can read the file (section 9), so the credentials should be able to read only, and
@@ -2441,7 +2444,8 @@ A line leaves the list when a fixture shows the tool catching what it names.
   cannot be written among them; that nothing is written unless `GITHUB_ACTIONS` is `true`, and
   each file only when its variable names one; an output or a summary that cannot be written, as
   a warning; the summary appended once, a later warning as one more line of it, text from
-  outside the tool escaped, and no summary after a final `result.json` that cannot be written;
+  outside the tool kept from changing the page, and no summary after a final `result.json` that
+  cannot be written;
   and the order of the final `result.json`, the outputs, the summary, the console's text and
   the evidence.
 - A signal during each call into kind that comes before the verdict (section 10, "On a
@@ -2548,15 +2552,17 @@ that `ubuntu-latest` comes to name from November 2026, over one or two months. I
 and nothing of this project had run on it when this was written. The harness takes the Helm
 major from a variable, and runs both when the variable is not set, as a developer's run does. A
 `-run` pattern must not choose it: the fourteenth row's control is a subtest of its own, and a
-pattern for one Helm major skips it without a word. The harness keeps GitHub's variables for the
-outputs and the summary out of the runs it starts, so that a job's summary is not the sum of its
-runs' summaries; of the suite's runs, the first fixture's alone gets the three variables of
-section 8, with files of its own for both, which its test reads. Each job gives `go test` a time
-limit below its own, so that the test's report is not cut off. A job that fails uploads the
-results folders of its runs, kept for three days; a job that passes uploads nothing. From the
-first fixture's time on a hosted runner, one run of the workflow is about 170 to 200 billed
-minutes, and about 1 hour 30 minutes to 1 hour 50 minutes from its start to its end (section
-14, point 32).
+pattern for one Helm major skips it without a word. The control runs in both Helm jobs, whatever
+the variable says: each job has a runner image, a kernel and a Docker of its own, and the
+control shows there that the cluster's network plugin enforces the policy. The harness keeps
+GitHub's variables for the outputs and the summary out of the runs it starts, so that a job's
+summary is not the sum of its runs' summaries; of the suite's tests, the first fixture's alone
+sets the three variables of section 8 for its run, with files of its own for both, which it
+reads. Each job gives `go test` a time limit below its own, so that the test's report is not
+cut off. A job that fails uploads the results folders of its runs, kept for three days; a job
+that passes uploads nothing. From the first fixture's time on a hosted runner, one run of the
+workflow is about 172 to 205 billed minutes, and about 1 hour 30 minutes to 1 hour 50 minutes
+from its start to its end (section 14, point 32).
 
 **The mirror job.** A registry inside the job stands for an organization's mirror. It needs a
 login, it sits under a path of its host, and it serves TLS from a private authority. The previous
@@ -3285,10 +3291,10 @@ proves which point.
 32. **The outputs, the action's test, a cancel, the summary and the suite's workflow, rulings of
     2026-11-22.** Before the plan for step 6, a cold reading of this text against the code, and a
     reading of the runner's source, left more open than the three points that the build order
-    gives to the step. The maintainer ruled on the first four things below that day. The
-    drafting session chose the others, from this text, from the code or from a run. They are
-    not rulings of the maintainer, who may strike any. They are recorded so that the plan does
-    not decide them again. The last is open, and is the maintainer's.
+    gives to the step. The maintainer ruled on the first four things below that day, and on
+    the last once the plan was written. The drafting session chose the others, from this text,
+    from the code or from a run. They are not rulings of the maintainer, who may strike any.
+    They are recorded so that the plan does not decide them again.
     - **The proofs on hosted runners.** Nearly every proof of step 6 needs GitHub's runner, or
       Docker, which the workstation lacks. The maintainer gave the word for one run of each: what
       the runner does with `env`, outputs, the summary and a cancel; the two proof programs that
@@ -3321,10 +3327,13 @@ proves which point.
       `ubuntu-26.04` side by side (section 12). A cluster layer that is broken then costs 16
       minutes and not the run, and Ubuntu 26.04 with Docker 29 is shown while `ubuntu-latest`
       moves to it. The ruling named no image for the first job; the drafting session put it on
-      `ubuntu-24.04`, where its time was measured. What lost: **both Helm jobs on
-      `ubuntu-24.04`**, which changes one thing at a time and leaves the new image unshown; and
-      **one job for the whole suite**, which needs no change to the harness and loses the whole
-      run to a late failure.
+      `ubuntu-24.04`, where its time was measured. The ruling was made on about 170 to 200
+      billed minutes for a run, with the fourteenth row's control in the Helm 3 job alone. The
+      plan runs the control in both Helm jobs, since each has a runner image, a kernel and a
+      Docker of its own, and the maintainer kept it there the same day: about 172 to 205 billed
+      minutes for a run. What lost: **both Helm jobs on `ubuntu-24.04`**, which changes one
+      thing at a time and leaves the new image unshown; and **one job for the whole suite**,
+      which needs no change to the harness and loses the whole run to a late failure.
     - **7.5 s after a cancel.** This text said "about 10 seconds" in two places. The runner sends
       SIGTERM 7.5 s after SIGINT, and point 27 makes a second signal end the tool at once. The
       text now says 7.5 s, and the outputs and the summary come right after the final
@@ -3342,11 +3351,12 @@ proves which point.
     - **A signal while kind works.** The text says that a signal stops the run at once. The code
       waited for kind while it created a cluster, while it deleted an earlier run's before
       that, and while it took the logs of a set-up that failed and deleted that cluster. Each
-      can take longer than a cancelled step has. The code changes to the text: before the
-      verdict the tool stops waiting for kind, in every one of these, and the next run removes
-      what kind left (section 10). The delete at a run's end comes after the verdict and is
-      still not cut short. What lost: **an exception in the text**, under which a cancel during
-      set-up leaves a `result.json` that says the run did not finish.
+      can take longer than a cancelled step has. The short calls by which the code lists the
+      nodes and writes their settings take no context either. The code changes to the text:
+      before the verdict the tool stops waiting for kind, in every one of these, and the next
+      run removes what kind left (section 10). The delete at a run's end comes after the
+      verdict and is still not cut short. What lost: **an exception in the text**, under which
+      a cancel during set-up leaves a `result.json` that says the run did not finish.
     - **One engine for the action and the tool.** The action finds the engine by the tool's
       rule, written a second time in its script, and two writings of one rule can differ. The
       action therefore starts the tool with `KIND_EXPERIMENTAL_PROVIDER` set to the engine it
@@ -3373,20 +3383,20 @@ proves which point.
       use from another repository, come with the first release (section 8). The automation of
       kind's updates comes with step 7 (section 9). Until then the README says that the action
       cannot be used from outside.
-    - **Open: how the two new workflows are started.** GitHub's pages say that a workflow
-      starts by hand only when the default branch holds a file of its name. One adds that a
-      workflow which has run once can be started against any branch through the API or the
-      command line; whether that holds for a file that is on no branch but the chosen one was
-      not tried (section 16). `rollproof-proofs.yml` was on `main` before step 6, so the
-      branch's file could be started. `rollproof-e2e.yml` and `rollproof-action.yml` are new,
-      and step 6 has to run both before it is merged. Three ways: a small pull request first
-      that puts both names on `main` as files that do nothing yet, which is the case that was
-      seen; the new jobs as further parts of `rollproof-proofs.yml` until the step is merged,
-      which leaves the two files themselves unrun; or a trigger other than by hand for the
-      time of the step, which spends minutes on every push while it stays, unless one run by it
-      is enough for a start by hand afterwards, which is the untried case. The maintainer
-      chooses. Until then the plan for step 6 writes the first, as one task that only the runs
-      on GitHub depend on; its pull request waits for the maintainer's word.
+    - **How the two new workflows are started.** GitHub's pages say that a workflow starts by
+      hand only when the default branch holds a file of its name. One adds that a workflow
+      which has run once can be started against any branch through the API or the command
+      line; whether that holds for a file that is on no branch but the chosen one was not
+      tried (section 16). `rollproof-proofs.yml` was on `main` before step 6, so the branch's
+      file could be started. `rollproof-e2e.yml` and `rollproof-action.yml` are new, and step 6
+      has to run both before it is merged. The maintainer chose, once the plan was written: a
+      small pull request first that puts both names on `main` as files that do nothing yet,
+      which is the case that was seen. The plan for step 6 has it as one task that only the
+      runs on GitHub depend on. What lost: **the new jobs as further parts of
+      `rollproof-proofs.yml`** until the step is merged, which leaves the two files themselves
+      unrun; and **a trigger other than by hand for the time of the step**, which spends
+      minutes on every push while it stays, unless one run by it is enough for a start by hand
+      afterwards, which is the untried case.
 
 ## 15. Not in the first release
 
