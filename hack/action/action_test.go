@@ -261,6 +261,26 @@ func startingRun(t *testing.T) *scriptRun {
 	return r
 }
 
+// binaryFolder is the base name of the one folder that the script made for the binary under
+// RUNNER_TEMP, which begins "rollproof-action-"; it fails the test when there is not exactly one.
+func (r *scriptRun) binaryFolder() string {
+	r.t.Helper()
+	entries, err := os.ReadDir(r.temp)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if len(entries) != 1 || !entries[0].IsDir() || !strings.HasPrefix(entries[0].Name(), "rollproof-action-") {
+		r.t.Fatalf("RUNNER_TEMP holds %v, want one folder rollproof-action-…", entries)
+	}
+	return entries[0].Name()
+}
+
+// createLine is the log's line for the script's create: the container carries the name of the
+// folder made for the binary.
+func createLine(folder string) string {
+	return "docker create --name " + folder + " " + ref + " /rollproof"
+}
+
 func TestTheScriptStartsTheToolInItsPlace(t *testing.T) {
 	r := startingRun(t)
 	r.env["ROLLPROOF_ACTION_CONFIG"] = "projects/rollproof/hack/action/testdata/pass.yaml"
@@ -291,25 +311,17 @@ func TestTheScriptStartsTheToolInItsPlace(t *testing.T) {
 	if diff := cmp.Diff([]string{r.space}, r.lines(r.toolDir)); diff != "" {
 		t.Errorf("the tool's working folder (-want +got):\n%s", diff)
 	}
-	wantLog := []string{"docker -v", "docker pull " + ref, "docker create " + ref + " /rollproof",
+	folder := r.binaryFolder()
+	wantLog := []string{"docker -v", "docker pull " + ref, createLine(folder),
 		"docker export fake-id", "docker rm fake-id"}
 	if diff := cmp.Diff(wantLog, r.lines(r.log)); diff != "" {
 		t.Errorf("the engine's log (-want +got):\n%s", diff)
 	}
-
-	entries, err := os.ReadDir(r.temp)
+	fi, err := os.Stat(filepath.Join(r.temp, folder, "rollproof"))
 	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 || !entries[0].IsDir() || !strings.HasPrefix(entries[0].Name(), "rollproof-action-") {
-		t.Errorf("RUNNER_TEMP holds %v, want one folder rollproof-action-…", entries)
-	} else {
-		fi, err := os.Stat(filepath.Join(r.temp, entries[0].Name(), "rollproof"))
-		if err != nil {
-			t.Error(err)
-		} else if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o111 == 0 {
-			t.Errorf("the binary's mode is %v, want an executable file", fi.Mode())
-		}
+		t.Error(err)
+	} else if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o111 == 0 {
+		t.Errorf("the binary's mode is %v, want an executable file", fi.Mode())
 	}
 	r.outputIsEmpty()
 	if got, want := lastLine(stderr), "rollproof: the tool from "+ref+", through docker"; got != want {
@@ -357,6 +369,12 @@ func TestTheScriptsEngineRule(t *testing.T) {
 		{name: "docker's -v prints a second line",
 			engines: map[string]engineBehaviour{"docker": {banner: "Docker version 28.0.4\nanother line"}},
 			want:    "docker\n"},
+		{name: "docker comes before nerdctl",
+			engines: map[string]engineBehaviour{"docker": {banner: dockerBanner}, "nerdctl": nerdctl},
+			want:    "docker\n"},
+		{name: "docker's banner is later in its first line",
+			engines: map[string]engineBehaviour{"docker": {banner: "Client: Docker version 28.0.4"}, "nerdctl": nerdctl},
+			want:    "nerdctl\n"},
 		{name: "only podman",
 			engines: map[string]engineBehaviour{"podman": {banner: "podman version 4.9.3"}}, want: "podman\n"},
 		{name: "no engine", want: "", code: 1},
@@ -424,11 +442,22 @@ func TestTheScriptFailsWithExit2AndWritesNoOutput(t *testing.T) {
 		log     []string // the log exactly, when exact
 		logEnds string   // the log's last line, when not empty
 		exact   bool
+		// creates says that the script reaches the engine's create: the row then finds the one
+		// folder rollproof-action-… under RUNNER_TEMP, which the failure leaves, and wants the
+		// log's create line built from its base name, compared whole. A row that fails before
+		// create (no folder may exist, as in "no folder for the binary") wants no create line.
+		creates bool
 	}{
 		{name: "not Linux",
 			change: func(t *testing.T, r *scriptRun) { r.command("uname", "printf '%s\\n' Darwin\n") },
 			text: func(*scriptRun) string {
 				return "rollproof: the runner is not Linux (uname -s printed Darwin); the action runs only on Linux"
+			},
+			exact: true},
+		{name: "a uname that fails",
+			change: func(t *testing.T, r *scriptRun) { r.command("uname", "exit 1\n") },
+			text: func(*scriptRun) string {
+				return "rollproof: uname -s failed, so the runner's system is not known; the action runs only on Linux"
 			},
 			exact: true},
 		{name: "no engine",
@@ -471,19 +500,20 @@ func TestTheScriptFailsWithExit2AndWritesNoOutput(t *testing.T) {
 			change: func(t *testing.T, r *scriptRun) {
 				r.engine("docker", engineBehaviour{banner: dockerBanner, create: 125, tar: toolTar(t, "rollproof", 0o755, fakeTool)})
 			},
-			text: func(*scriptRun) string { return "rollproof: docker could not create a container from " + ref }},
+			text:    func(*scriptRun) string { return "rollproof: docker could not create a container from " + ref },
+			creates: true},
 		{name: "an export that fails",
 			change: func(t *testing.T, r *scriptRun) {
 				r.engine("docker", engineBehaviour{banner: dockerBanner, export: 1, tar: toolTar(t, "rollproof", 0o755, fakeTool)})
 			},
 			text:    func(*scriptRun) string { return "rollproof: the binary /rollproof could not be taken out of " + ref },
-			logEnds: "docker rm fake-id"},
+			logEnds: "docker rm fake-id", creates: true},
 		{name: "an image without the binary",
 			change: func(t *testing.T, r *scriptRun) {
 				r.engine("docker", engineBehaviour{banner: dockerBanner, tar: toolTar(t, "other", 0o755, fakeTool)})
 			},
 			text:    func(*scriptRun) string { return "rollproof: the binary /rollproof could not be taken out of " + ref },
-			logEnds: "docker rm fake-id"},
+			logEnds: "docker rm fake-id", creates: true},
 		{name: "a workspace that cannot be entered",
 			change: func(t *testing.T, r *scriptRun) {
 				r.env["GITHUB_WORKSPACE"] = filepath.Join(r.root, "no-such-workspace")
@@ -491,7 +521,7 @@ func TestTheScriptFailsWithExit2AndWritesNoOutput(t *testing.T) {
 			text: func(r *scriptRun) string {
 				return "rollproof: the workspace " + r.env["GITHUB_WORKSPACE"] + " cannot be entered"
 			},
-			logEnds: "docker rm fake-id"},
+			logEnds: "docker rm fake-id", creates: true},
 		// A file that is missing or not executable never reaches the exec: take_binary stops it. A
 		// file of the wrong format does, and execve refuses it. Under execfail and the script's
 		// "set +e" the line after the exec then fails as the other failures do; without "set +e",
@@ -502,7 +532,8 @@ func TestTheScriptFailsWithExit2AndWritesNoOutput(t *testing.T) {
 				content := append([]byte("\x7fELF\x02\x01\x01"), make([]byte, 57)...)
 				r.engine("docker", engineBehaviour{banner: dockerBanner, tar: toolTar(t, "rollproof", 0o755, content)})
 			},
-			text: func(*scriptRun) string { return "rollproof: the binary taken out of " + ref + " could not be started" }},
+			text:    func(*scriptRun) string { return "rollproof: the binary taken out of " + ref + " could not be started" },
+			creates: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := startingRun(t)
@@ -523,6 +554,19 @@ func TestTheScriptFailsWithExit2AndWritesNoOutput(t *testing.T) {
 			}
 			if tc.logEnds != "" && (len(log) == 0 || log[len(log)-1] != tc.logEnds) {
 				t.Errorf("the engine's log is %q, want it to end with %q", log, tc.logEnds)
+			}
+			var creates []string
+			for _, l := range log {
+				if strings.HasPrefix(l, "docker create") {
+					creates = append(creates, l)
+				}
+			}
+			var wantCreates []string
+			if tc.creates {
+				wantCreates = []string{createLine(r.binaryFolder())}
+			}
+			if diff := cmp.Diff(wantCreates, creates); diff != "" {
+				t.Errorf("the log's create lines (-want +got):\n%s", diff)
 			}
 		})
 	}

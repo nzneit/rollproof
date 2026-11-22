@@ -4,7 +4,8 @@
 # digest, takes the binary out of it, and starts it with exec, in the workspace, so that the tool
 # is the step's first process and gets the runner's signals (design, sections 8 and 14, point 20).
 # It never writes an output: when it fails itself, it says why on standard error and exits 2, and
-# the step's verdict stays empty. Sourced, it only defines its functions.
+# the step's verdict stays empty. Sourced, it sets its shell options and defines its functions, and
+# does not run main.
 #
 # Its input is the environment that action.yml's step gives it:
 #   ROLLPROOF_ACTION_CONFIG      the input config
@@ -78,9 +79,11 @@ image_ref() {
 # creates a container that never starts, with /rollproof as its command for an engine that wants
 # one, exports its file system as a tar, keeps the one file rollproof, and removes the container.
 # The route is export and tar because rootless nerdctl refuses cp from a container that never ran.
+# The container carries the base name of dir, which begins rollproof-action- and is new for each
+# run, so that a container left by a cancel between create and rm is known as the project's.
 take_binary() {
   local engine=$1 ref=$2 dir=$3 id
-  id=$("$engine" create "$ref" /rollproof) || fail "$engine could not create a container from $ref"
+  id=$("$engine" create --name "${dir##*/}" "$ref" /rollproof) || fail "$engine could not create a container from $ref"
   if ! "$engine" export "$id" | tar -x -C "$dir" -f - rollproof; then
     "$engine" rm "$id" >/dev/null 2>&1 || true
     fail "the binary /rollproof could not be taken out of $ref"
@@ -94,7 +97,7 @@ take_binary() {
 # its own variables unset.
 main() {
   local system engine ref dir temp=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
-  system=$(uname -s)
+  system=$(uname -s) || fail "uname -s failed, so the runner's system is not known; the action runs only on Linux"
   [[ $system == Linux ]] || fail "the runner is not Linux (uname -s printed $system); the action runs only on Linux"
   engine=$(pick_engine) || fail "no container engine that kind supports: KIND_EXPERIMENTAL_PROVIDER names none, and none of docker, nerdctl and podman answers -v"
   ref=$(image_ref) || exit 2
