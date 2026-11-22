@@ -33,7 +33,8 @@ Unlike Tasks 1 to 12, every command of this task runs from the repository root: 
   detects it, it first prints "::stop-commands::TOKEN" on stdout and then on
   stderr, TOKEN new for each call: the runner reads each stream in its own order,
   so each needs the line first, and the one that the runner meets second is a
-  plain line. The runner then reads no line of the command as a command. When
+  plain line. The runner then reads no line of the command as a command, but for
+  the two things that the design's section 8 leaves open. When
   command has returned and signalled says that no signal came, it prints
   "::TOKEN::" on stdout, so that a step that runs the tool from a script of its
   own can use workflow commands again. After a signal it prints nothing more: the
@@ -51,7 +52,7 @@ Unlike Tasks 1 to 12, every command of this task runs from the repository root: 
   prints the lines for GitHub's workflow commands only when env asks for them, on
   this machine and on GitHub's runner alike. The child is killed at the end of
   the test if it still runs.
-- Produces, in `action.sh`: the variable `token_file` and the function `stop_commands`, with their comments in Step 3; the text of failure `rollproof: no token for the line that stops the runner's workflow commands: PATH gave none` (exit 2, PATH the file it read).
+- Produces, in `action.sh`: the variable `token_file` and the function `stop_commands`, with their comments in Step 3; the text of failure `rollproof: no token for the line that stops the runner's workflow commands: PATH gave none` (exit 2, PATH the file it read), and the two texts `rollproof: the line that stops the runner's workflow commands could not be written to standard output` and `… to standard error` (exit 2). `fail` changes too: it exits 2 also when its message cannot be written.
 - Produces, in `e2e/runenv_test.go` (no build tag): ``var stopLine = regexp.MustCompile(`^::stop-commands::[A-Z2-7]{26}$`)``, `func envValue(env []string, name string) string` and `func workflowCommandFaults(stdout, stderr string, onGitHub, bySignal bool) []string`, with their comments in Step 3.
 - Produces: the lines themselves (public, decision 26). The tool, on GitHub Actions: `::stop-commands::TOKEN` first on stdout and first on stderr, TOKEN 26 characters of `A` to `Z` and `2` to `7`; `::TOKEN::` last on stdout when it ends by itself. The script: `::stop-commands::UUID` first on stdout and first on stderr, right after its check for Linux, UUID the kernel's form `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`; never a resume line.
 
@@ -113,8 +114,9 @@ func TestNoWorkflowCommandLinesOffGitHub(t *testing.T) {
 	// "an error of the run\n".
 }
 
-// A panic that escapes the run is no end by itself that the step can trust: the commands stay
-// stopped, and the panic's trace on stderr is read as plain lines (decision 26).
+// A panic that escapes the run is no end by itself that the step can trust: no resume line is
+// printed, so the commands stay stopped. That the runner then reads the panic's trace on stderr
+// as plain lines is read in its source, not shown here (decision 26).
 func TestAPanicInTheRunLeavesNoResumeLine(t *testing.T) {
 	// stopToken(t, "TESTTOKEN"); getenv githubEnv; signalled fails the test when called; the
 	// command panics with "the run broke". The panic reaches the test, with that value; stdout and
@@ -152,7 +154,7 @@ func TestOnlyTheRunCommandStopsWorkflowCommands(t *testing.T) {
 	// newStopToken replaced by a function that fails the test when called; realMain with getenv
 	// githubEnv. One row each: ["version"] exits 0; no args exits 2; ["probe", "http", "--url",
 	// "http://127.0.0.1:1/", "--rate", "0"] exits 2. In each row no line of stdout or stderr
-	// begins "::".
+	// begins "::" after its leading white space, and none holds "##[".
 }
 
 // After a signal the process ends by it, and the step with it: no resume line (section 8,
@@ -202,6 +204,12 @@ func TestTheScriptsStopLine(t *testing.T) {
 	//   PATH a path that does not exist -> stdout "", 2, stderr
 	//     "rollproof: no token for the line that stops the runner's workflow commands: " + PATH + " gave none\n"
 	//   PATH an empty file -> stdout "", 2, stderr the same text with that PATH
+	//   PATH the first file, and standard output closed for stop_commands (" >&-" after it) ->
+	//     stdout "", 2, stderr's last line "rollproof: the line that stops the runner's workflow
+	//     commands could not be written to standard output" (bash's own message for the failed
+	//     write may stand before it)
+	//   PATH the first file, and standard error closed (" 2>&-") -> stdout the stop line, 2;
+	//     stderr is not judged
 }
 ```
 
@@ -337,7 +345,18 @@ and `realMain`'s comment gains the sentence "For run, it prints the lines of wit
 # commands").
 ```
 
-and the line "# Besides bash and the engine, it uses uname, mktemp and tar." becomes "# Besides bash and the engine, it uses uname, mktemp and tar, and reads /proc/sys/kernel/random/uuid.". After `fail`, insert:
+and the line "# Besides bash and the engine, it uses uname, mktemp and tar." becomes "# Besides bash and the engine, it uses uname, mktemp and tar, and reads /proc/sys/kernel/random/uuid.". `fail` becomes, so that the script's own failures exit 2 also when standard error cannot be written (under `set -e` a `printf` that fails would end the script with 1, the tool's code for a fail, before `exit 2`):
+
+```bash
+# fail prints its message, after "rollproof: ", to standard error, and exits 2, also when the
+# message cannot be written.
+fail() {
+  printf 'rollproof: %s\n' "$1" >&2 || true
+  exit 2
+}
+```
+
+After `fail`, insert:
 
 ```bash
 # token_file is where stop_commands reads its token: the kernel gives a new random UUID at each
@@ -346,14 +365,16 @@ token_file=/proc/sys/kernel/random/uuid
 
 # stop_commands prints "::stop-commands::TOKEN" on standard output and on standard error, TOKEN
 # the first line of token_file, read with bash's own read. GitHub's runner then reads no workflow
-# command in the step until a line "::TOKEN::", which this script never prints. Each stream gets
-# the line, because the runner reads each in its own order. Without a token it fails.
+# command in the step until a line that names TOKEN as a command ("::TOKEN::", or the older form
+# "##[TOKEN]" anywhere in a line), which this script never prints. Each stream gets the line,
+# because the runner reads each in its own order. Without a token, or when it cannot write one
+# of the two lines, it fails.
 stop_commands() {
   local token=
   read -r token 2>/dev/null <"$token_file" || true
   [[ -n $token ]] || fail "no token for the line that stops the runner's workflow commands: $token_file gave none"
-  printf '::stop-commands::%s\n' "$token"
-  printf '::stop-commands::%s\n' "$token" >&2
+  printf '::stop-commands::%s\n' "$token" || fail "the line that stops the runner's workflow commands could not be written to standard output"
+  printf '::stop-commands::%s\n' "$token" >&2 || fail "the line that stops the runner's workflow commands could not be written to standard error"
 }
 ```
 
@@ -403,12 +424,12 @@ The faults' texts are those of `TestWorkflowCommandFaults`, in this order: each 
 	}
 ```
 
-and `runFixture`'s comment gains, after "…its standard error as stderr.txt.", the sentence "It checks the lines for GitHub's workflow commands in both streams by the run's own GITHUB_ACTIONS (workflowCommandFaults)."
+and `runFixture`'s comment gains, after "…its standard error as stderr.txt.", the sentence "It checks the lines for GitHub's workflow commands in both streams by the run's own GITHUB_ACTIONS (workflowCommandFaults)." Above the `t.Logf` that logs the run's two streams, and above the one in `TestTheScriptRunsTheToolFromItsImage` (`hack/action/action_cluster_test.go`), a comment says that on GitHub's runner the lines of that log are read for workflow commands too, since `go test` indents them and the runner trims that, so the first logged stop line stops the runner's commands for the rest of the `go test` step, which prints none (design, section 12, "The suite's workflow").
 
 `README.md`, in the section "On GitHub Actions", after the sentence "The job summary holds the console's report as Markdown, with every text from the cluster, the commands and the configuration inside code.", in the same paragraph:
 
 ```markdown
-GitHub's runner reads a line that a step prints as a workflow command when it begins with `::`, or holds `##[`, so on GitHub Actions the tool's first line on standard output and on standard error is `::stop-commands::` and a token, and its last line on standard output, when it ends by itself, is `::`, the token and `::` again: no line in between, a pod's message included, is read as a command, and a script that ran the tool can use commands afterwards. Two things are left open, because the runner reads the two streams apart: a line that the tool writes on standard error just before it ends may still be read after that last line, and after a run that ends at once, as a usage error does, the runner may read no command for the rest of the step. The action's script stops commands the same way, with a token of its own, and never resumes them, so its step reads none and neither thing arises there.
+GitHub's runner reads a line that a step prints as a workflow command when it begins with `::` after its leading white space, or holds `##[` anywhere, so on GitHub Actions the tool's first line on standard output and on standard error is `::stop-commands::` and a token, and its last line on standard output, when it ends by itself, is `::`, the token and `::` again: no line in between, a pod's message included, is read as a command, and a script that ran the tool can use commands afterwards. Two things are left open, because the runner reads the two streams apart: a line that the tool writes on standard error just before it ends may reach the runner after that last line, and is then read for commands, and after a run that ends at once, as a usage error does, the runner may read no command for the rest of the step. The action's script stops commands the same way, with a token of its own, and never resumes them, so its step reads none and neither thing arises there.
 ```
 
 If Task 11's paragraph does not hold that sentence word for word, put the text after the paragraph's last sentence and say so in the report.

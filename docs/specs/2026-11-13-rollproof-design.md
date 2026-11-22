@@ -2505,8 +2505,8 @@ A line leaves the list when a fixture shows the tool catching what it names.
   in a child process, nor after a crash; neither line elsewhere, nor for `version` and `probe`;
   a new token for each run. The action's script with fake engines: its stop line first on both
   streams, after the check for Linux and never before it, no resume line, and exit 2 when it
-  gets no token. The suite's harness checks both lines in the console and the standard error of
-  every run, by the run's own `GITHUB_ACTIONS`.
+  gets no token or cannot write one of the two lines. The suite's harness checks both lines in
+  the console and the standard error of every run, by the run's own `GITHUB_ACTIONS`.
 - A signal during each call into kind that comes before the verdict (section 10, "On a
   signal"), with kind's calls replaced by ones that do not return: the run returns all the
   same, with a final `result.json` and the reason `interrupted`.
@@ -2618,10 +2618,14 @@ GitHub's variables for the outputs and the summary out of the runs it starts, so
 summary is not the sum of its runs' summaries; of the suite's tests, the first fixture's alone
 sets the three variables of section 8 for its run, with files of its own for both, which it
 reads. Each job gives `go test` a time limit below its own, so that the test's report is not
-cut off. A job that fails uploads the results folders of its runs, kept for three days; a job
-that passes uploads nothing. From the first fixture's time on a hosted runner, one run of the
-workflow is about 172 to 205 billed minutes, and about 1 hour 30 minutes to 1 hour 50 minutes
-from its start to its end (section 14, point 32).
+cut off. `go test` logs each run's two streams with their lines indented, and the runner trims
+a line before it parses it, so the first stop line that is logged stops the runner's workflow
+commands for the rest of that `go test` step; the same holds in the mirror job, and in the
+first job for the log of the action's script. Those steps print no command, so nothing is lost
+(section 8, "Workflow commands"). A job that fails uploads the results folders of its runs,
+kept for three days; a job that passes uploads nothing. From the first fixture's time on a
+hosted runner, one run of the workflow is about 172 to 205 billed minutes, and about 1 hour 30
+minutes to 1 hour 50 minutes from its start to its end (section 14, point 32).
 
 **The mirror job.** A registry inside the job stands for an organization's mirror. It needs a
 login, it sits under a path of its host, and it serves TLS from a private authority. The previous
