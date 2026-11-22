@@ -83,11 +83,14 @@ func CheckRunner(ctx context.Context) (Engine, error) {
 	return Engine{Binary: binary, Rootless: rootless}, nil
 }
 
-// pickEngine returns the engine's command name as kind chooses it, or "" when there is none.
-// KIND_EXPERIMENTAL_PROVIDER names it when it holds a value that kind's own command line takes
-// (pkg/internal/runtime/runtime.go at v0.33.0). Otherwise it is the first of docker, nerdctl and
-// podman whose -v succeeds and whose first line starts with the engine's banner: the test of
-// IsAvailable in kind's three providers, in the order of cluster.DetectNodeProvider.
+// pickEngine returns the engine's command name, or "" when there is none. KIND_EXPERIMENTAL_PROVIDER
+// names it when it holds a value that kind's own command line takes (pkg/internal/runtime/runtime.go
+// at v0.33.0): docker, podman, nerdctl, finch or nerdctl.lima. Otherwise it is the first of docker,
+// nerdctl and podman whose -v exits 0 with a first line that begins with the engine's banner. That
+// is the order of kind's cluster.DetectNodeProvider, and not its test: kind's IsAvailable wants
+// exactly one line of output, and tries finch when nerdctl answers no such line. The tool names the
+// engine to kind itself (Engine.provider), so kind's own search never runs. The action's script,
+// action.sh, follows this rule line for line and starts the tool with the variable set to its answer.
 func pickEngine(ctx context.Context) string {
 	switch p := lookupEnv("KIND_EXPERIMENTAL_PROVIDER"); p {
 	case "docker", "podman", "nerdctl", "finch", "nerdctl.lima":

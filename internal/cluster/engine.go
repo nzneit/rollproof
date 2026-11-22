@@ -49,7 +49,7 @@ func (e Engine) run(ctx context.Context, args ...string) (string, error) {
 // pullIfMissing has the engine pull image unless its store holds it, by the check kind's
 // providers make (`inspect --type=image`), so the two agree. limit bounds the pull from its own
 // call; when limit ended it while ctx had not ended, the error is "IMAGE could not be pulled
-// within LIMIT". Else, the engine's error.
+// within LIMIT". Else, the engine's error. Create hands it a node image by nodeImageName.
 func (e Engine) pullIfMissing(ctx context.Context, image string, limit time.Duration) error {
 	if _, err := e.run(ctx, "inspect", "--type=image", image); err == nil {
 		return nil
@@ -61,6 +61,16 @@ func (e Engine) pullIfMissing(ctx context.Context, image string, limit time.Dura
 		return fmt.Errorf("%s could not be pulled within %s", image, limit)
 	}
 	return err
+}
+
+// nodeImageName returns the name by which the tool asks the engine for the node image image: under
+// Podman, podmanName's, so that kind finds the image the tool pulled; for every other engine,
+// image as it is, the name kind's providers for those engines ask for (section 9).
+func (e Engine) nodeImageName(image string) string {
+	if e.Binary == "podman" {
+		return podmanName(image)
+	}
+	return image
 }
 
 // provider returns kind's provider for the engine, with a logger that discards, made with the

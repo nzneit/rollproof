@@ -222,13 +222,13 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 		}
 	}
 
-	// The reference kind is given, so that kind's own check finds the image there and does not
-	// pull it again, outside the limit.
+	// kind is given the reference as written, and the engine is asked for it by nodeImageName, so
+	// that kind's own check finds the image there and does not pull it again, outside the limit.
 	ref := s.NodeImage
 	if ref == "" {
 		ref = DefaultNodeImage()
 	}
-	if err := pullImage(e, ctx, ref, s.Timeout); err != nil {
+	if err := pullImage(e, ctx, e.nodeImageName(ref), s.Timeout); err != nil {
 		return fail("pull the node image", err)
 	}
 
@@ -479,7 +479,8 @@ func setNamespace(path, namespace string) (string, error) {
 
 // nodeImage returns the node image with its digest: named, or DefaultNodeImage when named is
 // empty. A reference without a digest gets the one of the first entry of RepoDigests in the
-// engine's store.
+// engine's store. The engine is asked by nodeImageName; the name returned is named as written, with
+// the digest after it, so that the report and rollproof version keep it.
 func nodeImage(ctx context.Context, e Engine, named string) (string, error) {
 	if named == "" {
 		named = DefaultNodeImage()
@@ -487,7 +488,7 @@ func nodeImage(ctx context.Context, e Engine, named string) (string, error) {
 	if strings.Contains(named, "@sha256:") {
 		return named, nil
 	}
-	out, err := e.run(ctx, "image", "inspect", "--format", "{{json .RepoDigests}}", named)
+	out, err := e.run(ctx, "image", "inspect", "--format", "{{json .RepoDigests}}", e.nodeImageName(named))
 	if err != nil {
 		return "", err
 	}

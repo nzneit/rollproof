@@ -164,6 +164,52 @@ func TestKept(t *testing.T) {
 	}
 }
 
+// Create hands the engine's pull the node image by nodeImageName's name, so that kind's own check
+// finds the image that was pulled, and the pull's failure is the step's.
+func TestCreatePullsTheNodeImageByTheEnginesName(t *testing.T) {
+	const digest = "@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d"
+	for _, tc := range []struct {
+		name   string
+		engine string
+		named  string // Spec.NodeImage
+		want   string // what the pull of the node image is given
+	}{
+		{"podman, no node image", "podman", "", podmanName(DefaultNodeImage())},
+		{"podman, a node image with a digest", "podman", "kindest/node:v1.34.11" + digest,
+			"docker.io/kindest/node" + digest},
+		{"nerdctl, no node image", "nerdctl", "", DefaultNodeImage()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeEngineOnPath(t, tc.engine)
+			oldDelete, oldPull := kindDelete, pullImage
+			t.Cleanup(func() { kindDelete, pullImage = oldDelete, oldPull })
+			kindDelete = func(*kindcluster.Provider, string, string) error { return nil }
+			var pulled string
+			pullImage = func(_ Engine, _ context.Context, image string, _ time.Duration) error {
+				pulled = image
+				return errors.New("stop here")
+			}
+			s := Spec{
+				Name:      "rollproof-test-unit",
+				RunDir:    filepath.Join(t.TempDir(), "rollproof-test-unit"),
+				Workers:   1,
+				Namespace: "app",
+				Timeout:   time.Minute,
+				NodeImage: tc.named,
+			}
+
+			_, err := Create(context.Background(), s, Engine{Binary: tc.engine})
+			c := verdict.AsCondition(err)
+			if want := "pull the node image: stop here"; c.Code != verdict.ClusterFailed || c.Text != want {
+				t.Errorf("Create = %s: %q\nwant cluster-failed: %q", c.Code, c.Text, want)
+			}
+			if pulled != tc.want {
+				t.Errorf("the pull of the node image was given %q, want %q", pulled, tc.want)
+			}
+		})
+	}
+}
+
 // Create's failure texts, with kind's Create and Delete replaced and an engine command that does
 // not exist (which remove reads as a registry container that is gone): each reason stays on one
 // line, and a clean-up that fails says that parts of the run may be left behind.
