@@ -3,9 +3,11 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +21,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 	kindcluster "sigs.k8s.io/kind/pkg/cluster"
 
+	"rollproof/internal/config"
 	"rollproof/internal/verdict"
 )
 
@@ -315,6 +318,67 @@ func TestCreateFailureTexts(t *testing.T) {
 			}
 			if tc.wantImage != "" && (pulledImage != tc.wantImage || pulledLimit != time.Minute) {
 				t.Errorf("the pull of the node image was given %q and %v, want %q and %v", pulledImage, pulledLimit, tc.wantImage, time.Minute)
+			}
+		})
+	}
+}
+
+// Decision 9: the credentials file is in the run's folder, mode 0600, when kind's Create is
+// called, so that kind can mount it into every node; a failure removes it with the folder. With
+// no credentials there is no file.
+func TestCreateWritesTheCredentialsFileBeforeKind(t *testing.T) {
+	const name = "rollproof-test-unit"
+	for _, tc := range []struct {
+		name       string
+		registries []config.Registry
+		wantFile   bool
+	}{
+		{"an entry with credentials", []config.Registry{{Host: "registry.example", Username: "ci", Password: "pw"}}, true},
+		{"no entry with credentials", []config.Registry{{Host: "registry.example", Mirror: "mirror.corp.example/registry-example"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldCreate, oldDelete, oldPull, oldCollect := kindCreate, kindDelete, pullImage, kindCollectLogs
+			t.Cleanup(func() { kindCreate, kindDelete, pullImage, kindCollectLogs = oldCreate, oldDelete, oldPull, oldCollect })
+			runDir := filepath.Join(t.TempDir(), name)
+			s := Spec{Name: name, RunDir: runDir, Workers: 1, Namespace: "app", Timeout: time.Minute, Registries: tc.registries}
+			path := filepath.Join(runDir, "node-credentials.json")
+			creates := 0
+			kindCreate = func(*kindcluster.Provider, string, ...kindcluster.CreateOption) error {
+				creates++
+				b, err := os.ReadFile(path)
+				switch {
+				case !tc.wantFile:
+					if !errors.Is(err, fs.ErrNotExist) {
+						t.Errorf("kind's Create found %s (%v), want no such file", path, err)
+					}
+				case err != nil:
+					t.Errorf("kind's Create could not read the credentials file: %v", err)
+				default:
+					if want := Credentials(s.Registries); !bytes.Equal(b, want) {
+						t.Errorf("the credentials file holds %q, want %q", b, want)
+					}
+					if fi, err := os.Stat(path); err != nil {
+						t.Errorf("the credentials file's mode could not be read: %v", err)
+					} else if perm := fi.Mode().Perm(); perm != 0o600 {
+						t.Errorf("the credentials file's mode is %v, want 0600", perm)
+					}
+				}
+				return errors.New("exit status 125")
+			}
+			kindDelete = func(*kindcluster.Provider, string, string) error { return nil }
+			pullImage = func(Engine, context.Context, string, time.Duration) error { return nil }
+			kindCollectLogs = func(*kindcluster.Provider, string, string) error { return nil }
+
+			_, err := Create(context.Background(), s, Engine{Binary: "rollproof-test-no-such-engine"})
+			if creates != 1 {
+				t.Errorf("%d attempts of kind's Create, want 1", creates)
+			}
+			c := verdict.AsCondition(err)
+			if want := "create the kind cluster: exit status 125" + inotifyHint; c.Code != verdict.ClusterFailed || c.Text != want {
+				t.Errorf("Create = %s: %q\nwant cluster-failed: %q", c.Code, c.Text, want)
+			}
+			if _, err := os.Stat(runDir); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the run's folder is left after the failure: %v", err)
 			}
 		})
 	}

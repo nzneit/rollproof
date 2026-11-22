@@ -84,7 +84,7 @@ func TestStoreArchivePushesByDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ref, err := storeArchive(t.Context(), c, "orders", file, "the archive")
+	ref, err := storeArchive(t.Context(), c, "orders", placeOf("orders", config.Image{Archive: file}), file, "the archive")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +104,69 @@ func TestStoreArchivePushesByDigest(t *testing.T) {
 	}
 }
 
+func TestPlaceOf(t *testing.T) {
+	for _, tc := range []struct {
+		entry      string
+		im         config.Image
+		path, repo string
+	}{
+		{"orders", config.Image{Local: "orders:candidate"}, "orders", "rollproof.test/orders"},
+		{"orders", config.Image{Local: "orders:candidate", As: "registry.example/team/orders"}, "team/orders", "registry.example/team/orders"},
+		{"x", config.Image{Archive: "/a.tar", As: "docker.io/library/orders"}, "library/orders", "docker.io/library/orders"},
+		{"x", config.Image{Local: "a:b", As: "registry.example:5000/a/b"}, "a/b", "registry.example:5000/a/b"},
+	} {
+		want := place{path: tc.path, repository: tc.repo}
+		if got := placeOf(tc.entry, tc.im); got != want {
+			t.Errorf("placeOf(%q, %+v) = %+v, want %+v", tc.entry, tc.im, got, want)
+		}
+	}
+}
+
+// status returns the status of a GET of path from the run's registry at push.
+func status(t *testing.T, push, path string) int {
+	t.Helper()
+	resp, err := http.Get("http://" + push + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestStoreArchiveUnderAs(t *testing.T) {
+	c := archiveRegistry(t)
+	file := archiveOf(t, 1)
+	img, err := tarball.ImageFromPath(file, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := img.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	at := placeOf("orders", config.Image{Archive: file, As: "registry.example/team/orders"})
+	ref, err := storeArchive(t.Context(), c, "orders", at, file, "the archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := config.ImageRef{Repository: "registry.example/team/orders", Digest: digest.String()}
+	if d := cmp.Diff(want, ref); d != "" {
+		t.Errorf("stored as (-want +got):\n%s", d)
+	}
+	for path, code := range map[string]int{
+		"/v2/team/orders/manifests/" + digest.String(): http.StatusOK,
+		"/v2/orders/manifests/" + digest.String():      http.StatusNotFound,
+	} {
+		if got := status(t, c.PushRegistry, path); got != code {
+			t.Errorf("GET %s: %d, want %d", path, got, code)
+		}
+	}
+	if got := tags(t, c.PushRegistry, "team/orders"); len(got) != 0 {
+		t.Errorf("the run's registry has tags %v for team/orders", got)
+	}
+}
+
 func TestStoreArchiveFailures(t *testing.T) {
 	c := archiveRegistry(t)
 	notTar := filepath.Join(t.TempDir(), "orders.tar")
@@ -118,7 +181,7 @@ func TestStoreArchiveFailures(t *testing.T) {
 		{"not a tar", notTar, "images.orders: the archive cannot be read: ", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := storeArchive(t.Context(), c, "orders", tc.file, "the archive")
+			_, err := storeArchive(t.Context(), c, "orders", placeOf("orders", config.Image{Archive: tc.file}), tc.file, "the archive")
 			cond := verdict.AsCondition(err)
 			if err == nil || cond.Code != verdict.ClusterFailed {
 				t.Fatalf("storeArchive: %v, want cluster-failed", err)

@@ -15,10 +15,10 @@ import (
 )
 
 // storeArchive pushes the one image of the archive file into the run's registry by digest, under
-// the repository entry, and returns TestHost/ENTRY and the digest. what names the file in an
-// error's text, such as "the archive". No tag is written. An error is a Condition with
-// ClusterFailed, "images.ENTRY: ...".
-func storeArchive(ctx context.Context, c *cluster.Cluster, entry, file, what string) (config.ImageRef, error) {
+// at.path, and returns at.repository and the digest. what names the file in an error's text, such
+// as "the archive". No tag is written. An error is a Condition with ClusterFailed,
+// "images.ENTRY: ...".
+func storeArchive(ctx context.Context, c *cluster.Cluster, entry string, at place, file, what string) (config.ImageRef, error) {
 	fail := func(text string) (config.ImageRef, error) {
 		return config.ImageRef{}, verdict.Condition{Code: verdict.ClusterFailed, Text: "images." + entry + ": " + text}
 	}
@@ -38,9 +38,9 @@ func storeArchive(ctx context.Context, c *cluster.Cluster, entry, file, what str
 		return fail(what + " cannot be read: " + err.Error())
 	}
 
-	digest, err := pushImage(ctx, c.PushRegistry, entry, img)
+	digest, err := pushImage(ctx, c.PushRegistry, at.path, img)
 	if err != nil {
 		return fail("push to the run's registry failed: " + err.Error())
 	}
-	return config.ImageRef{Repository: cluster.TestHost + "/" + entry, Digest: digest}, nil
+	return config.ImageRef{Repository: at.repository, Digest: digest}, nil
 }

@@ -12,8 +12,8 @@ import "time"
 type Run struct {
 	Schema           int          `json:"schema"`
 	Final            bool         `json:"final"`
-	Verdict          string       `json:"verdict"`
-	Driver           string       `json:"driver"`
+	Verdict          string       `json:"verdict" mask:"keep"`
+	Driver           string       `json:"driver" mask:"keep"`
 	Name             string       `json:"name"`
 	Reasons          []Reason     `json:"reasons"`
 	Windows          []Window     `json:"windows"`
@@ -34,9 +34,9 @@ type Run struct {
 // window. Detail holds lines for people that follow the text. Decided marks
 // the one reason that decided.
 type Reason struct {
-	Code    string   `json:"code"`
-	Verdict string   `json:"verdict"`
-	Window  string   `json:"window,omitempty"`
+	Code    string   `json:"code" mask:"keep"`
+	Verdict string   `json:"verdict" mask:"keep"`
+	Window  string   `json:"window,omitempty" mask:"keep"`
 	Text    string   `json:"text"`
 	Detail  []string `json:"detail"`
 	Decided bool     `json:"decided"`
@@ -48,10 +48,10 @@ type Reason struct {
 // the probe did not give: result.json writes it as null and the console as
 // "-".
 type Window struct {
-	Name              string         `json:"name"`
+	Name              string         `json:"name" mask:"keep"`
 	Start             *time.Time     `json:"start"`
 	End               *time.Time     `json:"end"`
-	Result            string         `json:"result"`
+	Result            string         `json:"result" mask:"keep"`
 	Checks            int            `json:"checks"`
 	Failed            int            `json:"failed"`
 	FailedAfterFinish int            `json:"failed_after_finish"`
@@ -82,17 +82,17 @@ type Install struct {
 
 // Transition is one transition that ran.
 type Transition struct {
-	Name    string `json:"name"`
+	Name    string `json:"name" mask:"keep"`
 	Stalled bool   `json:"stalled"`
 	// Command is how the transition's command ended: ok, exit-nonzero,
 	// not-started, stopped-at-limit or stopped-by-signal. Nil, null in
 	// result.json, for a restart, which has no command.
-	Command *string `json:"command"`
+	Command *string `json:"command" mask:"keep"`
 	// Restart is whether the API server took the restart's change:
 	// "accepted" or "refused". Nil, null in result.json, for a deploy and
 	// a rollback, and for a restart that the run's context cut short or
 	// that limits.timeout stopped, in which the server refused nothing.
-	Restart           *string    `json:"restart"`
+	Restart           *string    `json:"restart" mask:"keep"`
 	SettleRestartedBy []string   `json:"settle_restarted_by"`
 	Workloads         []Workload `json:"workloads"`
 }
@@ -108,14 +108,14 @@ type Workload struct {
 	PodsCreated    int    `json:"pods_created"`
 	Added          bool   `json:"added"`
 	Removed        bool   `json:"removed"`
-	Probed         string `json:"probed"`
+	Probed         string `json:"probed" mask:"keep"`
 	QuickestStopMs *int64 `json:"quickest_stop_ms"`
 }
 
 // Probe is one probe that judged the run. Headers and EnvNames are names,
 // never values.
 type Probe struct {
-	Kind               string    `json:"kind"`
+	Kind               string    `json:"kind" mask:"keep"`
 	Target             string    `json:"target"`
 	Settings           []Setting `json:"settings"`
 	Headers            []string  `json:"headers"`
@@ -141,7 +141,7 @@ type Probe struct {
 // commands driver it is one command: its role, install, deploy or rollback,
 // and its Program.
 type Release struct {
-	Role string `json:"role"`
+	Role string `json:"role" mask:"keep"`
 	// Program is the first word of the commands driver's command for this
 	// role; empty for the Helm driver, whose chart fields are empty for the
 	// commands driver.
@@ -155,9 +155,9 @@ type Release struct {
 
 // Setting is one setting as text, with its default.
 type Setting struct {
-	Key     string `json:"key"`
+	Key     string `json:"key" mask:"keep"`
 	Value   string `json:"value"`
-	Default string `json:"default"`
+	Default string `json:"default" mask:"keep"`
 }
 
 // Image is one entry of the configuration's images, with its digest and the
@@ -172,7 +172,7 @@ type Image struct {
 // that created those pods: install, deploy, rollback or restart.
 type RunBy struct {
 	Workload   string `json:"workload"`
-	Transition string `json:"transition"`
+	Transition string `json:"transition" mask:"keep"`
 }
 
 // Tool is the tool that wrote the record.
@@ -182,7 +182,7 @@ type Tool struct {
 
 // Cluster is the test cluster. Provider is kind.
 type Cluster struct {
-	Provider        string `json:"provider"`
+	Provider        string `json:"provider" mask:"keep"`
 	ProviderVersion string `json:"provider_version"`
 	Kubernetes      string `json:"kubernetes"`
 	NodeImage       string `json:"node_image"`

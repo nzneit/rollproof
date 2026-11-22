@@ -1,0 +1,2 @@
+server = "https://mirror.corp.example/cache/v2/v2"
+override_path = true

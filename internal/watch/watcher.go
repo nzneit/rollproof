@@ -40,6 +40,11 @@ type Options struct {
 	// Stop ended it. The errors of Evidence and its writers are ignored. It may
 	// be called from several goroutines at once.
 	Evidence func(name string) (io.WriteCloser, error)
+	// MirrorNote names the mirror of an image's host, as Config.MirrorNote
+	// does, for the texts that list a pod: a container that waits with
+	// ErrImagePull or ImagePullBackOff gets "; " and the sentence after its
+	// state when the sentence is not empty. Nil names none.
+	MirrorNote func(image string) string
 	// ProbeNamespace is the probe's namespace, whose events WriteEvents writes
 	// beside those of Namespace; the tool passes rollproof-probe. Empty writes
 	// Namespace's alone.
@@ -109,7 +114,7 @@ func Start(ctx context.Context, client kubernetes.Interface, o Options) (*Watche
 		// namespace through a connection of the Watcher, which sees when its watch breaks.
 		factory: informers.NewSharedInformerFactoryWithOptions(client, 0),
 		tr: NewTracker(TrackerOptions{Namespace: o.Namespace, Selector: selector,
-			Settle: o.Settle, Timeout: o.Timeout, Workers: o.Workers}),
+			Settle: o.Settle, Timeout: o.Timeout, Workers: o.Workers, MirrorNote: o.MirrorNote}),
 		service:  o.Service,
 		last:     map[objectKey]runtime.Object{},
 		conns:    map[string]*connection{},

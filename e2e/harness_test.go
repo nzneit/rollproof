@@ -1,4 +1,4 @@
-//go:build e2e
+//go:build e2e || mirror
 
 package e2e
 
@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 )
@@ -283,14 +285,22 @@ type result struct {
 	signal string
 }
 
+// expect compares what a run gave with what its row of section 12 expects.
+func expect(t *testing.T, got, want result) {
+	t.Helper()
+	if diff := cmp.Diff(want, got, cmp.AllowUnexported(result{}), cmpopts.EquateEmpty()); diff != "" {
+		t.Errorf("result (-want +got):\n%s", diff)
+	}
+}
+
 // runFixture runs the real binary once on one fixture, with one Helm binary
 // and kubectl first on the PATH, and returns what result.json says and the
 // exit code. For a fixture with commands it first renders the manifests that
 // they apply. While the tool runs, it calls the fixture's action, if any, with
 // the window marks, and fails the test when the run ended before the action
 // reported done. It keeps the tool's standard output in the results folder as
-// console.txt. TestMain builds the binary and the images once for the whole
-// test run.
+// console.txt and its standard error as stderr.txt. TestMain builds the
+// binary and the images once for the whole test run.
 func runFixture(t *testing.T, f fixture) result {
 	t.Helper()
 	out := outDir(t)
@@ -370,6 +380,9 @@ func runFixture(t *testing.T, f fixture) result {
 	t.Logf("%s (%s):\n%s%s", f.name, f.helm, stdout.String(), stderr.String())
 	if err := os.WriteFile(filepath.Join(out, "console.txt"), stdout.Bytes(), 0o644); err != nil {
 		t.Errorf("%s (%s): console.txt: %v", f.name, f.helm, err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "stderr.txt"), stderr.Bytes(), 0o644); err != nil {
+		t.Errorf("%s (%s): stderr.txt: %v", f.name, f.helm, err)
 	}
 	if ctx.Err() != nil {
 		t.Fatalf("%s (%s): the run did not end within 15m", f.name, f.helm)

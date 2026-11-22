@@ -32,13 +32,18 @@ func (w Workload) String() string {
 }
 
 // TrackerOptions is what a Tracker needs: which workloads are watched, limits.settle,
-// limits.timeout, and, for the text of its sentences, the namespace's name and the number of
-// worker nodes.
+// limits.timeout, and, for the text of its sentences, the namespace's name, the number of worker
+// nodes, and the mirror of a waiting container's image.
 type TrackerOptions struct {
 	Namespace       string
 	Selector        labels.Selector
 	Settle, Timeout time.Duration
 	Workers         int
+	// MirrorNote names the mirror of an image's host, as Config.MirrorNote does, for the
+	// Tracker's texts: a stall's detail lines and the text of an install that was not ready
+	// within limits.timeout. A container that waits with ErrImagePull or ImagePullBackOff gets
+	// "; " and the sentence after its state when the sentence is not empty. Nil names none.
+	MirrorNote func(image string) string
 }
 
 // Transition is what happened in one transition. Finished is when it last came to be finished,

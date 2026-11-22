@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"rollproof/internal/cluster"
@@ -29,6 +31,7 @@ import (
 	"rollproof/internal/probe"
 	"rollproof/internal/run"
 	"rollproof/internal/verdict"
+	"rollproof/internal/watch"
 )
 
 func noEnv(string) string { return "" }
@@ -157,6 +160,25 @@ func TestRunWithoutAFile(t *testing.T) {
 	}
 }
 
+// TestRunWithKeepCluster passes -keep-cluster and --keep-cluster to a run whose configuration
+// stops before Check: either spelling is taken, and the run writes its final result.
+func TestRunWithKeepCluster(t *testing.T) {
+	for _, flag := range []string{"-keep-cluster", "--keep-cluster"} {
+		out := t.TempDir()
+		var stdout, stderr bytes.Buffer
+		if code := realMain([]string{"run", "-f", "does-not-exist.yaml", flag, "--out", out}, &stdout, &stderr, noEnv); code != 2 {
+			t.Fatalf("%s: exit %d, want 2\n%s", flag, code, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "usage:") {
+			t.Errorf("%s: the flag was refused:\n%s", flag, stderr.String())
+		}
+		final, codes, _ := readResult(t, out)
+		if !final || len(codes) != 1 || codes[0] != "config-rejected" {
+			t.Errorf("%s: final %v, reasons %q; want a final file with config-rejected", flag, final, codes)
+		}
+	}
+}
+
 // TestRunWithoutAFileFlag leaves -f out, in an empty folder, and pins that the
 // reason names rollproof.yaml: the default, and nothing else.
 func TestRunWithoutAFileFlag(t *testing.T) {
@@ -172,40 +194,6 @@ func TestRunWithoutAFileFlag(t *testing.T) {
 	}
 	if !strings.Contains(texts[0], "rollproof.yaml") {
 		t.Errorf("the reason is %q, want it to name rollproof.yaml", texts[0])
-	}
-}
-
-func TestRunNotBuilt(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(dir, "chart"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	file := filepath.Join(dir, "rollproof.yaml")
-	text := `version: 1
-deploy:
-  namespace: orders
-  helm:
-    release: orders
-    previous: { chart: ./chart }
-    candidate: { chart: ./chart }
-registries: [{ host: registry.example }]
-probe:
-  http:
-    url: http://orders.orders.svc/
-`
-	if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, flag := range []string{"-keep-cluster", "--keep-cluster"} {
-		out := t.TempDir()
-		var stdout, stderr bytes.Buffer
-		if code := realMain([]string{"run", "-f", file, "--out", out, flag}, &stdout, &stderr, noEnv); code != 2 {
-			t.Fatalf("%s: exit %d, want 2\n%s", flag, code, stderr.String())
-		}
-		final, codes, texts := readResult(t, out)
-		if !final || len(codes) != 1 || codes[0] != "config-rejected" || texts[0] != "not built yet: registries" {
-			t.Errorf("%s: final %v, reasons %q %q", flag, final, codes, texts)
-		}
 	}
 }
 
@@ -553,6 +541,102 @@ func TestPodOptions(t *testing.T) {
 
 	_, err = podOptions(badEnvConfig(), probeImage)
 	envRejected(t, err)
+
+	// Both probes name the mirror of an image's host as the configuration does (decision 12).
+	image := "registry.example/x@sha256:" + strings.Repeat("0", 64)
+	for name, cfg := range map[string]*config.Config{"custom": customConfig(), "built-in": httpConfig()} {
+		cfg.Registries = []config.Registry{{Host: "registry.example", Mirror: "mirror.corp.example/r"}}
+		o, err := podOptions(cfg, probeImage)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		want := cfg.MirrorNote(image)
+		if want == "" {
+			t.Fatalf("%s: the configuration names no mirror for %s", name, image)
+		}
+		if o.MirrorNote == nil {
+			t.Errorf("%s: MirrorNote is nil, want the configuration's", name)
+			continue
+		}
+		if got := o.MirrorNote(image); got != want {
+			t.Errorf("%s: MirrorNote gives %q, want %q", name, got, want)
+		}
+	}
+}
+
+// clusterSpec gives Create the fields of the configuration that it needs, the cluster's full name
+// and its folder, keep, the evidence opener, the configuration's registries, and the hosts that an
+// entry of images names in as.
+func TestClusterSpec(t *testing.T) {
+	ev := func(string) (io.WriteCloser, error) { return nil, nil }
+	cfg := &config.Config{
+		Cluster: config.Cluster{NodeImage: "kindest/node:v1.37.0@sha256:" + strings.Repeat("d", 64),
+			RegistryImage: "registry:3@sha256:" + strings.Repeat("e", 64), Workers: 2},
+		Deploy: config.Deploy{Namespace: "orders"},
+		Limits: config.Limits{Timeout: 3 * time.Minute},
+		Registries: []config.Registry{
+			{Host: "registry.example", Username: "ci", Password: "s3cret-pass", Mirror: "mirror.corp.example/r"},
+			{Host: "docker.io", CA: "/etc/rollproof/corp-ca.pem"},
+		},
+		Images: map[string]config.Image{
+			"orders": {Local: "orders:candidate", As: "registry.example/team/orders"},
+		},
+	}
+	s := clusterSpec(cfg, "rollproof-x", true, ev)
+	want := cluster.Spec{
+		Name:          "rollproof-x",
+		RunDir:        cluster.RunDir("rollproof-x"),
+		NodeImage:     cfg.Cluster.NodeImage,
+		RegistryImage: cfg.Cluster.RegistryImage,
+		Workers:       2,
+		Namespace:     "orders",
+		Timeout:       3 * time.Minute,
+		Keep:          true,
+		Registries:    cfg.Registries,
+		AsHosts:       cfg.AsHosts(),
+	}
+	if diff := cmp.Diff(want, s, cmpopts.IgnoreFields(cluster.Spec{}, "Evidence")); diff != "" {
+		t.Errorf("Spec (-want +got):\n%s", diff)
+	}
+	if reflect.ValueOf(s.Evidence).Pointer() != reflect.ValueOf(ev).Pointer() {
+		t.Error("Evidence is not the opener that create was given")
+	}
+}
+
+// The watcher's options carry the configuration's fields, the session's evidence and the probe's
+// namespace, and name the mirror of an image's host as the configuration does (decision 12).
+func TestWatchOptions(t *testing.T) {
+	ev := func(string) (io.WriteCloser, error) { return nil, nil }
+	cfg := &config.Config{
+		Cluster:    config.Cluster{Workers: 2},
+		Deploy:     config.Deploy{Namespace: "orders", Selector: "app=orders"},
+		Limits:     config.Limits{Settle: 15 * time.Second, Timeout: 3 * time.Minute},
+		Registries: []config.Registry{{Host: "registry.example", Mirror: "mirror.corp.example/r"}},
+	}
+	s := &session{client: fake.NewClientset(), cfg: cfg, evidence: ev}
+	o := s.watchOptions(cfg)
+	want := watch.Options{Namespace: "orders", Selector: "app=orders", Settle: 15 * time.Second,
+		Timeout: 3 * time.Minute, Workers: 2, ProbeNamespace: "rollproof-probe"}
+	if diff := cmp.Diff(want, o, cmpopts.IgnoreFields(watch.Options{}, "Now", "Evidence", "MirrorNote")); diff != "" {
+		t.Errorf("Options (-want +got):\n%s", diff)
+	}
+	if o.Now == nil {
+		t.Error("Now is nil, want the clock")
+	}
+	if reflect.ValueOf(o.Evidence).Pointer() != reflect.ValueOf(ev).Pointer() {
+		t.Error("Evidence is not the session's opener")
+	}
+	image := "registry.example/x@sha256:" + strings.Repeat("0", 64)
+	note := cfg.MirrorNote(image)
+	if note == "" {
+		t.Fatalf("the configuration names no mirror for %s", image)
+	}
+	if o.MirrorNote == nil {
+		t.Fatal("MirrorNote is nil, want the configuration's")
+	}
+	if got := o.MirrorNote(image); got != note {
+		t.Errorf("MirrorNote gives %q, want %q", got, note)
+	}
 }
 
 // A custom env that a pod cannot hold is rejected by check, before a cluster

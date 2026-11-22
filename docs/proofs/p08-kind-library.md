@@ -184,6 +184,8 @@ The settings that worked, for Tasks 20 and 21:
 
 The plan's assumption does not hold as written: through nerdctl, `Create` failed in five runs of nine, at kind's own 30-second wait for each node's log. This task changes nothing in the plan, and Task 11 reports the result. What the tool does when `Create` fails this way is not decided here; it is the maintainer's choice.
 
+The cause, found on 2026-11-21 by reading nerdctl's source after step 5's e2e run met this failure four attempts in a row in two subtests, and shown outside a container but not yet caught in a failing run: nerdctl's viewer of a json-file log loses its place when it reads a line that the logger has not finished writing. In nerdctl v2.4.2, and on its main branch at v2.4.3-0.20261118011822-52b705e52dc8, `Decode` in `pkg/logging/jsonfile/jsonfile.go` declares a new `err` in its error branch (`line, err := io.ReadAll(dec.Buffered())`) and returns that one, which is nil. So `viewLogsJSONFileDirect` in `pkg/logging/json_logger.go` never seeks back over the partial line; every later read begins inside a line, fails at once and drops what it read, and `nerdctl logs -f` never prints the lines in those reads. A kind node writes about a hundred lines in its first 0.3 s, as kind's follow starts, and nothing after its boot: when the dropped lines hold `Reached target … Multi-User System`, kind's wait runs out. Shown with nerdctl's own `Decode` and the viewer's handling of its result, outside any container: a file with one line and half of the next, then the rest and the Multi-User line, gives the first line alone. Docker is not affected: kind follows a node's log there with `docker logs -f`.
+
 ## Docker
 
 not run; waits for the maintainer's word

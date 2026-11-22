@@ -3,9 +3,12 @@ package cluster
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"time"
 
 	"sigs.k8s.io/kind/pkg/apis/config/v1alpha4"
+
+	"rollproof/internal/config"
 )
 
 // Spec is what Create needs. Empty image names mean the default; Namespace is
@@ -26,6 +29,12 @@ type Spec struct {
 	// Evidence is where a failed set-up's logs go: kind's under kind/ and the
 	// registry's as registry.log. Nil collects nothing.
 	Evidence func(name string) (io.WriteCloser, error)
+	// Registries are the configuration's entries; AsHosts are the hosts that an
+	// entry of images names in as. Create writes, into every node, each host's
+	// settings and ca, with the run's registry first for each host of AsHosts,
+	// and mounts the credentials file in every node when one is needed.
+	Registries []config.Registry
+	AsHosts    []string
 }
 
 const (
@@ -35,7 +44,8 @@ const (
 
 // KindConfig returns the kind description of the run's cluster: one control-plane node and
 // s.Workers workers, a zone label on each worker, and the runtime settings the nodes need.
-// rootless adds the setting for an engine without root.
+// rootless adds the setting for an engine without root. With an entry that has credentials,
+// every node also mounts RUNDIR/node-credentials.json read-only at /var/lib/kubelet/config.json.
 func KindConfig(s Spec, rootless bool) *v1alpha4.Cluster {
 	c := &v1alpha4.Cluster{
 		TypeMeta:                v1alpha4.TypeMeta{Kind: "Cluster", APIVersion: "kind.x-k8s.io/v1alpha4"},
@@ -51,6 +61,15 @@ func KindConfig(s Spec, rootless bool) *v1alpha4.Cluster {
 	}
 	if rootless {
 		c.ContainerdConfigPatches = append(c.ContainerdConfigPatches, keyringPatch)
+	}
+	if Credentials(s.Registries) != nil {
+		for i := range c.Nodes {
+			c.Nodes[i].ExtraMounts = []v1alpha4.Mount{{
+				ContainerPath: kubeletCredentials,
+				HostPath:      filepath.Join(s.RunDir, credentialsName),
+				Readonly:      true,
+			}}
+		}
 	}
 	return c
 }

@@ -278,18 +278,21 @@ func timelineFrom(t verdict.Timeline, first time.Time) time.Time {
 	return from
 }
 
-// completeEvidence writes the marks a last time, timeline.tsv and the events
-// of both namespaces, after the final result.json and before the cluster is
-// deleted. Each failure is one warning and changes no verdict. The events'
-// listing is bounded by completionLimit, also after a signal. A panic ends the
-// completion there and is the warning that a failure after the verdict was
-// decided gives.
+// completeEvidence closes probe.log when the probe's stop has not closed it,
+// and then writes the marks a last time, timeline.tsv and the events of both
+// namespaces, after the final result.json and before the cluster is deleted.
+// probe.log is still open where Stop was never asked, after a start that its
+// context cut or a run that a signal ended, and after a Stop that panicked.
+// Each failure is one warning and changes no verdict. The events' listing is
+// bounded by completionLimit, also after a signal. A panic ends the completion
+// there and is the warning that a failure after the verdict was decided gives.
 func (s *runState) completeEvidence() {
 	defer func() {
 		if p := recover(); p != nil {
 			s.warnings.add("the tool failed after the verdict was decided: " + panicText(p))
 		}
 	}()
+	s.closeProbeLog()
 	s.marks.end()
 	if first := s.probeStart.First; !first.IsZero() {
 		t, _ := s.timeline()

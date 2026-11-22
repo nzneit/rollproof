@@ -8,13 +8,16 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // Evidence returns a new file of the evidence folder. name may hold folders. A
 // name that is already taken gets a number after it. A name that is empty,
 // absolute, holds a NUL byte or a .. element, or would leave the evidence
 // folder, by its text or by a link inside the folder, is refused, and nothing
-// is written.
+// is written. A file opened after SetMasker masks what is written to it, and
+// may be written from several goroutines; a file opened before SetMasker keeps
+// writing unmasked.
 func (w *Writer) Evidence(name string) (io.WriteCloser, error) {
 	root, err := w.evidenceRoot(name)
 	if err != nil {
@@ -40,14 +43,55 @@ func (w *Writer) Evidence(name string) (io.WriteCloser, error) {
 		if err != nil {
 			return nil, fmt.Errorf("evidence name %q: %w", name, err)
 		}
-		return f, nil
+		return w.maskFile(f), nil
 	}
+}
+
+// maskFile returns f behind the masker set through SetMasker, or f itself when
+// there is none or it has no form to hide. The masking writer of mask is not
+// safe for two goroutines while the file it wraps is, so the write is
+// serialised here and a caller written against a plain file meets no data race.
+func (w *Writer) maskFile(f io.WriteCloser) io.WriteCloser {
+	m := w.maskerOf()
+	if m == nil {
+		return f
+	}
+	if masked := m.Writer(f); masked != f {
+		return &serialWriter{w: masked}
+	}
+	return f
+}
+
+// serialWriter holds a lock over the writes and the close of one evidence
+// file, so that the masking writer behind it is used by one goroutine at a
+// time.
+type serialWriter struct {
+	mu sync.Mutex
+	w  io.WriteCloser
+}
+
+// Write writes p to the file, masked.
+func (s *serialWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+// Close writes what the masker holds and closes the file.
+func (s *serialWriter) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Close()
 }
 
 // ReplaceEvidence replaces the evidence file name with b in one step: a reader
 // sees the old content or the new, never half, and the name is never numbered.
 // Names are refused as Evidence refuses them. An error leaves the old content.
+// After SetMasker, the bytes written are masked.
 func (w *Writer) ReplaceEvidence(name string, b []byte) error {
+	if m := w.maskerOf(); m != nil {
+		b = []byte(m.String(string(b)))
+	}
 	root, err := w.evidenceRoot(name)
 	if err != nil {
 		return err

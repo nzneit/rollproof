@@ -3,10 +3,12 @@ package run
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,6 +25,7 @@ import (
 
 	"rollproof/internal/config"
 	"rollproof/internal/deploy"
+	"rollproof/internal/mask"
 	"rollproof/internal/probe"
 	"rollproof/internal/report"
 	"rollproof/internal/verdict"
@@ -294,17 +297,16 @@ func TestSetupFailureNamesTheCommand(t *testing.T) {
 	}
 }
 
-func TestNotBuilt(t *testing.T) {
+// A configuration whose image has as is run like any other: nothing stops the run, which reaches
+// the cluster's creation and exits 0.
+func TestAnImageWithAsIsRun(t *testing.T) {
 	w := newWorld(t)
-	w.cfg.Registries = []config.Registry{{Host: "registry.example"}}
-	if code := w.run(context.Background()); code != 2 {
-		t.Fatalf("exit %d, want 2", code)
+	w.cfg.Images = map[string]config.Image{"orders": {Local: "orders:candidate", As: "registry.example/team/orders"}}
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, w.stdout.String())
 	}
-	if diff := cmp.Diff([]string{"load"}, w.calls.list()); diff != "" {
-		t.Errorf("calls (-want +got):\n%s", diff)
-	}
-	if window, text := w.result().windowOf("config-rejected"); window != "" || text != "not built yet: registries" {
-		t.Errorf("config-rejected in window %q with text %q", window, text)
+	if calls := w.calls.list(); !slices.Contains(calls, "create") {
+		t.Errorf("calls %q, want them to hold create", calls)
 	}
 }
 
@@ -1737,16 +1739,31 @@ func TestAPassWithAWindowOpenIsNotVerified(t *testing.T) {
 	}
 }
 
-// panicWriter is a results writer whose final write panics.
-type panicWriter struct{}
+// panicWriter is a results writer whose final write panics with text, or "the results writer
+// broke" when text is empty; with err set, the final write returns err in place of the panic.
+type panicWriter struct {
+	text string
+	err  error
+}
 
-func (*panicWriter) Final(report.Run) error { panic("the results writer broke") }
+func (p *panicWriter) Final(report.Run) error {
+	if p.err != nil {
+		return p.err
+	}
+	if p.text != "" {
+		panic(p.text)
+	}
+	panic("the results writer broke")
+}
 
 func (*panicWriter) Evidence(string) (io.WriteCloser, error) { return nopWriteCloser{io.Discard}, nil }
 
 func (*panicWriter) ReplaceEvidence(string, []byte) error { return nil }
 
 func (*panicWriter) Dir() string { return "out" }
+
+// SetMasker does nothing: the writer writes no file.
+func (*panicWriter) SetMasker(*mask.Masker) {}
 
 // nopWriteCloser is an io.Writer that can be closed.
 type nopWriteCloser struct{ io.Writer }
@@ -3000,5 +3017,364 @@ func TestRestartInterrupted(t *testing.T) {
 		if strings.Contains(text, "refused the restart of") {
 			t.Errorf("%s tells of a refusal:\n%s", where, text)
 		}
+	}
+}
+
+// formsOf gives every form of a password that a run must never write (decision 2), each as it
+// stands between its quotes, by the name of the form: plain, the base64 of USER:PASSWORD padded
+// and not, its JSON spelling with HTML escaping (json.Marshal's) and without, and its Go spelling
+// (strconv.Quote's). Each is computed here, never typed.
+func formsOf(t *testing.T, user, pw string) map[string]string {
+	t.Helper()
+	unquote := func(s string) string { return s[1 : len(s)-1] }
+	marshalled, err := json.Marshal(pw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plainJSON bytes.Buffer
+	e := json.NewEncoder(&plainJSON)
+	e.SetEscapeHTML(false)
+	if err := e.Encode(pw); err != nil {
+		t.Fatal(err)
+	}
+	userPass := []byte(user + ":" + pw)
+	return map[string]string{
+		"plain":                  pw,
+		"base64, padded":         base64.StdEncoding.EncodeToString(userPass),
+		"base64, not padded":     base64.RawStdEncoding.EncodeToString(userPass),
+		"JSON, HTML-escaped":     unquote(string(marshalled)),
+		"JSON, not HTML-escaped": unquote(strings.TrimSuffix(plainJSON.String(), "\n")),
+		"Go":                     unquote(strconv.Quote(pw)),
+	}
+}
+
+// Every password of registries is masked, in each of its forms, in every file of the results
+// folder, on the console and on standard error. It is planted in every input: each evidence
+// writer of step 4, a command's argument line and output, a pod's log split across two writes,
+// the probe's raw lines, the events and a warning (section 12, "Masking"; decisions 2 and 3).
+func TestPasswordsAreMaskedEverywhere(t *testing.T) {
+	const pw1, pw2 = "s3cret-pass", "pa\"ss<&"
+	w := newWorld(t)
+	w.cfg.Registries = []config.Registry{{Host: "registry.example", Username: "ci", Password: pw1},
+		{Host: "docker.io", Username: "ci2", Password: pw2}}
+	probePod, err := json.Marshal(map[string]string{"message": pw2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each name of step 4's evidence writers, and what is written to it, write by write.
+	planted := []struct {
+		name   string
+		writes []string
+	}{
+		{"kind/rollproof-test-control-plane/containerd.log", []string{"pulling with " + pw1 + "\n"}},
+		{"registry.log", []string{"auth " + base64.StdEncoding.EncodeToString([]byte("ci:"+pw1)) + "\n"}},
+		{"commands/setup", []string{"sh -c " + strconv.Quote("echo "+pw2) + "\n", pw1 + "\n"}},
+		{"pods/orders-1/orders.log", []string{"logged in with " + pw1[:4], pw1[4:] + "\n"}},
+		{"pods/orders-1/orders.previous.log", []string{"logged in with " + pw2 + "\n"}},
+		{"probe-pod.json", []string{string(probePod)}},
+		{"probe-pod/istio-proxy.log", []string{"auth " + base64.RawStdEncoding.EncodeToString([]byte("ci2:"+pw2)) + "\n"}},
+	}
+	w.hooks["create"] = func() {
+		for _, p := range planted {
+			f, err := w.evidence(p.name)
+			if err != nil {
+				t.Errorf("evidence %s: %v", p.name, err)
+				continue
+			}
+			for _, s := range p.writes {
+				if _, err := io.WriteString(f, s); err != nil {
+					t.Errorf("writing %s: %v", p.name, err)
+				}
+			}
+			if err := f.Close(); err != nil {
+				t.Errorf("closing %s: %v", p.name, err)
+			}
+		}
+	}
+	w.cluster.rawText = "line " + pw1 + "\n"
+	w.watcher.events = "event " + pw2 + "\n"
+	w.cluster.deleteErr = errors.New("the engine said " + pw1)
+	if code := w.run(context.Background()); code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+
+	forms := map[string]string{}
+	for name, f := range formsOf(t, "ci", pw1) {
+		forms["pw1's "+name] = f
+	}
+	for name, f := range formsOf(t, "ci2", pw2) {
+		forms["pw2's "+name] = f
+	}
+	texts := map[string]string{"stdout": w.stdout.String(), "stderr": w.stderr.String()}
+	err = filepath.WalkDir(w.out, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(w.out, path)
+		if err != nil {
+			return err
+		}
+		texts[rel] = string(b)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for where, text := range texts {
+		for name, form := range forms {
+			if strings.Contains(text, form) {
+				t.Errorf("%s holds %s", where, name)
+			}
+		}
+	}
+
+	r := w.result()
+	if r.Verdict != "pass" {
+		t.Errorf("verdict %q, want pass", r.Verdict)
+	}
+	if diff := cmp.Diff([]string{"the cluster was not deleted: the engine said ***"}, r.Warnings); diff != "" {
+		t.Errorf("warnings (-want +got):\n%s", diff)
+	}
+	names := []string{"probe.log", "events.txt"}
+	for _, p := range planted {
+		names = append(names, p.name)
+	}
+	for _, name := range names {
+		b, err := os.ReadFile(filepath.Join(w.out, "evidence", name))
+		if err != nil {
+			t.Error(err)
+			continue
+		}
+		if !strings.Contains(string(b), mask.Replacement) {
+			t.Errorf("the evidence %s holds no %s:\n%s", name, mask.Replacement, b)
+		}
+	}
+}
+
+// The masker is set as soon as the configuration has loaded, before the runner's check: a
+// password in the text of a check that failed is masked in result.json and on the console.
+func TestTheMaskerComesRightAfterLoad(t *testing.T) {
+	w := newWorld(t)
+	w.cfg.Registries = []config.Registry{{Host: "registry.example", Username: "ci", Password: "s3cret-pass"}}
+	w.checkErr = verdict.Condition{Code: verdict.RunnerUnsupported, Text: "the engine said s3cret-pass"}
+	if code := w.run(context.Background()); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if _, text := w.result().windowOf("runner-unsupported"); text != "the engine said ***" {
+		t.Errorf("runner-unsupported's text is %q, want %q", text, "the engine said ***")
+	}
+	if strings.Contains(w.stdout.String(), "s3cret") {
+		t.Errorf("stdout holds the password:\n%s", w.stdout.String())
+	}
+}
+
+// Once a configuration is loaded, a run writes to standard error only "rollproof: cannot write
+// results: …", in finish and in rewriteFinal, and that line is masked. The path tested is finish's
+// refused write: its deferred recover of a panic, and its branch for an error of writeFinal.
+func TestStderrIsMasked(t *testing.T) {
+	const pw1 = "s3cret-pass"
+	for _, tc := range []struct {
+		name string
+		w    *panicWriter
+		want string
+	}{
+		{"the final write panics", &panicWriter{text: "the results writer broke: " + pw1},
+			"rollproof: cannot write results: the results writer broke: ***\n"},
+		{"the final write fails", &panicWriter{err: errors.New("the disk said " + pw1)},
+			"rollproof: cannot write results: the disk said ***\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			s := &runState{
+				o:        Options{Stdout: &stdout, Stderr: &stderr},
+				parent:   context.Background(),
+				w:        tc.w,
+				warnings: &warnings{},
+				mask:     mask.New([]mask.Credential{{Username: "ci", Password: pw1}}),
+			}
+			s.finish()
+			if got := stderr.String(); got != tc.want {
+				t.Errorf("stderr is %q, want %q", got, tc.want)
+			}
+			if strings.Contains(stderr.String(), "s3cret") {
+				t.Errorf("stderr holds the password: %q", stderr.String())
+			}
+		})
+	}
+}
+
+// probe.log is closed by the run, so that the tail that the masker held back reaches the file:
+// after the probe's stop in a run that passes, when the evidence is completed in a run that a
+// signal ended in the deploy, where the probe's Stop is never asked, and at once when
+// Cluster.Probe fails (decision 3). A line that the probe writes after the close, as the probe's
+// log follower does after a signal, is dropped: it reaches neither the file nor the warnings.
+func TestProbeLogIsClosed(t *testing.T) {
+	const pw1 = "s3cret-pass"
+	// late is longer than the longest form, so that a masking writer would pass it on at once.
+	const late = "a line after the close, longer than any form\n"
+	for _, tc := range []struct {
+		name     string
+		signal   bool
+		probeErr error
+		code     int
+		stops    int // how often the probe's Stop is asked
+		// closedBy is the call after which the next decision finds probe.log whole, before the
+		// evidence is completed; "" when only the completion closes it.
+		closedBy string
+	}{
+		{"a run that passes", false, nil, 0, 1, "probe-stop"},
+		{"a signal in the deploy", true, nil, 2, 0, ""},
+		{"Cluster.Probe fails", false, verdict.Condition{Code: verdict.ConfigRejected,
+			Text: "the probe's pod cannot be written"}, 2, 0, "probe"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.cfg.Registries = []config.Registry{{Host: "registry.example", Username: "ci", Password: pw1}}
+			w.cluster.rawText = "first line\nlast line " + pw1 + "\n"
+			w.cluster.probeErr = tc.probeErr
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			const want = "first line\nlast line ***\n"
+			path := filepath.Join(w.out, "evidence", "probe.log")
+			// The watcher stops in the clean-up, after the evidence was completed: the probe writes
+			// once more then.
+			w.hooks["watch-stop"] = func() {
+				if _, err := io.WriteString(w.cluster.raw, late); err != nil {
+					t.Errorf("the write after the close gave %v, want none", err)
+				}
+			}
+			if tc.signal {
+				w.deployer.results["deploy"] = deploy.Result{Ending: deploy.StoppedBySignal, ExitCode: -1}
+				w.hooks["transition-deploy"] = func() {
+					w.clock.Advance(5 * time.Second)
+					cancel()
+				}
+			}
+			// What probe.log holds at the first decision after the call closedBy, before the evidence
+			// is completed: the call's step has closed it by then.
+			var atDecision *string
+			defer func(h func()) { decideHook = h }(decideHook)
+			decideHook = func() {
+				if tc.closedBy != "" && atDecision == nil && w.calls.count(tc.closedBy) > 0 {
+					b, err := os.ReadFile(path)
+					if err != nil {
+						t.Error(err)
+					}
+					s := string(b)
+					atDecision = &s
+				}
+			}
+			if code := w.run(ctx); code != tc.code {
+				t.Fatalf("exit %d, want %d", code, tc.code)
+			}
+			if n := w.calls.count("probe-stop"); n != tc.stops {
+				t.Errorf("the probe's Stop called %d times, want %d", n, tc.stops)
+			}
+			switch {
+			case tc.closedBy == "":
+			case atDecision == nil:
+				t.Errorf("no decision came after %s", tc.closedBy)
+			case *atDecision != want:
+				t.Errorf("at the decision after %s, probe.log is %q, want %q", tc.closedBy, *atDecision, want)
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(b); got != want {
+				t.Errorf("probe.log is %q, want %q", got, want)
+			}
+			for _, text := range w.result().Warnings {
+				if strings.Contains(text, "probe.log") {
+					t.Errorf("result.json warns of probe.log: %q", text)
+				}
+			}
+		})
+	}
+}
+
+// A line written to probe.log after closeProbeLog is dropped and reported as written, with no
+// warning: the probe's log follower outlives a signal, and its later lines are past the run's
+// evidence. The masker is set, so the write goes the masking way.
+func TestAProbeLineAfterTheCloseIsDropped(t *testing.T) {
+	const pw1 = "s3cret-pass"
+	out := t.TempDir()
+	rw, err := report.Open(out, func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	rw.SetMasker(mask.New([]mask.Credential{{Username: "ci", Password: pw1}}))
+	var warned []string
+	s := &runState{ev: &evidence{files: rw.Evidence, warn: func(text string) { warned = append(warned, text) }}}
+	raw := s.openProbeLog()
+	if _, err := io.WriteString(raw, "a\n"); err != nil {
+		t.Fatal(err)
+	}
+	s.closeProbeLog()
+	// "late\n" alone would be held back by the masking writer and never reach the closed file; the
+	// second line is longer than the longest form, so a masking writer would pass it on at once.
+	for _, line := range []string{"late\n", "a later line, longer than any form of the password\n"} {
+		if n, err := io.WriteString(raw, line); n != len(line) || err != nil {
+			t.Errorf("writing %q after the close gave %d, %v; want %d, nil", line, n, err, len(line))
+		}
+	}
+	if len(warned) != 0 {
+		t.Errorf("warnings %q, want none", warned)
+	}
+	b, err := os.ReadFile(filepath.Join(out, "evidence", "probe.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(b); got != "a\n" {
+		t.Errorf("probe.log is %q, want %q", got, "a\n")
+	}
+}
+
+// A refused final write still closes probe.log, so that the tail that the masker held back
+// reaches the file: on finish's error of writeFinal and on its recovered panic.
+func TestARefusedFinalWriteClosesTheProbeLog(t *testing.T) {
+	const pw1 = "s3cret-pass"
+	for _, tc := range []struct {
+		name string
+		w    *panicWriter
+	}{
+		{"the final write fails", &panicWriter{err: errors.New("the disk is full")}},
+		{"the final write panics", &panicWriter{text: "the results writer broke"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := t.TempDir()
+			rw, err := report.Open(out, func(string) string { return "" })
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := mask.New([]mask.Credential{{Username: "ci", Password: pw1}})
+			rw.SetMasker(m)
+			var stdout, stderr bytes.Buffer
+			s := &runState{
+				o:        Options{Stdout: &stdout, Stderr: &stderr},
+				parent:   context.Background(),
+				w:        tc.w,
+				warnings: &warnings{},
+				mask:     m,
+			}
+			s.ev = &evidence{files: rw.Evidence, warn: s.warnings.add}
+			if _, err := io.WriteString(s.openProbeLog(), "last line "+pw1); err != nil {
+				t.Fatal(err)
+			}
+			if code := s.finish(); code != 2 {
+				t.Errorf("exit %d, want 2", code)
+			}
+			b, err := os.ReadFile(filepath.Join(out, "evidence", "probe.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := string(b), "last line ***"; got != want {
+				t.Errorf("probe.log is %q, want %q", got, want)
+			}
+		})
 	}
 }

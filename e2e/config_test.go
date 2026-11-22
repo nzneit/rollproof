@@ -31,6 +31,11 @@ import (
 // previous image; the setup commands; the commands driver's roles in order
 // (nil is the Helm driver); a custom probe (nil is the built-in one); an
 // action on the running run; a run that is to leave its cluster behind.
+//
+// registries is the run's registries block, left out when empty. images,
+// when not nil, is the images block as it is, an empty map included. literal
+// gives, by role (previous or candidate), a release image named outright in
+// place of the images entry's forms.
 type fixture struct {
 	name                              string
 	previous, candidate               map[string]any
@@ -44,6 +49,14 @@ type fixture struct {
 	custom                            *customProbe
 	act                               action
 	keepsCluster                      bool
+	registries                        []map[string]string
+	images                            map[string]map[string]string
+	literal                           map[string]literalImage
+}
+
+// literalImage is an image a release's values name outright: its repository and digest.
+type literalImage struct {
+	repository, digest string
 }
 
 // customProbe is a fixture's probe.custom. image is the images entry it runs: "probe", the
@@ -99,6 +112,9 @@ done`
 // JSON text, or empty when the fixture leaves that block out.
 const configTemplate = `version: 1
 cluster: {{.Cluster}}
+{{- if .Registries}}
+registries: {{.Registries}}
+{{- end}}
 images: {{.Images}}
 {{- if .Setup}}
 setup: {{.Setup}}
@@ -121,13 +137,14 @@ limits: {{.Limits}}
 {{- end}}
 `
 
-// renderConfig returns the text of f's rollproof.yaml, every block as JSON: the cluster, images,
-// setup, the Helm releases or the commands, the probe and the limits. in
-// gives the chart's absolute path and the archives TestMain prepared. The
-// commands driver applies previous.yaml and candidate.yaml beside the file.
+// renderConfig returns the text of f's rollproof.yaml, every block as JSON: the cluster, the
+// registries when the fixture has entries, images, setup, the Helm releases or the commands, the
+// probe and the limits. in gives the chart's absolute path and the archives TestMain prepared. A
+// role in f.literal names its image outright. The commands driver applies previous.yaml and
+// candidate.yaml beside the file.
 func renderConfig(f fixture, in inputs) (string, error) {
 	var blocks struct {
-		Cluster, Images, Setup, Commands, Previous, Candidate, Probe, Limits string
+		Cluster, Registries, Images, Setup, Commands, Previous, Candidate, Probe, Limits string
 	}
 	text := func(dst *string, v any) error {
 		b, err := json.Marshal(v)
@@ -142,12 +159,18 @@ func renderConfig(f fixture, in inputs) (string, error) {
 	if f.nodeImage != "" {
 		cluster["node-image"] = f.nodeImage
 	}
-	images := map[string]any{}
-	for _, e := range []string{"previous", "candidate"} {
-		if f.commands != nil {
-			images[e] = map[string]string{"archive": in.archives[e]}
-		} else {
-			images[e] = map[string]string{"local": "rollproof-fixture:" + e}
+	images := map[string]map[string]string{}
+	if f.images != nil {
+		for name, entry := range f.images {
+			images[name] = entry
+		}
+	} else {
+		for _, e := range []string{"previous", "candidate"} {
+			if f.commands != nil {
+				images[e] = map[string]string{"archive": in.archives[e]}
+			} else {
+				images[e] = map[string]string{"local": "rollproof-fixture:" + e}
+			}
 		}
 	}
 	probe := map[string]any{"http": map[string]string{"url": "http://orders.orders.svc/work?ms=20"}}
@@ -175,6 +198,9 @@ func renderConfig(f fixture, in inputs) (string, error) {
 		probe = map[string]any{"custom": custom}
 	}
 	errs := []error{text(&blocks.Cluster, cluster), text(&blocks.Images, images), text(&blocks.Probe, probe)}
+	if len(f.registries) > 0 {
+		errs = append(errs, text(&blocks.Registries, f.registries))
+	}
 	if len(f.setup) > 0 {
 		errs = append(errs, text(&blocks.Setup, f.setup))
 	}
@@ -196,10 +222,14 @@ func renderConfig(f fixture, in inputs) (string, error) {
 		errs = append(errs, text(&blocks.Commands, commands))
 	} else {
 		release := func(entry string, values map[string]any) map[string]any {
-			list := []any{map[string]any{"image": map[string]string{
+			image := map[string]string{
 				"repository": "${images." + entry + ".repository}",
 				"digest":     "${images." + entry + ".digest}",
-			}}}
+			}
+			if literal, ok := f.literal[entry]; ok {
+				image = map[string]string{"repository": literal.repository, "digest": literal.digest}
+			}
+			list := []any{map[string]any{"image": image}}
 			if len(values) > 0 {
 				list = append(list, values)
 			}
@@ -351,9 +381,22 @@ func randomArchive(t *testing.T, tag string) string {
 }
 
 func TestConfigOfEachShapeLoads(t *testing.T) {
+	t.Setenv(passwordVar, "pw")
 	chart, err := filepath.Abs(filepath.Join("..", "fixtures", "chart"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	ca, err := newAuthority(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mirrorIn := mirrorInputs{
+		engine:          "nerdctl",
+		certs:           t.TempDir(),
+		archives:        t.TempDir(),
+		ca:              ca,
+		previousDigest:  "sha256:" + strings.Repeat("0", 64),
+		candidateDigest: "sha256:" + strings.Repeat("1", 64),
 	}
 	a := randomArchive(t, "previous:test")
 	b := randomArchive(t, "candidate:test")
@@ -468,6 +511,37 @@ func TestConfigOfEachShapeLoads(t *testing.T) {
 				t.Errorf("limits %+v, want settle 30s and timeout 90s", cfg.Limits)
 			}
 		}},
+		{"through the mirror", throughTheMirror(mirrorIn), func(t *testing.T, text string, cfg *config.Config) {
+			want := []config.Registry{
+				{Host: "docker.io", Username: jobUser, Password: "pw", CA: mirrorIn.ca, Mirror: mirrorHost + "/docker-io"},
+				{Host: realHost, Username: jobUser, Password: "pw", CA: mirrorIn.ca, Mirror: mirrorHost + "/real"},
+			}
+			if diff := cmp.Diff(want, cfg.Registries); diff != "" {
+				t.Errorf("registries (-want +got):\n%s", diff)
+			}
+			if got := cfg.Images["candidate"].As; got != "docker.io/rollproof/fixture" {
+				t.Errorf("images.candidate.as %q, want docker.io/rollproof/fixture", got)
+			}
+		}},
+		{"the mirror replaces its host", mirrorReplacesItsHost(mirrorIn), func(t *testing.T, text string, cfg *config.Config) {
+			if len(cfg.Images) != 0 {
+				t.Errorf("images holds %d entries, want none: %v", len(cfg.Images), cfg.Images)
+			}
+			candidate := cfg.Deploy.Helm.Candidate
+			if candidate == nil || len(candidate.Values) == 0 {
+				t.Fatalf("deploy.helm.candidate %+v, want a values map", candidate)
+			}
+			image, ok := candidate.Values[0].Inline["image"].(map[string]any)
+			if !ok {
+				t.Fatalf("the candidate's values name no image: %v", candidate.Values[0].Inline)
+			}
+			if got := image["repository"]; got != realHost+"/team/candidate" {
+				t.Errorf("the candidate's repository %v, want %q", got, realHost+"/team/candidate")
+			}
+			if got := image["digest"]; got != mirrorIn.candidateDigest {
+				t.Errorf("the candidate's digest %v, want %q", got, mirrorIn.candidateDigest)
+			}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			text, err := renderConfig(tc.f, in)
@@ -481,9 +555,6 @@ func TestConfigOfEachShapeLoads(t *testing.T) {
 			cfg, err := config.Load(path, os.LookupEnv)
 			if err != nil {
 				t.Fatalf("%v\n%s", err, text)
-			}
-			if nb := cfg.NotBuilt(); len(nb) != 0 {
-				t.Errorf("NotBuilt = %v, want none", nb)
 			}
 			tc.check(t, text, cfg)
 		})

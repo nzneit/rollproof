@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
+
+	"rollproof/internal/mask"
 )
 
 // timeLayout is RFC 3339 with milliseconds; it is used on a time in UTC.
@@ -145,10 +148,26 @@ func First() Run {
 	}
 }
 
-// Writer writes the files of one results folder.
+// Writer writes the files of one results folder. After SetMasker, what it
+// writes is masked by that masker, except what goes into an evidence file
+// opened before.
 type Writer struct {
-	dir string
+	dir    string
+	masker atomic.Pointer[mask.Masker]
 }
+
+// SetMasker sets the masker of the writer. From this call on, Final writes
+// Mask of its record, Evidence's files mask what is written to them, and
+// ReplaceEvidence masks its bytes. The run calls it once, after the
+// configuration loads and before anything that may hold a password is written.
+// Safe while other goroutines write; a file that Evidence opened before the
+// call keeps writing unmasked.
+func (w *Writer) SetMasker(m *mask.Masker) {
+	w.masker.Store(m)
+}
+
+// maskerOf returns the masker set through SetMasker, nil before it is called.
+func (w *Writer) maskerOf() *mask.Masker { return w.masker.Load() }
 
 // Open makes the results folder ready and writes the first result.json into
 // it. An empty out means a new folder under the runner's temporary directory on
@@ -221,8 +240,9 @@ func Open(out string, getenv func(string) string) (*Writer, error) {
 // Dir returns the results folder's absolute path.
 func (w *Writer) Dir() string { return w.dir }
 
-// Final replaces result.json with r, marked final, in one step. It may be
-// called again when a warning arises after the verdict.
+// Final replaces result.json with r, masked by the masker set through
+// SetMasker, marked final, in one step. It may be called again when a warning
+// arises after the verdict.
 func (w *Writer) Final(r Run) error {
 	switch r.Verdict {
 	case "pass", "fail", "not-verified":
@@ -233,10 +253,11 @@ func (w *Writer) Final(r Run) error {
 	return w.write(r)
 }
 
-// write replaces result.json with r: a temporary file in the same folder is
-// written and renamed over it, so a reader never sees half a file.
+// write replaces result.json with r, masked by the masker set through
+// SetMasker: a temporary file in the same folder is written and renamed over
+// it, so a reader never sees half a file.
 func (w *Writer) write(r Run) error {
-	b, err := encode(r)
+	b, err := encode(Mask(r, w.maskerOf()))
 	if err != nil {
 		return fmt.Errorf("results folder %s: %w", w.dir, err)
 	}

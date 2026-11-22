@@ -1,0 +1,4 @@
+server = "https://mirror.corp.example/docker-io"
+ca = "/etc/containerd/certs.d/docker.io/ca.pem"
+[host."http://10.89.0.5:5000"]
+  capabilities = ["pull"]

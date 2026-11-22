@@ -129,6 +129,11 @@ func validate(c *Config, x *index) error {
 		if (im.Local != "") == (im.Archive != "") {
 			return x.reject(path, "exactly one of local and archive")
 		}
+		if im.As != "" {
+			if problem := asProblem(im.As); problem != "" {
+				return x.reject(path+".as", problem)
+			}
+		}
 		if im.Archive != "" {
 			if problem := checkArchive(im.Archive); problem != "" {
 				return x.reject(path+".archive", problem)
@@ -211,18 +216,7 @@ func validate(c *Config, x *index) error {
 		}
 	}
 
-	seen := map[string]int{}
-	for i, r := range c.Registries {
-		path := fmt.Sprintf("registries[%d].host", i)
-		if r.Host == "" {
-			return x.reject(path, "required")
-		}
-		if j, ok := seen[r.Host]; ok {
-			return x.reject(path, fmt.Sprintf("the same host as registries[%d]", j))
-		}
-		seen[r.Host] = i
-	}
-	return nil
+	return validateRegistries(c, x)
 }
 
 // checkArchive returns the problem with the image archive at path, an absolute path, as a phrase

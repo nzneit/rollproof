@@ -17,8 +17,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"rollproof/internal/cluster"
-	"rollproof/internal/config"
 	"rollproof/internal/verdict"
 )
 
@@ -95,23 +93,6 @@ func TestOwnImage(t *testing.T) {
 	}
 	if d1 != d2 {
 		t.Errorf("two builds from one file gave %s and %s", d1, d2)
-	}
-}
-
-// Store refuses what config.NotBuilt stops, before it touches the cluster: the empty Cluster and
-// the missing binary would otherwise give cluster-failed.
-func TestStoreRefusesWhatIsNotBuilt(t *testing.T) {
-	for _, img := range []config.Image{
-		{Local: "orders:candidate", As: "registry.example/team/orders"},
-	} {
-		_, err := Store(context.Background(), &cluster.Cluster{}, "/does/not/exist",
-			map[string]config.Image{"orders": img}, time.Minute)
-		if err == nil {
-			t.Fatalf("Store(%+v) gave no error, want internal-error naming images.orders", img)
-		}
-		if c := verdict.AsCondition(err); c.Code != verdict.InternalError || !strings.Contains(c.Text, "images.orders") {
-			t.Errorf("Store(%+v) = %v, want internal-error naming images.orders", img, err)
-		}
 	}
 }
 

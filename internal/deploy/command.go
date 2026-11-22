@@ -161,35 +161,87 @@ type discardCloser struct{}
 func (discardCloser) Write(p []byte) (int, error) { return len(p), nil }
 func (discardCloser) Close() error                { return nil }
 
-// sink is the evidence of one command: one writer for both output streams,
-// which remembers the last byte written and never fails the command.
+// sink is the evidence of one command. The tool's own lines go in through
+// Write as they are; each output stream of the command goes in through its
+// own stream, which passes on only whole lines, so the two streams interleave
+// only at line ends and a password that one stream prints across two reads of
+// its pipe reaches the masking writer with no byte of the other stream inside
+// it. It remembers the last byte the evidence received and never fails the
+// command.
 type sink struct {
-	mu     sync.Mutex
-	w      io.WriteCloser
-	last   byte
-	closed bool
+	mu             sync.Mutex
+	w              io.WriteCloser
+	last           byte
+	closed         bool
+	stdout, stderr []byte // each stream's partial line
+}
+
+// lineMax is the most a stream's partial line holds: at this size, with no
+// newline, it is passed on as it is, so that a stream that never writes a
+// newline neither holds all its output in memory nor keeps it from the
+// evidence until the command ends.
+const lineMax = 64 << 10
+
+// put passes p to the evidence unless the evidence is closed. s.mu is held.
+func (s *sink) put(p []byte) {
+	if s.closed || len(p) == 0 {
+		return
+	}
+	s.last = p[len(p)-1]
+	_, _ = s.w.Write(p)
 }
 
 func (s *sink) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(p) > 0 {
-		s.last = p[len(p)-1]
-	}
-	if !s.closed {
-		_, _ = s.w.Write(p)
-	}
+	s.put(p)
 	return len(p), nil
 }
 
-// finish writes the closing line, after a newline if the output had none, and
-// closes the evidence.
+// stream is one output stream of a command. A write is added to the stream's
+// partial line, and every complete line, up to and including its last
+// newline, is passed to the evidence; a partial line of lineMax bytes is
+// passed on as it is. What comes after the evidence is closed, from a process
+// the command left behind, is dropped and reported as written: a failed write
+// would only stop the copy from draining the pipe.
+type stream struct {
+	s       *sink
+	partial *[]byte // &s.stdout or &s.stderr
+}
+
+func (w stream) Write(p []byte) (int, error) {
+	s := w.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return len(p), nil
+	}
+	b := append(*w.partial, p...)
+	rest := b
+	if i := bytes.LastIndexByte(rest, '\n'); i >= 0 {
+		s.put(rest[:i+1])
+		rest = rest[i+1:]
+	}
+	for len(rest) >= lineMax {
+		s.put(rest[:lineMax])
+		rest = rest[lineMax:]
+	}
+	*w.partial = append(b[:0], rest...)
+	return len(p), nil
+}
+
+// finish passes on each stream's partial line, standard output's first, then
+// writes the closing line, after a newline if the evidence's last byte was
+// none, and closes the evidence.
 func (s *sink) finish(e Ending, code int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return
 	}
+	s.put(s.stdout)
+	s.put(s.stderr)
+	s.stdout, s.stderr = nil, nil
 	if s.last != '\n' {
 		_, _ = io.WriteString(s.w, "\n")
 	}
@@ -220,9 +272,10 @@ func (c *capture) String() string {
 	return c.buf.String()
 }
 
-// stdoutWriter sends standard output to the evidence and to the capture.
+// stdoutWriter sends standard output to its stream of the evidence and to the
+// capture, which sees the bytes as they come.
 type stdoutWriter struct {
-	s *sink
+	s stream
 	c *capture
 }
 
@@ -394,8 +447,8 @@ func (r *OSRunner) Run(ctx context.Context, c Command) Result {
 	cmd.Env = r.env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = delay
-	cmd.Stdout = stdoutWriter{s, out}
-	cmd.Stderr = s
+	cmd.Stdout = stdoutWriter{stream{s, &s.stdout}, out}
+	cmd.Stderr = stream{s, &s.stderr}
 	if err := cmd.Start(); err != nil {
 		return notStarted(err)
 	}

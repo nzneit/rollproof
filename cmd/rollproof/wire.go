@@ -69,17 +69,7 @@ func (w *wiring) create(ctx context.Context, cfg *config.Config, name string, ev
 	if err != nil {
 		return nil, err
 	}
-	c, err := cluster.Create(ctx, cluster.Spec{
-		Name:          n,
-		RunDir:        cluster.RunDir(n),
-		NodeImage:     cfg.Cluster.NodeImage,
-		RegistryImage: cfg.Cluster.RegistryImage,
-		Workers:       cfg.Cluster.Workers,
-		Namespace:     cfg.Deploy.Namespace,
-		Timeout:       cfg.Limits.Timeout,
-		Keep:          keep,
-		Evidence:      evidence,
-	}, w.engine)
+	c, err := cluster.Create(ctx, clusterSpec(cfg, n, keep, evidence), w.engine)
 	if err != nil {
 		return nil, err
 	}
@@ -91,6 +81,24 @@ func (w *wiring) create(ctx context.Context, cfg *config.Config, name string, ev
 		return nil, failedClientError(ctx, keep, c.Kept(), c.CollectLogs, c.Delete, err)
 	}
 	return &session{c: c, client: client, cfg: cfg, evidence: evidence}, nil
+}
+
+// clusterSpec is the Spec that Create gets for cfg and the cluster's full name n. AsHosts comes
+// from cfg.AsHosts(), so that every node's settings for those hosts list the run's registry first.
+func clusterSpec(cfg *config.Config, n string, keep bool, evidence func(string) (io.WriteCloser, error)) cluster.Spec {
+	return cluster.Spec{
+		Name:          n,
+		RunDir:        cluster.RunDir(n),
+		NodeImage:     cfg.Cluster.NodeImage,
+		RegistryImage: cfg.Cluster.RegistryImage,
+		Workers:       cfg.Cluster.Workers,
+		Namespace:     cfg.Deploy.Namespace,
+		Timeout:       cfg.Limits.Timeout,
+		Keep:          keep,
+		Evidence:      evidence,
+		Registries:    cfg.Registries,
+		AsHosts:       cfg.AsHosts(),
+	}
 }
 
 // failedClientError is the error of a cluster that was made but whose client could not be: before
@@ -221,12 +229,24 @@ func (s *session) Setup(ctx context.Context) (deploy.Result, int) {
 	return deploy.Setup(ctx, s.runner, s.cfg.Setup, s.cfg.Limits.Timeout)
 }
 
-// Watcher follows the workloads of the test's namespace. The Service whose
-// endpoints a transition reads comes later, from UseService.
+// Watcher follows the workloads of the test's namespace with watchOptions. The
+// Service whose endpoints a transition reads comes later, from UseService.
 func (s *session) Watcher(ctx context.Context, cfg *config.Config) (run.Watcher, error) {
 	startCtx, cancel := context.WithTimeout(ctx, cfg.Limits.Timeout)
 	defer cancel()
-	w, err := watch.Start(startCtx, s.client, watch.Options{
+	w, err := watch.Start(startCtx, s.client, s.watchOptions(cfg))
+	if err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+// watchOptions are the watcher's options: the configuration's namespace,
+// selector, settle time, timeout and workers, the session's evidence, the
+// probe's namespace, and the configuration's MirrorNote, so that its texts
+// name the mirror of an image's host. No Service is set.
+func (s *session) watchOptions(cfg *config.Config) watch.Options {
+	return watch.Options{
 		Namespace:      cfg.Deploy.Namespace,
 		Selector:       cfg.Deploy.Selector,
 		Settle:         cfg.Limits.Settle,
@@ -235,11 +255,8 @@ func (s *session) Watcher(ctx context.Context, cfg *config.Config) (run.Watcher,
 		Now:            time.Now,
 		Evidence:       s.evidence,
 		ProbeNamespace: cluster.ProbeNamespace,
-	})
-	if err != nil {
-		return nil, err
+		MirrorNote:     cfg.MirrorNote,
 	}
-	return w, nil
 }
 
 // Target checks that the built-in probe's URL reaches a Service of the cluster.
@@ -274,11 +291,11 @@ func (s *session) probeOptions(cfg *config.Config, probeImage string, raw io.Wri
 const customDrain = 10 * time.Second
 
 // podOptions are the image, command, arguments, environment, token and drain of
-// the probe's pod. The built-in probe: probeImage, its HTTP arguments, no token,
-// a drain of the request timeout plus 5 s. A custom probe: its image as
-// resolved, its command and args, its env with valueFrom kept, the namespace's
-// default token, a drain of 10 s. An env that a pod cannot hold is
-// config-rejected.
+// the probe's pod, and, for both probes, the configuration's MirrorNote. The
+// built-in probe: probeImage, its HTTP arguments, no token, a drain of the
+// request timeout plus 5 s. A custom probe: its image as resolved, its command
+// and args, its env with valueFrom kept, the namespace's default token, a drain
+// of 10 s. An env that a pod cannot hold is config-rejected.
 func podOptions(cfg *config.Config, probeImage string) (probe.PodOptions, error) {
 	if cu := cfg.Probe.Custom; cu != nil {
 		env, err := customEnv(cu.Env)
@@ -286,12 +303,13 @@ func podOptions(cfg *config.Config, probeImage string) (probe.PodOptions, error)
 			return probe.PodOptions{}, err
 		}
 		return probe.PodOptions{Image: cu.Image, Command: cu.Command, Args: cu.Args, Env: env,
-			ServiceAccountToken: true, Drain: customDrain}, nil
+			ServiceAccountToken: true, Drain: customDrain, MirrorNote: cfg.MirrorNote}, nil
 	}
 	return probe.PodOptions{
-		Image: probeImage,
-		Args:  probe.HTTPArgs(httpOptions(cfg.Probe.HTTP)),
-		Drain: cfg.Probe.HTTP.Timeout + 5*time.Second,
+		Image:      probeImage,
+		Args:       probe.HTTPArgs(httpOptions(cfg.Probe.HTTP)),
+		Drain:      cfg.Probe.HTTP.Timeout + 5*time.Second,
+		MirrorNote: cfg.MirrorNote,
 	}, nil
 }
 
