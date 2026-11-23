@@ -3853,30 +3853,26 @@ Left by the proofs of step 5: credentials from a credential-provider plugin; a t
 service asked by GET, one that refuses the credentials, one whose certificate another authority
 signed, and the token services of named products; a settings folder for a host with a port, and
 the runtime's `_default` folder; `as` on Docker Hub, and a Docker Hub path other than `library/`;
-a mirror started before the cluster; on Docker, a mirror named by its container's name and a cut
-of the nodes' route; a proxy that needs a login or speaks TLS, a caller's own `NO_PROXY`, the
-proxy variables in lower case only, Helm 4 behind a proxy, a pull from a mirror or from a
-registry with credentials behind a proxy, whether a workload's pods see the proxy variables, and
-Helm's and the engine's pulls through a proxy. Left by the runs of step 6: how the job summary
+a mirror started before the cluster; a proxy that needs a login or speaks TLS, a caller's own
+`NO_PROXY`, the proxy variables in lower case only, Helm 4 behind a proxy, a pull from a mirror
+or from a registry with credentials behind a proxy, whether a workload's pods see the proxy
+variables, and Helm's and the engine's pulls through a proxy. Left by the runs of step 6: how the job summary
 looks on a run's page; how long a step with `always()` may run after a cancel, and that a
 running step whose condition still holds is not cancelled; how long after a cancel the tool has
 its final `result.json`; a job's time limit on a step that calls a composite action; the 7.5 s
 on a runner that persists; whether GitHub starts a workflow by hand whose file is on no branch
 but the chosen one, before or after a run of it by another trigger; the action's way of taking
-the binary out of its image, on Docker and on Podman; anything on Ubuntu 26.04 with Docker 29;
-the suite on Docker beyond its first fixture; and Podman beyond one test, with the tool's pull
-of kind's node image when no alias names its registry, and whether kind pulls a node image
-again that the tool pulled under another name. Left by section 14, point 33: that the runner,
-after the action's stop line, reads no command for the rest of the step, which the hosted run of
-the action's own test can show only in its log, by the stop line and by the tool's own lines
-standing after it as plain text, since no run plants a command; that a stop lasts for one
-step, which that run shows when it lists as an annotation the notice that the step after the
-action's first run prints (section 12); that the runner masks the token in that line; the
-order in which the runner reads the lines of the two streams, on which both things that
-section 8 leaves open depend; and the tool's resume line in a step of the caller's own
-script, which no workflow of the project runs. What is known of these is reasoned from the
-sources above or is the drafting session's own knowledge, and section 14 lists those of them
-that need a test.
+the binary out of its image on Podman; on Ubuntu 26.04, anything but the suite under Helm 4, and
+the version of Docker there, which no log of the runs shows; and Podman beyond one test, with the
+tool's pull of kind's node image when no alias names its registry, and whether kind pulls a node
+image again that the tool pulled under another name. Left by section 14, point 33: a workflow
+command printed after the action's stop line, which no run plants (the log of the action's own
+test shows only that the tool's own stop lines, printed after it, were not read as commands;
+`docs/proofs/p32-step6-workflows.md`); the order in which the runner reads the lines of the two
+streams, on which both things that section 8 leaves open depend; and the tool's resume line in a
+step of the caller's own script, which no workflow of the project runs. What is known of these
+is reasoned from the sources above or is the drafting session's own knowledge, and section 14
+lists those of them that need a test.
 
 That the hosted runner's Docker runs as root was read from the image's install script, which no
 page states. The runs of 2026-11-22 showed it: its `info` named no rootless option.
