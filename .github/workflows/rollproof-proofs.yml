@@ -17,13 +17,13 @@ name: rollproof proofs
 # Every job names ubuntu-24.04: ubuntu-latest moves to Ubuntu 26.04, with another Helm major, in
 # November 2026.
 #
-# The runner jobs need no checkout. Their first step writes a throwaway composite action
-# (./.proof/act) and two helpers into the workspace; GitHub's runner loads a ./ action only when its
-# step runs, so an earlier step may write it. The recorder (.proof/rec.py) logs every SIGINT,
-# SIGTERM and SIGHUP with its time, its PID, PPID, PGID and SID, its parent's command line, and an
-# "alive ppid=N" line every 0.5 s: the last one dates the SIGKILL, and a change of PPID dates the
-# parent's end. At its first signal it writes verdict=fail to GITHUB_OUTPUT and a marker to
-# GITHUB_STEP_SUMMARY.
+# The runner jobs need no checkout. Their first step writes a throwaway composite action into the
+# workspace: ./.proof/act and two helpers, or, in last-value, ./.proof/twice alone. GitHub's runner
+# loads a ./ action only when its step runs, so an earlier step may write it. The recorder
+# (.proof/rec.py) logs every SIGINT, SIGTERM and SIGHUP with its time, its PID, PPID, PGID and SID,
+# its parent's command line, and an "alive ppid=N" line every 0.5 s: the last one dates the
+# SIGKILL, and a change of PPID dates the parent's end. At its first signal it writes verdict=fail
+# to GITHUB_OUTPUT and a marker to GITHUB_STEP_SUMMARY.
 #
 # A running step whose condition tests true again when its job is cancelled is not cancelled, and
 # neither is a job whose if: is always(). So every step that must be cancelled uses
@@ -742,8 +742,10 @@ jobs:
   # 5 s node setting under Podman (section 14, point 24). The test runs as root with this user's
   # PATH and Go settings, and a build cache of its own so that root writes nothing into this
   # user's cache. KIND_EXPERIMENTAL_PROVIDER=podman picks the engine. The image's registries.conf
-  # lists two search registries, and the tool pulls kind's node image by its short name
-  # (kindest/node), so an alias names its registry.
+  # lists two search registries; the alias names the registry of kind's node image's short name
+  # (kindest/node), by which the tool pulled it when this job was written. The tool, as kind's
+  # Podman provider does, now asks Podman for docker.io/kindest/node (podmanName), so the alias is
+  # no longer needed and stays harmless (step 6 plan, decision 22).
   # ---------------------------------------------------------------------------------------------
   podman-node-setting:
     if: inputs.part == 'podman-node-setting'

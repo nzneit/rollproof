@@ -324,6 +324,8 @@ func runFixture(t *testing.T, f fixture) result {
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		t.Fatalf("%s: the results folder %s: %v", f.name, out, err)
 	}
+	// The tool appends to GitHub's files and never makes them, as on GitHub's runner, so a run with
+	// files of its own gets them empty before it starts.
 	var gh *githubFiles
 	if f.github {
 		gh = &githubFiles{filepath.Join(out, "github-output"), filepath.Join(out, "github-summary")}

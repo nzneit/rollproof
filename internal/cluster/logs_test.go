@@ -38,9 +38,9 @@ func writeTestFile(t *testing.T, path, text string) {
 	}
 }
 
-// writeLogFile writes text to path, making its folders, and returns the error. A stub of kind's
-// calls runs on another goroutine than the test's, where t.Fatal is not allowed: it reports the
-// error with t.Errorf and returns it.
+// writeLogFile writes text to path, making its folders, and returns the error, for a stub of
+// kind's calls: the stub runs on another goroutine than the test's, where t.Fatal is not allowed,
+// so it reports the error with t.Errorf and returns it.
 func writeLogFile(path, text string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err

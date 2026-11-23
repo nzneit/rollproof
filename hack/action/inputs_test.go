@@ -93,14 +93,8 @@ func checkInputs(t *testing.T, c *config.Config, candidate []config.Value, stead
 }
 
 func TestTheActionTestsInputsLoad(t *testing.T) {
-	// config.Load("testdata/pass.yaml", env), env giving ROLLPROOF_ACTION_TEST_RELEASE=orders and
-	// nothing else: Deploy.Namespace "orders"; Deploy.Helm.Release "orders"; Previous and Candidate
-	// both IsPath with Chart the absolute path of ../../fixtures/chart; each with exactly one value,
-	// inline, whose "image" is {"repository": "${images.previous.repository}", "digest":
-	// "${images.previous.digest}"} (the candidate's with candidate); Images exactly
-	// {"previous": {Local: "rollproof-fixture:previous"}, "candidate": {Local:
-	// "rollproof-fixture:candidate"}}; Probe.HTTP.URL "http://orders.orders.svc/work?ms=20";
-	// Limits steady 10s, settle 15s, timeout 5m, silence 5s; Cluster.Workers 3.
+	// testdata/pass.yaml, with the variable that only the action's step sets, loads as checkInputs
+	// wants it.
 	t.Run("pass", func(t *testing.T) {
 		c, err := config.Load("testdata/pass.yaml", releaseOrders)
 		if err != nil {

@@ -29,8 +29,6 @@ import (
 // by digest to a registry on the loopback, pulled, taken apart and started by action.sh, which runs
 // the tool on a configuration that it rejects at once. No cluster is made.
 func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
-	// ENGINE: KIND_EXPERIMENTAL_PROVIDER when it is set, else the first of docker, nerdctl and
-	// podman whose `info` exits 0; none fails the test.
 	engine := testEngine(t)
 	do := func(args ...string) error {
 		out, err := exec.Command(engine, args...).CombinedOutput()
@@ -48,9 +46,8 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 		}
 	}
 
-	// 1. go build (CGO_ENABLED=0, -trimpath, -ldflags "-s -w -X main.version=action-test") of
-	//    ../../cmd/rollproof into a temporary folder CTX as rollproof; ../../Dockerfile copied into
-	//    CTX.
+	// The tool's image, built from the Dockerfile and a static binary in a folder of their own, as
+	// the action's own test builds it.
 	ctxDir := t.TempDir()
 	build := exec.Command("go", "build", "-trimpath", "-ldflags", "-s -w -X main.version=action-test",
 		"-o", filepath.Join(ctxDir, "rollproof"), "../../cmd/rollproof")
@@ -66,14 +63,12 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 2. ENGINE build -t rollproof-action-test:dev CTX.
 	if err := do("build", "-t", "rollproof-action-test:dev", ctxDir); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { remove("rmi", "rollproof-action-test:dev") })
 
-	// 3. ENGINE save -o IMAGE.tar rollproof-action-test:dev, the archive in another temporary
-	//    folder; tarball.ImageFromPath gives the image and its digest D.
+	// Its digest, from the engine's own archive, so that the script pulls it by its digest.
 	archive := filepath.Join(t.TempDir(), "image.tar")
 	if err := do("save", "-o", archive, "rollproof-action-test:dev"); err != nil {
 		t.Fatal(err)
@@ -87,10 +82,8 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 4. ENGINE run -d --name rollproof-action-test-registry -p 127.0.0.1:PORT:5000
-	//    cluster.DefaultRegistryImage, PORT a free port (net.Listen on 127.0.0.1:0, then closed);
-	//    GET http://127.0.0.1:PORT/v2/ answers 200 within 30 s; remote.Write of the image to
-	//    127.0.0.1:PORT/rollproof-action-test@D with name.Insecure.
+	// A registry on the loopback, and the image pushed there by its digest, so that the script's
+	// pull goes through a registry as it does on GitHub.
 	port := freePort(t)
 	registry := "127.0.0.1:" + port
 	t.Cleanup(func() { remove("rm", "-f", "-v", "rollproof-action-test-registry") })
@@ -108,13 +101,9 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 5. bash with the absolute path of ../../action.sh, its working folder a temporary one, under
-	//    a limit of 5 minutes, with this process's environment without its GITHUB_ variables, and
-	//    GITHUB_ACTIONS=true, GITHUB_OUTPUT and GITHUB_STEP_SUMMARY naming two empty files of the
-	//    test, GITHUB_WORKSPACE a folder WS that holds rejected.yaml ("version: 99\n"), RUNNER_TEMP
-	//    a folder RT,
-	//    ROLLPROOF_ACTION_CONFIG=rejected.yaml, ROLLPROOF_ACTION_IMAGE=127.0.0.1:PORT/rollproof-action-test@D,
-	//    ROLLPROOF_ACTION_OUT=results and KIND_EXPERIMENTAL_PROVIDER=ENGINE.
+	// The script, run as the action's step runs it on GitHub: GITHUB_ACTIONS true, GitHub's files and
+	// folders of the test's own in place of this process's GITHUB_ variables, and a configuration
+	// that the tool rejects at once, so that no cluster is made.
 	script, err := filepath.Abs("../../action.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -188,17 +177,15 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 	// 12, "The suite's workflow").
 	t.Logf("action.sh's standard output:\n%s\nits standard error:\n%s", stdout.String(), stderr.String())
 
-	// It exits 2.
 	if cmd.ProcessState == nil {
 		t.Fatalf("action.sh did not start: %v", err)
 	}
 	if code := cmd.ProcessState.ExitCode(); code != 2 {
 		t.Fatalf("action.sh exited %d (%v), want 2", code, err)
 	}
-	// stdout's first line is matched by scriptStopLine, its second by toolStopLine, and its last
-	// is "::" + T + "::"; stderr's first line is stdout's first; the line of stderr after the one
-	// that begins "rollproof: the tool from " is stdout's second, and it is stderr's last; no line
-	// of either stream is "::" + U + "::".
+	// The script's stop line comes first on both streams; the tool's comes second on stdout and last
+	// on stderr, after the script's line that names the tool; the tool's resume line is stdout's last,
+	// and the script's commands are never resumed.
 	outLines, errLines := textLines(stdout.String()), textLines(stderr.String())
 	if len(outLines) < 3 || !scriptStopLine.MatchString(outLines[0]) || !toolStopLine.MatchString(outLines[1]) {
 		t.Fatalf("stdout's first line is not the script's stop line, or its second not the tool's:\n%s", stdout.String())
@@ -279,9 +266,6 @@ func TestTheScriptRunsTheToolFromItsImage(t *testing.T) {
 	if first, _, _ := strings.Cut(string(v), "\n"); first != "rollproof action-test" {
 		t.Errorf("rollproof version's first line %q, want %q", first, "rollproof action-test")
 	}
-	// Cleanup, each a test error when it fails: ENGINE rm -f -v rollproof-action-test-registry;
-	// ENGINE rmi rollproof-action-test:dev; ENGINE rmi 127.0.0.1:PORT/rollproof-action-test@D (the
-	// one name that does not begin rollproof-, Global Constraints).
 }
 
 // testEngine returns the engine's command name: KIND_EXPERIMENTAL_PROVIDER when it is set, else the
@@ -300,10 +284,11 @@ func testEngine(t *testing.T) string {
 	return ""
 }
 
-// isMissing says whether an engine's output for a failed removal says only that the name does
-// not exist: nerdctl writes "no such container: NAME" and "no such image: NAME" (read on nerdctl
-// 2.4.2); Docker "No such container" and "No such image", and Podman "no such container" and
-// "image not known", are from memory, not read. Any other output is a removal that failed.
+// isMissing says whether an engine's output for a failed removal holds the text by which the
+// engine says that the name does not exist: nerdctl writes "no such container: NAME" and "no such
+// image: NAME" (read on nerdctl 2.4.2); Docker "No such container" and "No such image", and Podman
+// "no such container" and "image not known", are from memory, not read. Any other output is a
+// removal that failed.
 func isMissing(out string) bool {
 	out = strings.ToLower(out)
 	return strings.Contains(out, "no such container") || strings.Contains(out, "no such image") ||

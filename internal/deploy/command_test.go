@@ -433,9 +433,8 @@ func TestSinkFinishPassesOnEachPartialLine(t *testing.T) {
 }
 
 func TestSinkFinishWithOnePartialLine(t *testing.T) {
-	// A sink whose standard error alone holds a partial line "err two" (its standard output none):
-	// after finish(ExitedNonZero, 1) the evidence ends "err two\nrollproof: exit-nonzero, exit code 1\n",
-	// with no empty line before "err two".
+	// A stream with no partial line adds no line end at finish: no empty line stands before the other
+	// stream's partial line.
 	ev := &bufferCloser{}
 	s := &sink{w: ev}
 	stderr := stream{s, &s.stderr}

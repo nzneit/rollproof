@@ -7,9 +7,9 @@ import "strings"
 // heading; the table of windows and the table of transitions are Markdown tables;
 // the lists of a pass are Markdown lists; every other block of lines is a fenced
 // code block, line for line as the console prints it. Text from outside the tool,
-// every string that Mask masks, stands only inside a code block (fenced) or a code
-// span (codeSpan), so that it cannot change how the page reads. r is cleaned as
-// Console cleans it; Summary reads nothing else.
+// every string that Mask masks, stands only inside a code block or a code span, so
+// that it cannot change how the page reads. r is cleaned as Console cleans it;
+// Summary reads nothing else.
 func Summary(r Run) string {
 	r = cleanRun(r)
 	var blocks []string
@@ -60,8 +60,9 @@ func SummaryLine(line string) string {
 }
 
 // markdownList writes a paragraph of its title and, after a blank line, a Markdown list of the
-// items, one "- ITEM" line each; each line ends with a line end. The items are the tool's own
-// words.
+// items, one "- ITEM" line each; each line ends with a line end. A list with no items is the title
+// line alone, so that the blank line that Summary puts between blocks stays one. The items are
+// the tool's own words.
 func markdownList(title string, items []string) string {
 	var b strings.Builder
 	b.WriteString(title + "\n")
@@ -104,7 +105,8 @@ func fenced(lines []string) string {
 // codeSpan writes s as a code span: delimited by a run of backticks one longer than the longest run
 // in s, with one space inside each delimiter when s begins or ends with a backtick or a space,
 // which the renderer takes off again. In a code span GitHub reads no Markdown, no link and no HTML.
-// An empty s gives "".
+// An empty s gives "": a span of nothing would show its backticks, and an empty table cell stays
+// empty.
 func codeSpan(s string) string {
 	if s == "" {
 		return ""

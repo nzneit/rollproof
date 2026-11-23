@@ -167,9 +167,8 @@ type Cluster struct {
 // into the run's folder before kind creates the nodes; each node gets every ca
 // and settings file with rollproof.test's. A file that cannot be read or
 // written fails the step it belongs to.
-// Each call into kind runs through untilDone: when ctx ends while kind works,
-// Create stops waiting for kind and returns, and the next run removes what kind
-// made (section 10, "On a signal").
+// When ctx ends while kind works, Create stops waiting for kind and returns, and
+// the next run removes what kind made (section 10, "On a signal").
 func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 	if err := remove(ctx, e, s.Name, s.RunDir); err != nil {
 		var c verdict.Condition
@@ -304,9 +303,9 @@ func Create(ctx context.Context, s Spec, e Engine) (*Cluster, error) {
 // each entry's ca and settings file, rollproof.test's settings file, and the
 // kernel's setting for an attempt to connect that had no answer; and returns the
 // nodes, the control-plane node first. A ca that cannot be read fails it before
-// any node is listed, with the entry's index. Its calls into kind take no
-// context, so they run through untilDone: when ctx ends, it returns ctx's error at
-// once.
+// any node is listed, with the entry's index. The node list, a node's file and a
+// node's role take no context, so the calls into kind run through untilDone: when
+// ctx ends, it returns ctx's error at once.
 func writeNodeSettings(ctx context.Context, p *kindcluster.Provider, name string, regs []config.Registry, asHosts []string, runRegistry string) ([]nodes.Node, error) {
 	// cas holds each entry's ca, at the entry's index, read once for every node.
 	cas := make([][]byte, len(regs))

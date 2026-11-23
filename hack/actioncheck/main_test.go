@@ -38,12 +38,8 @@ func write(t *testing.T, path, text string) {
 }
 
 func TestCheckAcceptsAWholeRun(t *testing.T) {
-	// A results folder OUT holding result.json {"final": true, "verdict": "pass", "reasons": []};
-	// a folder STEPS holding step_summary_1-scrubbed with
-	//   "### rollproof: PASS `orders (Helm) on Kubernetes v1.37.0 in kind`\n\n```\nresults: OUT\n```\n",
-	// step_summary_1 (the raw file, the same text), and step_summary_2-scrubbed with
-	// "### other\n". check(options{verdict: "pass", out: OUT, wantVerdict: "pass", wantOut: OUT,
-	// stepFiles: STEPS}) gives none.
+	// A whole pass, as wholeRun writes it, gives no fault: the raw summary beside the masked copy and
+	// another step's masked copy are not taken for the run's.
 	o := wholeRun(t)
 	if faults := check(o); len(faults) != 0 {
 		t.Errorf("check gave %q, want none", faults)
@@ -51,20 +47,8 @@ func TestCheckAcceptsAWholeRun(t *testing.T) {
 }
 
 func TestCheckReportsEachFault(t *testing.T) {
-	// From the whole run above, one change a row, and exactly the one fault it gives:
-	//   verdict "fail"                      `verdict is "fail"; want "pass"`
-	//   out "/elsewhere"                    `out is "/elsewhere"; want "OUT"`
-	//   result.json missing                 a fault that begins "result.json: "
-	//   result.json final false             "result.json is not final"
-	//   result.json verdict "fail"          `result.json's verdict is "fail"; want "pass"`
-	//   wantDecided "interrupted", the file's decided reason internal-error
-	//                                       `the reason that decided is "internal-error"; want "interrupted"`
-	//   the summary's first line "### rollproof: FAIL"
-	//                                       "the job summary begins \"### rollproof: FAIL\"; want \"### rollproof: PASS\""
-	//   no scrubbed file holds the results line
-	//                                       `no masked job summary under STEPS holds the line "results: OUT"`
-	//   two scrubbed files hold it          `2 masked job summaries under STEPS hold the line "results: OUT"; want one`
-	// (OUT and STEPS stand for the two folders' paths.)
+	// Each row changes one thing of the whole run, and check gives exactly the one fault that names
+	// it.
 	rows := []struct {
 		name   string
 		change func(t *testing.T, o *options)
@@ -124,14 +108,8 @@ func TestCheckReportsEachFault(t *testing.T) {
 }
 
 func TestCheckFailsLoudOnWhatItCannotTell(t *testing.T) {
-	// From the whole run, one change a row, and exactly the one fault it gives:
-	//   wantDecided "interrupted", result.json with no reason
-	//                                       `no reason in result.json decided; want "interrupted"`
-	//   stepFiles a regular file            "the runner's folder of step files, PATH, cannot be read: "
-	//                                       and os.ReadDir's error for PATH
-	//   step_summary_9-scrubbed a folder, step_summary_1-scrubbed still holding the results line
-	//                                       "the masked job summary step_summary_9-scrubbed cannot be
-	//                                       read: " and os.ReadFile's error for it
+	// What check cannot tell is a fault, never a pass: no reason that decided, a folder of step files
+	// that cannot be read, and a masked copy that cannot be read.
 	rows := []struct {
 		name   string
 		change func(t *testing.T, o *options)
@@ -175,9 +153,8 @@ func TestCheckFailsLoudOnWhatItCannotTell(t *testing.T) {
 }
 
 func TestCheckFailsLoudWithoutTheStepFiles(t *testing.T) {
-	// stepFiles a path that does not exist, everything else whole: exactly the fault
-	// "the runner's folder of step files, PATH, is not there: GitHub does not promise it, so the job
-	// summary was not read".
+	// GitHub does not promise the folder of step files: one that is not there is a fault that names
+	// it, never a pass.
 	o := wholeRun(t)
 	o.stepFiles = filepath.Join(t.TempDir(), "_runner_file_commands")
 	want := []string{"the runner's folder of step files, " + o.stepFiles +
@@ -188,8 +165,7 @@ func TestCheckFailsLoudWithoutTheStepFiles(t *testing.T) {
 }
 
 func TestCheckWordsOfEachVerdict(t *testing.T) {
-	// The heading wanted for wantVerdict "pass", "fail" and "not-verified" is "### rollproof: PASS",
-	// "### rollproof: FAIL" and "### rollproof: NOT VERIFIED".
+	// heading writes the verdict's word as the console's first line writes it.
 	for v, want := range map[string]string{
 		"pass":         "### rollproof: PASS",
 		"fail":         "### rollproof: FAIL",
@@ -202,14 +178,8 @@ func TestCheckWordsOfEachVerdict(t *testing.T) {
 }
 
 func TestTheCommandsExitCodes(t *testing.T) {
-	// run with the flags of the whole run of TestCheckAcceptsAWholeRun ("-verdict", "pass",
-	// "-out", OUT, "-want-verdict", "pass", "-want-out", OUT, "-step-files", STEPS): 0, and stdout
-	// and stderr empty.
-	// The same with "-verdict", "fail": 1; stdout empty; stderr exactly one line, the fault,
-	//   `verdict is "fail"; want "pass"` and a line end.
-	// The same with a flag it does not know added, "-no-such-flag": 2; stdout empty.
-	// The same with a word that is no flag added, "extra": 2; stdout empty; stderr exactly one
-	//   line that names it, `actioncheck: "extra" is no flag; every input is a flag` and a line end.
+	// The exit codes that the workflow's steps read: 0 when every check holds, 1 for a fault, and 2
+	// for a call it cannot read, with nothing on stdout in every case.
 	o := wholeRun(t)
 	args := func(verdict string, more ...string) []string {
 		return append([]string{"-verdict", verdict, "-out", o.out, "-want-verdict", "pass",

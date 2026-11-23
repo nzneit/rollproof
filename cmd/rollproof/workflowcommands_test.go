@@ -289,10 +289,9 @@ func TestTheRunCommandsLinesComeFirstAndLast(t *testing.T) {
 	}
 }
 
-// newStopToken replaced by a function that fails the test when called; realMain with getenv
-// githubEnv. One row each: ["version"] exits 0; no args exits 2; ["probe", "http", "--url",
-// "http://127.0.0.1:1/", "--rate", "0"] exits 2. In each row no line of stdout or stderr begins "::"
-// after its leading white space, and none holds "##[".
+// version, probe and the top-level usage print no text from outside the tool, so they print
+// neither line for GitHub's workflow commands, and no line that the runner would read as a command
+// (decision 26).
 func TestOnlyTheRunCommandStopsWorkflowCommands(t *testing.T) {
 	noStopToken(t)
 	for _, tc := range []struct {

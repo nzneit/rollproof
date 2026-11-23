@@ -11,7 +11,9 @@ import (
 
 // newStopToken gives the token of one run's lines for GitHub's workflow commands:
 // 26 random characters of crypto/rand.Text, which no command of the runner is
-// named. A test replaces it, and puts it back with t.Cleanup.
+// named, new for each run so that no text from outside the tool can name it, as it
+// could name a fixed token or one from the environment. A test replaces it, and
+// puts it back with t.Cleanup.
 var newStopToken = func() string { return rand.Text() }
 
 // withWorkflowCommandsStopped runs command, and returns its exit code, between the
@@ -26,8 +28,9 @@ var newStopToken = func() string { return rand.Text() }
 // stdout, so that a step that runs the tool from a script of its own can use
 // workflow commands again. After a signal it prints nothing more: the process
 // ends by the signal, and the step with it. A panic in command passes through
-// with no resume line. Elsewhere it only runs command. A nil getenv is not
-// GitHub Actions.
+// with no resume line: the commands stay stopped for the rest of the step, and the
+// panic's trace is read as plain lines (decision 26). Elsewhere it only runs
+// command. A nil getenv is not GitHub Actions.
 func withWorkflowCommandsStopped(stdout, stderr io.Writer, getenv func(string) string, signalled func() bool, command func() int) int {
 	if getenv == nil || !report.GitHubActions(getenv) {
 		return command()

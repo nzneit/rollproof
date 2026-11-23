@@ -180,7 +180,8 @@ func Run(ctx context.Context, o Options, u Units) int {
 	code := s.finish()
 	if !s.finalWritten {
 		// After a refused final write completeEvidence did not run, so windows.json is written a last
-		// time here, as before, and a warning that this gives is told as a line, as the others were.
+		// time here, after the clean-up, and a warning that this gives is told as a line, as the others
+		// were.
 		s.marks.end()
 		s.lateWarnings()
 	}
@@ -265,8 +266,9 @@ type runState struct {
 	signalSeen  bool // a signal was already reported as the interrupted reason
 	commands    []*command
 	clusterSeen *report.Cluster
-	// finalWritten says that the final result.json is in place, so that a warning raised after it
-	// is printed and written again (lateWarnings).
+	// finalWritten says that the final result.json is in place: a warning raised after it is then
+	// appended to the job summary and written into result.json again, beside its line; after a
+	// refused final write a warning is a line alone (lateWarnings).
 	finalWritten bool
 	// warningsTold is how many of the run's warnings have been told: in the final result.json, the
 	// job summary and the console, or as a line.

@@ -35,8 +35,7 @@ func main() {
 // gives 2 as well, with one line on stderr that names the first of them, since
 // a flag written after it would not be read. Otherwise it runs check and gives
 // 0 when check gives no fault, and 1 when it gives any, each fault a line on
-// stderr. It writes nothing to stdout. main is
-// os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)).
+// stderr. It writes nothing to stdout.
 func run(args []string, stdout, stderr io.Writer) int {
 	var o options
 	f := flag.NewFlagSet("actioncheck", flag.ContinueOnError)

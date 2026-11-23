@@ -446,16 +446,9 @@ func TestWorkflowCommandFaults(t *testing.T) {
 }
 
 func TestFailedCommands(t *testing.T) {
-	// A folder that holds:
-	// - setup: "nerdctl run x\nabc\nrollproof: ok, exit code 0\n", which is not listed;
-	// - setup-11: "nerdctl exec n getent hosts real\nrollproof: exit-nonzero, exit code 2\n",
-	//   listed with both lines;
-	// - install: the 50 lines "line 1" to "line 50", each with a line end, and no closing line
-	//   (a command that has not ended), listed with "line 11" to "line 50";
-	// - a folder named sub, which is skipped.
-	// failedCommands(dir, 40) gives []commandLog{{"install", …}, {"setup-11", …}} in that order,
-	// compared with cmp.Diff and cmp.AllowUnexported(commandLog{}), and no error.
-	// failedCommands of a folder that does not exist gives nil and no error.
+	// Only the commands whose evidence does not end with the line of a command that succeeded are
+	// listed, each with its last lines and in the order of their names; a folder inside is skipped,
+	// and a folder that does not exist gives none.
 	dir := t.TempDir()
 	var install strings.Builder
 	var installTail []string

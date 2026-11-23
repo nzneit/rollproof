@@ -26,14 +26,16 @@ set -euo pipefail
 shopt -s execfail
 
 # fail prints its message, after "rollproof: ", to standard error, and exits 2, also when the
-# message cannot be written.
+# message cannot be written: under set -e a failed printf would end the script with 1, the tool's
+# code for a fail, which a caller reads as the verdict fail.
 fail() {
   printf 'rollproof: %s\n' "$1" >&2 || true
   exit 2
 }
 
 # token_file is where stop_commands reads its token: the kernel gives a new random UUID at each
-# read. A test that sources this script sets it to a file of its own.
+# read, so that no text from outside the tool can name the token, as it could name a fixed one or
+# one from the environment. A test that sources this script sets it to a file of its own.
 token_file=/proc/sys/kernel/random/uuid
 
 # stop_commands prints "::stop-commands::TOKEN" on standard output and on standard error, TOKEN
@@ -136,6 +138,8 @@ main() {
     args+=(--out "$ROLLPROOF_ACTION_OUT")
   fi
   cd "${GITHUB_WORKSPACE:-.}" || fail "the workspace ${GITHUB_WORKSPACE:-.} cannot be entered"
+  # Information only: under set -e a failed write here would end the script with 1, the tool's
+  # code for a fail.
   printf 'rollproof: the tool from %s, through %s\n' "$ref" "$engine" >&2 || true
   unset ROLLPROOF_ACTION_CONFIG ROLLPROOF_ACTION_IMAGE ROLLPROOF_ACTION_OUT \
     ROLLPROOF_ACTION_VERSION ROLLPROOF_ACTION_REPOSITORY ROLLPROOF_ACTION_DIGEST
