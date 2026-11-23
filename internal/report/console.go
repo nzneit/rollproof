@@ -100,6 +100,13 @@ func clean(s string) string {
 	}, s)
 }
 
+// ConsoleLine returns text as one line of a terminal, cleaned as Console cleans text: a
+// line that the run prints outside the console's blocks goes through it, so that no text
+// from outside the tool can split or redraw it (section 10).
+func ConsoleLine(text string) string {
+	return clean(text)
+}
+
 func isControl(r rune) bool {
 	return unicode.Is(unicode.Cc, r) || r == '\u2028' || r == '\u2029' ||
 		(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069')
@@ -198,15 +205,27 @@ func cleanRun(r Run) Run {
 	return c
 }
 
+// verdictLine is the console's first line: "rollproof: ", the verdict's word and its tail.
 func verdictLine(r Run) string {
-	word := "NOT VERIFIED"
+	return "rollproof: " + verdictWord(r) + verdictTail(r)
+}
+
+// verdictWord is the verdict as the first line writes it: PASS, FAIL or NOT VERIFIED.
+func verdictWord(r Run) string {
 	switch r.Verdict {
 	case "pass":
-		word = "PASS"
+		return "PASS"
 	case "fail":
-		word = "FAIL"
+		return "FAIL"
 	}
-	s := "rollproof: " + word
+	return "NOT VERIFIED"
+}
+
+// verdictTail is what the first line holds after "rollproof: WORD": the name with its driver and
+// the Kubernetes version with its provider, each when the record has it, with the spaces that lead
+// it; "" when it has none of them.
+func verdictTail(r Run) string {
+	s := ""
 	if r.Name != "" {
 		s += "   " + r.Name
 		switch r.Driver {
@@ -554,25 +573,8 @@ func resultWord(s string) string {
 // windowsTable is the table of windows and, under it, the failures that
 // crossed a start. Every window of the record has its row.
 func windowsTable(r Run) []string {
-	header := []string{"window", "length", "checks", "failed", "after finish", "slowest", "behind", "result"}
-	rows := [][]string{header}
-	for _, w := range r.Windows {
-		if w.Start == nil {
-			rows = append(rows, []string{w.Name, "-", "-", "-", "-", "-", "-", resultWord(w.Result)})
-			continue
-		}
-		length := "-"
-		if w.End != nil {
-			length = fmt.Sprintf("%.1f s", float64(w.End.Sub(*w.Start).Milliseconds())/1000)
-		}
-		after := thousands(w.FailedAfterFinish)
-		if w.Name == "steady" {
-			after = "-"
-		}
-		slowest := slowestCell(w.SlowestMs)
-		behind := behindCell(w.LagMs)
-		rows = append(rows, []string{w.Name, length, thousands(w.Checks), thousands(w.Failed), after, slowest, behind, resultWord(w.Result)})
-	}
+	header, body := windowRows(r)
+	rows := append([][]string{header}, body...)
 	widths := make([]int, len(header))
 	for _, row := range rows {
 		for i, cell := range row {
@@ -597,6 +599,37 @@ func windowsTable(r Run) []string {
 		}
 		lines = append(lines, b.String())
 	}
+	return append(lines, crossedLines(r)...)
+}
+
+// windowRows is the first table's header and one row of cells for each window, as the console
+// prints them before it aligns them.
+func windowRows(r Run) (header []string, rows [][]string) {
+	header = []string{"window", "length", "checks", "failed", "after finish", "slowest", "behind", "result"}
+	for _, w := range r.Windows {
+		if w.Start == nil {
+			rows = append(rows, []string{w.Name, "-", "-", "-", "-", "-", "-", resultWord(w.Result)})
+			continue
+		}
+		length := "-"
+		if w.End != nil {
+			length = fmt.Sprintf("%.1f s", float64(w.End.Sub(*w.Start).Milliseconds())/1000)
+		}
+		after := thousands(w.FailedAfterFinish)
+		if w.Name == "steady" {
+			after = "-"
+		}
+		slowest := slowestCell(w.SlowestMs)
+		behind := behindCell(w.LagMs)
+		rows = append(rows, []string{w.Name, length, thousands(w.Checks), thousands(w.Failed), after, slowest, behind, resultWord(w.Result)})
+	}
+	return header, rows
+}
+
+// crossedLines is a line for each window whose failures crossed its start, as the console prints
+// it under the first table.
+func crossedLines(r Run) []string {
+	var lines []string
 	for _, w := range r.Windows {
 		switch {
 		case w.CrossedStart == 1:
@@ -620,26 +653,14 @@ func podsReplaced(w Workload) string {
 	return fmt.Sprintf("%d of %d", w.PodsReplaced, w.PodsAtStart)
 }
 
-// transitionsTable has one row for each workload of each transition.
+// transitionsTable has one row for each workload of each transition, and no line when no
+// transition has a workload.
 func transitionsTable(r Run) []string {
-	header := []string{"transition", "workload", "probed", "pods replaced", "quickest stop"}
-	rows := [][]string{header}
-	for _, tr := range r.Transitions {
-		for i, w := range tr.Workloads {
-			name := ""
-			if i == 0 {
-				name = tr.Name
-			}
-			stop := "-"
-			if w.QuickestStopMs != nil {
-				stop = fmt.Sprintf("%.1f s", float64(*w.QuickestStopMs)/1000)
-			}
-			rows = append(rows, []string{name, w.Workload, w.Probed, podsReplaced(w), stop})
-		}
-	}
-	if len(rows) == 1 {
+	header, body := transitionRows(r)
+	if body == nil {
 		return nil
 	}
+	rows := append([][]string{header}, body...)
 	widths := make([]int, len(header))
 	widths[0] = 12
 	for _, row := range rows {
@@ -665,11 +686,45 @@ func transitionsTable(r Run) []string {
 	return lines
 }
 
-// exercisedLists are what a pass exercised and did not. A restart-only pass says first under "not
-// exercised" that no deploy and no rollback were tested, and a pass with a deploy and no rollback
-// what that leaves out.
+// transitionRows is the second table's header and one row of cells for each workload of each
+// transition, the transition's name in the first row of its workloads only; rows is nil when no
+// transition has a workload.
+func transitionRows(r Run) (header []string, rows [][]string) {
+	header = []string{"transition", "workload", "probed", "pods replaced", "quickest stop"}
+	for _, tr := range r.Transitions {
+		for i, w := range tr.Workloads {
+			name := ""
+			if i == 0 {
+				name = tr.Name
+			}
+			stop := "-"
+			if w.QuickestStopMs != nil {
+				stop = fmt.Sprintf("%.1f s", float64(*w.QuickestStopMs)/1000)
+			}
+			rows = append(rows, []string{name, w.Workload, w.Probed, podsReplaced(w), stop})
+		}
+	}
+	return header, rows
+}
+
+// exercisedLists are what a pass exercised and did not, as the console prints them.
 func exercisedLists(r Run) []string {
+	exercised, notExercised := exercisedItems(r)
 	lines := []string{"exercised"}
+	for _, item := range exercised {
+		lines = append(lines, "  "+pad(item[0], 12)+item[1])
+	}
+	lines = append(lines, "not exercised")
+	for _, n := range notExercised {
+		lines = append(lines, "  "+n)
+	}
+	return lines
+}
+
+// exercisedItems is what the lists of a pass hold: for each transition that ran, its name and what
+// it exercised, in order; and each line of what was not exercised, the lines of a restart-only run
+// or of a deploy with no rollback first.
+func exercisedItems(r Run) (exercised [][2]string, notList []string) {
 	for _, tr := range r.Transitions {
 		if windowNotRun(r, tr.Name) {
 			continue
@@ -686,19 +741,15 @@ func exercisedLists(r Run) []string {
 		if unreached(tr) {
 			text = "no probed workload had a pod replaced: the probe watched a rollout that it did not reach"
 		}
-		lines = append(lines, "  "+pad(tr.Name, 12)+text)
+		exercised = append(exercised, [2]string{tr.Name, text})
 	}
-	lines = append(lines, "not exercised")
 	if hasWindowThatRan(r, "restart") && !hasWindowThatRan(r, "deploy") {
-		lines = append(lines, "  a deploy to another release and a rollback, because only a restart was tested")
+		notList = append(notList, "a deploy to another release and a rollback, because only a restart was tested")
 	}
 	if hasWindowThatRan(r, "deploy") && !hasWindowThatRan(r, "rollback") {
-		lines = append(lines, "  the candidate's shutdown and the installed release's start-up, because the run has no rollback")
+		notList = append(notList, "the candidate's shutdown and the installed release's start-up, because the run has no rollback")
 	}
-	for _, n := range notExercisedBy(r) {
-		lines = append(lines, "  "+n)
-	}
-	return lines
+	return exercised, append(notList, notExercisedBy(r)...)
 }
 
 // notExercisedBy is the fixed list of what a pass did not exercise. With a custom probe, the

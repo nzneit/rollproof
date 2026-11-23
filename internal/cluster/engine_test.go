@@ -4,6 +4,8 @@ package cluster
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +27,28 @@ func fakeEngine(t *testing.T, body string) (script, log string) {
 		t.Fatal(err)
 	}
 	return script, log
+}
+
+// fakeEngineOnPath writes into a folder of its own an executable file named name, which appends its
+// arguments to a log in that folder and answers an image inspect with one digest, and puts that
+// folder first on the PATH, so that a test never reaches a real engine of that name, also on a
+// runner that has one. It returns the log's path.
+func fakeEngineOnPath(t *testing.T, name string) (log string) {
+	t.Helper()
+	dir := t.TempDir()
+	log = filepath.Join(dir, "log")
+	text := strings.ReplaceAll(`#!/bin/sh
+printf '%s\n' "$*" >> 'LOG'
+case "$1 $2" in
+"image inspect") printf '%s\n' '["docker.io/kindest/node@sha256:abc"]' ;;
+esac
+exit 0
+`, "LOG", log)
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
 }
 
 // engineCalls returns the lines of a fake engine's log.
@@ -140,6 +164,73 @@ func TestEngineLogsGivesTheEnginesErrorWhenTheContainerExists(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "logs rollproof-x-registry") {
 		t.Errorf("error %q, want it to name the failed call", err)
+	}
+}
+
+// nodeImageName asks Podman for the name kind's Podman provider uses, and every other engine for
+// the name as it is written.
+func TestNodeImageNameUnderEachEngine(t *testing.T) {
+	const image = "kindest/node:v1.37.0"
+	for _, c := range []struct{ binary, want string }{
+		{"podman", "docker.io/kindest/node:v1.37.0"},
+		{"docker", image},
+		{"nerdctl", image},
+		{"finch", image},
+		{"nerdctl.lima", image},
+	} {
+		if got := (Engine{Binary: c.binary}).nodeImageName(image); got != c.want {
+			t.Errorf("Engine{Binary: %q}.nodeImageName(%q) = %q, want %q", c.binary, image, got, c.want)
+		}
+	}
+}
+
+// nodeImage asks the engine for the digest by nodeImageName, and returns the name as it was written
+// with the digest after it.
+func TestNodeImageAsksTheEngineByItsName(t *testing.T) {
+	const image = "kindest/node:v1.37.0"
+	const withDigest = image + "@sha256:abc"
+	for _, c := range []struct {
+		binary string
+		asked  string // what nodeImageName gives, and so what the engine is asked for
+	}{
+		{"podman", "docker.io/kindest/node:v1.37.0"},
+		{"nerdctl", "kindest/node:v1.37.0"},
+	} {
+		log := fakeEngineOnPath(t, c.binary)
+		got, err := nodeImage(context.Background(), Engine{Binary: c.binary}, image)
+		if err != nil {
+			t.Fatalf("nodeImage(%s): %v", c.binary, err)
+		}
+		if got != withDigest {
+			t.Errorf("nodeImage(%s) = %q, want %q", c.binary, got, withDigest)
+		}
+		want := "image inspect --format {{json .RepoDigests}} " + c.asked
+		calls := engineCalls(t, log)
+		if len(calls) != 1 || calls[0] != want {
+			t.Errorf("%s was asked %q, want exactly [%q]", c.binary, calls, want)
+		}
+	}
+
+	// A name with a digest needs no look-up: it is returned as it is, and the engine is not asked.
+	const named = "kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d"
+	for _, binary := range []string{"podman", "nerdctl"} {
+		log := fakeEngineOnPath(t, binary)
+		got, err := nodeImage(context.Background(), Engine{Binary: binary}, named)
+		if err != nil {
+			t.Fatalf("nodeImage(%s): %v", binary, err)
+		}
+		if got != named {
+			t.Errorf("nodeImage(%s) = %q, want %q", binary, got, named)
+		}
+		// Only a log that does not exist says that the engine was not asked.
+		b, err := os.ReadFile(log)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			t.Errorf("the log of %s: %v", binary, err)
+		case len(b) != 0:
+			t.Errorf("%s was asked %q, want nothing for a name with a digest", binary, b)
+		}
 	}
 }
 

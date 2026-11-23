@@ -1,13 +1,70 @@
 name: rollproof proofs
 
+# The proofs that need GitHub's hosted runner. Started by hand only; one input, part, picks what a
+# dispatch runs:
+#
+#   all                         every job below except runner-user-cancel and podman-node-setting
+#   runner-files-and-timeouts   files-then-job-timeout and step-timeout: what the runner does with
+#                               env, outputs, the job summary and the cancel signal (section 14,
+#                               points 3, 4 and 20; section 10, "GitHub job summary")
+#   runner-user-cancel          user-cancel: cancels its own run, so it runs alone
+#   runner-last-value           last-value: the last of two values written for one output is kept
+#   docker-proofs              proofs: point 8 with Docker (p08-kind-library, p01-registry-order)
+#   docker-cluster-tests        cluster-tests: the tests under the build tag cluster, on Docker
+#   docker-first-fixture        first-fixture: the suite's first fixture under both Helm majors
+#   podman-node-setting         podman-node-setting: one test through rootful Podman, a try
+#
+# Every job names ubuntu-24.04: ubuntu-latest moves to Ubuntu 26.04, with another Helm major, in
+# November 2026.
+#
+# The runner jobs need no checkout. Their first step writes a throwaway composite action into the
+# workspace: ./.proof/act and two helpers, or, in last-value, ./.proof/twice alone. GitHub's runner
+# loads a ./ action only when its step runs, so an earlier step may write it. The recorder
+# (.proof/rec.py) logs every SIGINT, SIGTERM and SIGHUP with its time, its PID, PPID, PGID and SID,
+# its parent's command line, and an "alive ppid=N" line every 0.5 s: the last one dates the
+# SIGKILL, and a change of PPID dates the parent's end. At its first signal it writes verdict=fail
+# to GITHUB_OUTPUT and a marker to GITHUB_STEP_SUMMARY.
+#
+# A running step whose condition tests true again when its job is cancelled is not cancelled, and
+# neither is a job whose if: is always(). So every step that must be cancelled uses
+# `if: ${{ !cancelled() }}`, never always().
+#
+# The action.yml is written with "@{{" in place of the expression opener and fixed with sed: an
+# expression opener inside a run: text would be evaluated by this workflow itself.
+
 on:
   workflow_dispatch:
+    inputs:
+      part:
+        description: which proofs to run
+        type: choice
+        options:
+          - all
+          - runner-files-and-timeouts
+          - runner-user-cancel
+          - runner-last-value
+          - docker-proofs
+          - docker-cluster-tests
+          - docker-first-fixture
+          - podman-node-setting
+        default: all
+      window-seconds:
+        description: runner-user-cancel only, how long its always() step keeps logging after the cancel (330 measures the cancel window)
+        type: number
+        default: 20
 
 permissions:
   contents: read
 
+env:
+  WF_LEVEL: workflow        # point 3: workflow-level env must reach the composite action's inner step
+  OVERRIDE_ME: workflow     # point 3: the inner step's own env must win
+
 jobs:
+  # Point 8 with Docker: kind as a library creates the cluster through Docker, and the registry
+  # order in the nodes.
   proofs:
+    if: inputs.part == 'all' || inputs.part == 'docker-proofs'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
@@ -26,3 +83,703 @@ jobs:
         run: go run ./p08-kind-library
       - name: The registry order in the nodes, on Docker
         run: go run ./p01-registry-order
+
+  # ---------------------------------------------------------------------------------------------
+  # Points 3 and 4, the job summary and the default variables in its first steps; then point 20
+  # and point 4 under the job's timeout (a cancel from the server), with a plain step that execs
+  # the recorder. A pass:
+  #   - the last step's table (also in the job summary) is all PASS;
+  #   - the log of "a summary above 1 MiB" holds the annotation "$GITHUB_STEP_SUMMARY upload
+  #     aborted" while that step is green;
+  #   - "an unparsable output line" failed with "Unable to process file command 'output'
+  #     successfully.";
+  #   - sig-jt-plain-exec.log: SIGINT at T, SIGTERM at T+7.5 s, last "alive" at about T+10 s, and a
+  #     parent line that names Runner.Worker (the recorder was the step's first process);
+  #   - the run page renders the table, fenced code, <details> and raw HTML of "masking and
+  #     Markdown" (a person looks), with S6SECRETVALUE shown as ***.
+  # If "jt" has not started before the timeout, raise timeout-minutes to 2 (one more billed minute).
+  # ---------------------------------------------------------------------------------------------
+  files-then-job-timeout:
+    if: inputs.part == 'all' || inputs.part == 'runner-files-and-timeouts'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    env:
+      JOB_LEVEL: job               # point 3: job-level env must reach the inner step
+    steps:
+      - &setup
+        name: write the throwaway action and helpers
+        shell: bash
+        run: |
+          mkdir -p .proof/act
+          cat > .proof/act/action.yml <<'YAML'
+          name: proof-s6
+          description: throwaway composite action for the step 6 proofs
+          inputs:
+            mode:
+              description: env, fail or record
+              default: env
+            label:
+              description: name of the recorder's log
+              default: composite
+          outputs:
+            verdict:
+              description: written by the inner step
+              value: @{{ steps.inner.outputs.verdict }}
+            ref-in-env:
+              description: github.action_ref seen through an inner env entry (null for a ./ action)
+              value: @{{ steps.dump.outputs.ref_in_env }}
+          runs:
+            using: composite
+            steps:
+              - id: dump
+                if: inputs.mode == 'env'
+                shell: bash
+                env:
+                  OVERRIDE_ME: inner-wins
+                  EXPR_PREVIOUS_VERSION: @{{ env.PREVIOUS_VERSION }}
+                  EXPR_JOB_LEVEL: @{{ env.JOB_LEVEL }}
+                  REF_IN_ENV: @{{ github.action_ref }}
+                run: |
+                  bash "$GITHUB_WORKSPACE/.proof/dump.sh" > "$GITHUB_WORKSPACE/q1-composite.txt"
+                  echo "ref_in_env=$REF_IN_ENV" >> "$GITHUB_OUTPUT"
+                  echo "S6-INNER-ENV summary marker" >> "$GITHUB_STEP_SUMMARY"
+              - id: inner
+                if: inputs.mode != 'env'
+                shell: bash
+                env:
+                  MODE: @{{ inputs.mode }}
+                  LABEL: @{{ inputs.label }}
+                run: |
+                  if [ "$MODE" = fail ]; then
+                    echo "verdict=fail" >> "$GITHUB_OUTPUT"
+                    echo "S6-COMPOSITE-FAIL summary marker" >> "$GITHUB_STEP_SUMMARY"
+                    exit 1
+                  fi
+                  exec python3 "$GITHUB_WORKSPACE/.proof/rec.py" "$LABEL" 150
+          YAML
+          D='$'
+          sed -i "s/@{{/${D}{{/g" .proof/act/action.yml
+
+          cat > .proof/dump.sh <<'SH'
+          for v in PREVIOUS_VERSION JOB_LEVEL WF_LEVEL OVERRIDE_ME EXPR_PREVIOUS_VERSION EXPR_JOB_LEVEL \
+                   GITHUB_ACTIONS CI GITHUB_OUTPUT GITHUB_STEP_SUMMARY RUNNER_TEMP RUNNER_OS RUNNER_ARCH \
+                   GITHUB_ACTION_PATH GITHUB_ACTION_REF INPUT_MODE GITHUB_WORKSPACE; do
+            printf '%s=%s\n' "$v" "${!v-<unset>}"
+          done
+          SH
+
+          cat > .proof/rec.py <<'PY'
+          import os, signal, sys, time
+          label = sys.argv[1]
+          deadline = float(sys.argv[2]) if len(sys.argv) > 2 else 150.0
+          path = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "sig-%s.log" % label)
+          fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+          t0 = time.monotonic()
+
+          def w(msg):
+              os.write(fd, ("%.3f +%.3f %s\n" % (time.time(), time.monotonic() - t0, msg)).encode())
+
+          def cmdline(pid):
+              try:
+                  with open("/proc/%d/cmdline" % pid, "rb") as f:
+                      return f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+              except OSError as e:
+                  return "?(%s)" % e
+
+          w("start pid=%d ppid=%d pgid=%d sid=%d" % (os.getpid(), os.getppid(), os.getpgid(0), os.getsid(0)))
+          w("self: " + cmdline(os.getpid()))
+          w("parent: " + cmdline(os.getppid()))
+          first = [True]
+
+          def on_signal(signum, frame):
+              w("signal %s" % signal.Signals(signum).name)
+              if first[0]:
+                  first[0] = False
+                  for var, text in (("GITHUB_OUTPUT", "verdict=fail\n"),
+                                    ("GITHUB_STEP_SUMMARY", "S6-SIGNAL-SUMMARY %s\n" % label)):
+                      p = os.environ.get(var)
+                      if p:
+                          with open(p, "a") as f:
+                              f.write(text)
+                  w("wrote verdict and summary marker")
+
+          for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+              signal.signal(s, on_signal)
+          print("recorder %s started, log %s" % (label, path), flush=True)
+          while time.monotonic() - t0 < deadline:
+              w("alive ppid=%d" % os.getppid())
+              time.sleep(0.5)
+          w("deadline reached, exit 0")
+          PY
+          echo "setup done at $(date +%s.%N)"
+
+      # Point 3, and the default variables: the step's env, the job's and the workflow's reach the
+      # inner run step; the inner env wins; env expressions in action.yml see them. The caller's
+      # GITHUB_* and RUNNER_* entries are ignored; CI is taken.
+      - name: env into a composite action
+        id: q1
+        uses: ./.proof/act
+        with:
+          mode: env
+        env:
+          PREVIOUS_VERSION: 1.4.2
+          OVERRIDE_ME: caller
+          CI: from-caller
+          GITHUB_ACTIONS: "false"
+          RUNNER_TEMP: /tmp/hijacked-temp
+          GITHUB_STEP_SUMMARY: /tmp/hijacked-summary
+
+      # Point 4: a plain step writes outputs (plain and multi-line form) and a summary, then exits 1.
+      - name: a plain step fails after writing outputs
+        id: plain
+        shell: bash
+        run: |
+          echo "verdict=fail" >> "$GITHUB_OUTPUT"
+          { echo 'multi<<S6EOF'; printf 'line one\nline two\n'; echo 'S6EOF'; } >> "$GITHUB_OUTPUT"
+          echo "S6-PLAIN-FAIL summary marker" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      # Point 4: the same inside a composite action, whose outputs map the inner output.
+      - name: a composite action's inner step fails after writing outputs
+        id: comp
+        if: ${{ !cancelled() }}
+        uses: ./.proof/act
+        with:
+          mode: fail
+
+      # Point 4: the process that writes the file replaced the shell with exec.
+      - name: an exec'd program writes the output
+        id: execd
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          exec python3 -c 'import os, sys; open(os.environ["GITHUB_OUTPUT"], "a").write("verdict=fail-exec\n"); sys.exit(1)'
+
+      # Point 4: a good line, an unparsable line, a good line; the step itself exits 0.
+      - name: an unparsable output line
+        id: bad
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: printf 'good=1\nthis line has no separator\nafter=2\n' >> "$GITHUB_OUTPUT"
+
+      # The job summary: masking and Markdown; the step records its own summary path.
+      - name: masking and Markdown
+        id: mask
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          echo "::add-mask::S6SECRETVALUE"
+          {
+            echo '### S6-MARKDOWN sample'
+            echo '| a | b |'
+            echo '| --- | --- |'
+            echo '| 1 | 2 |'
+            echo
+            echo '```text'
+            echo 'fenced code'
+            echo '```'
+            echo
+            echo '<details><summary>S6 details</summary>'
+            echo
+            echo 'hidden text'
+            echo
+            echo '</details>'
+            echo
+            echo '<sub>raw html sub</sub> <kbd>kbd</kbd>'
+            echo
+            echo 'masked value: S6SECRETVALUE'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "path=$GITHUB_STEP_SUMMARY" >> "$GITHUB_OUTPUT"
+
+      # The job summary above 1 MiB: an error annotation, nothing uploaded, the step stays green.
+      - name: a summary above 1 MiB
+        id: big
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: head -c 1048577 /dev/zero | tr '\0' 'a' >> "$GITHUB_STEP_SUMMARY"
+
+      # The job summary: every step starts with a new empty file.
+      - name: a new empty summary file
+        id: empty
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          if [ -s "$GITHUB_STEP_SUMMARY" ]; then echo "empty=no" >> "$GITHUB_OUTPUT"; else echo "empty=yes" >> "$GITHUB_OUTPUT"; fi
+          echo "path=$GITHUB_STEP_SUMMARY" >> "$GITHUB_OUTPUT"
+
+      # Points 20 and 4, and the summary: the job's timeout (timeout-minutes: 1) cancels this step.
+      # The recorder is the step's first process (exec). It must not be always().
+      - name: a plain exec'd step under the job's timeout
+        id: jt
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: exec python3 "$GITHUB_WORKSPACE/.proof/rec.py" jt-plain-exec 150
+
+      - name: cancelled() runs after the job's timeout
+        if: cancelled()
+        shell: bash
+        run: echo "cancelled() step ran at $(date +%s.%N)"
+
+      # The job summary: the files of earlier steps are still on disk, raw and -scrubbed.
+      - name: read back earlier summaries
+        id: readback
+        if: always()
+        shell: bash
+        env:
+          MASK_PATH: ${{ steps.mask.outputs.path }}
+        run: |
+          date +%s.%N
+          d="$RUNNER_TEMP/_runner_file_commands"
+          ls -la "$d"
+          raw() { grep -l -- "$1" "$d"/step_summary_* 2>/dev/null | grep -v -- '-scrubbed$' | wc -l; }
+          scrubbed() { grep -l -- "$1" "$d"/step_summary_*-scrubbed 2>/dev/null | wc -l; }
+          {
+            echo "plain_raw=$(raw S6-PLAIN-FAIL)"
+            echo "plain_scrubbed=$(scrubbed S6-PLAIN-FAIL)"
+            echo "comp_raw=$(raw S6-COMPOSITE-FAIL)"
+            echo "inner_env_raw=$(raw S6-INNER-ENV)"
+            echo "jt_raw=$(raw 'S6-SIGNAL-SUMMARY jt-plain-exec')"
+            echo "jt_scrubbed=$(scrubbed 'S6-SIGNAL-SUMMARY jt-plain-exec')"
+            echo "mask_raw=$(grep -c S6SECRETVALUE "$MASK_PATH" || true)"
+            echo "mask_scrubbed=$(grep -c S6SECRETVALUE "$MASK_PATH-scrubbed" || true)"
+            echo "mask_stars=$(grep -c -F '***' "$MASK_PATH-scrubbed" || true)"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: assert and print
+        if: always()
+        shell: bash
+        env:
+          PLAIN_VERDICT: ${{ steps.plain.outputs.verdict }}
+          PLAIN_MULTI: ${{ steps.plain.outputs.multi }}
+          PLAIN_OUTCOME: ${{ steps.plain.outcome }}
+          COMP_VERDICT: ${{ steps.comp.outputs.verdict }}
+          COMP_OUTCOME: ${{ steps.comp.outcome }}
+          EXECD_VERDICT: ${{ steps.execd.outputs.verdict }}
+          BAD_GOOD: ${{ steps.bad.outputs.good }}
+          BAD_AFTER: ${{ steps.bad.outputs.after }}
+          BAD_OUTCOME: ${{ steps.bad.outcome }}
+          BIG_OUTCOME: ${{ steps.big.outcome }}
+          EMPTY: ${{ steps.empty.outputs.empty }}
+          EMPTY_PATH: ${{ steps.empty.outputs.path }}
+          MASK_PATH: ${{ steps.mask.outputs.path }}
+          JT_VERDICT: ${{ steps.jt.outputs.verdict }}
+          JT_OUTCOME: ${{ steps.jt.outcome }}
+          Q1_REF_IN_ENV: ${{ steps.q1.outputs.ref-in-env }}
+          RB_PLAIN_RAW: ${{ steps.readback.outputs.plain_raw }}
+          RB_PLAIN_SCRUBBED: ${{ steps.readback.outputs.plain_scrubbed }}
+          RB_COMP_RAW: ${{ steps.readback.outputs.comp_raw }}
+          RB_INNER_ENV_RAW: ${{ steps.readback.outputs.inner_env_raw }}
+          RB_JT_RAW: ${{ steps.readback.outputs.jt_raw }}
+          RB_JT_SCRUBBED: ${{ steps.readback.outputs.jt_scrubbed }}
+          RB_MASK_RAW: ${{ steps.readback.outputs.mask_raw }}
+          RB_MASK_SCRUBBED: ${{ steps.readback.outputs.mask_scrubbed }}
+          RB_MASK_STARS: ${{ steps.readback.outputs.mask_stars }}
+        run: |
+          fails=0
+          q1() { grep -m1 "^$1=" q1-composite.txt | cut -d= -f2-; }
+          check() {  # topic, what, expected, actual
+            if [ "$3" = "$4" ]; then r=PASS; else r=FAIL; fails=$((fails+1)); fi
+            printf '| %s | %s | %s | `%s` | `%s` |\n' "$r" "$1" "$2" "$3" "$4" | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+          printf '| result | topic | what | expected | actual |\n| --- | --- | --- | --- | --- |\n' | tee -a "$GITHUB_STEP_SUMMARY"
+          check env 'step env reaches inner run step'          1.4.2      "$(q1 PREVIOUS_VERSION)"
+          check env 'job env reaches inner run step'           job        "$(q1 JOB_LEVEL)"
+          check env 'workflow env reaches inner run step'      workflow   "$(q1 WF_LEVEL)"
+          check env 'inner env wins'                           inner-wins "$(q1 OVERRIDE_ME)"
+          check env 'env expression sees step env'             1.4.2      "$(q1 EXPR_PREVIOUS_VERSION)"
+          check env 'env expression sees job env'              job        "$(q1 EXPR_JOB_LEVEL)"
+          check variables 'GITHUB_ACTIONS not overridable'     true       "$(q1 GITHUB_ACTIONS)"
+          check variables 'CI overridable'                     from-caller "$(q1 CI)"
+          check variables 'RUNNER_TEMP not overridable'        "$RUNNER_TEMP" "$(q1 RUNNER_TEMP)"
+          s=$(q1 GITHUB_STEP_SUMMARY); case "$s" in "$RUNNER_TEMP"/_runner_file_commands/step_summary_*) s=runner-path ;; esac
+          check variables 'GITHUB_STEP_SUMMARY not overridable' runner-path "$s"
+          check variables 'no INPUT_ variables in composite'   '<unset>'  "$(q1 INPUT_MODE)"
+          check outputs 'plain output kept after exit 1'       fail       "$PLAIN_VERDICT"
+          check outputs 'multi-line output (newline shown as \n)' 'line one\nline two' "${PLAIN_MULTI//$'\n'/\\n}"
+          check outputs 'plain step outcome'                   failure    "$PLAIN_OUTCOME"
+          check outputs 'composite output after inner exit 1'  fail       "$COMP_VERDICT"
+          check outputs 'composite step outcome'               failure    "$COMP_OUTCOME"
+          check outputs 'output written by an exec program'    fail-exec  "$EXECD_VERDICT"
+          check outputs 'line before the bad one kept'         1          "$BAD_GOOD"
+          check outputs 'line after the bad one lost'          ''         "$BAD_AFTER"
+          check outputs 'bad line fails the step'              failure    "$BAD_OUTCOME"
+          check summary 'over 1 MiB keeps the step green'      success    "$BIG_OUTCOME"
+          check summary 'each step starts with an empty file'  yes        "$EMPTY"
+          [ "$EMPTY_PATH" != "$MASK_PATH" ] && np=new || np=same
+          check summary 'each step gets a new file'            new        "$np"
+          check summary 'plain summary on disk later'          1          "$RB_PLAIN_RAW"
+          check summary 'plain summary masked copy on disk'    1          "$RB_PLAIN_SCRUBBED"
+          check summary 'composite inner summary on disk'      1          "$RB_COMP_RAW"
+          check summary 'composite env-step summary on disk'   1          "$RB_INNER_ENV_RAW"
+          check summary 'raw file holds the secret'            1          "$RB_MASK_RAW"
+          check summary 'masked copy hides the secret'         0          "$RB_MASK_SCRUBBED"
+          check summary 'masked copy has ***'                  1          "$RB_MASK_STARS"
+          check outputs 'output of a cancelled plain step'     fail       "$JT_VERDICT"
+          check signal 'job timeout cancels the step'          cancelled  "$JT_OUTCOME"
+          check summary 'summary of a cancelled step on disk'  1          "$RB_JT_RAW"
+          check summary 'summary of a cancelled step processed (masked copy)' 1 "$RB_JT_SCRUBBED"
+          echo; echo "printed, no assertion: ref seen through inner env for a ./ action: '$Q1_REF_IN_ENV' (null expected)"
+          echo "== q1-composite.txt"; cat q1-composite.txt || true
+          for f in sig-*.log; do echo "== $f"; awk '$3 != "alive"' "$f"; echo "first alive: $(awk '$3 == "alive"' "$f" | head -n1)"; echo "last alive:  $(awk '$3 == "alive"' "$f" | tail -n1)"; done
+          echo "failed checks: $fails"
+          exit "$fails"
+
+  # ---------------------------------------------------------------------------------------------
+  # Point 20 under the runner's own step timeout:
+  #   - "stchild": no exec; bash is the step's first process and the recorder its child. A pass:
+  #     sig-st-child.log has no signal line; its parent line is the exact shell command line,
+  #     "/usr/bin/bash --noprofile --norc -e -o pipefail /home/runner/work/_temp/<guid>.sh"; its
+  #     "alive ppid=" changes about 7.5 to 10 s after the timeout (bash ended); and alive lines go on
+  #     after the step ended (the child outlived the step).
+  #   - "stcomp": timeout-minutes on the uses: step; the inner step execs the recorder. A pass:
+  #     SIGINT at T, SIGTERM at T+7.5 s, last alive at about T+10 s; verdict fail and outcome
+  #     failure (point 4 for a composite); the marker "S6-SIGNAL-SUMMARY st-composite" on disk.
+  # ---------------------------------------------------------------------------------------------
+  step-timeout:
+    if: inputs.part == 'all' || inputs.part == 'runner-files-and-timeouts'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - *setup
+
+      - name: a child without exec, under a step timeout
+        id: stchild
+        timeout-minutes: 1
+        shell: bash
+        run: python3 "$GITHUB_WORKSPACE/.proof/rec.py" st-child 150
+
+      - name: a composite action's inner exec, under a step timeout on the uses step
+        id: stcomp
+        if: ${{ !cancelled() }}
+        timeout-minutes: 1
+        uses: ./.proof/act
+        with:
+          mode: record
+          label: st-composite
+
+      - name: print
+        if: always()
+        shell: bash
+        env:
+          STCHILD_OUTCOME: ${{ steps.stchild.outcome }}
+          STCOMP_OUTCOME: ${{ steps.stcomp.outcome }}
+          STCOMP_VERDICT: ${{ steps.stcomp.outputs.verdict }}
+        run: |
+          echo "print started at $(date +%s.%N)"
+          echo "stchild outcome=$STCHILD_OUTCOME (failure expected)"
+          echo "stcomp outcome=$STCOMP_OUTCOME (failure expected) verdict=$STCOMP_VERDICT (fail expected)"
+          for f in sig-*.log; do
+            echo "== $f"; awk '$3 != "alive"' "$f"
+            echo "first alive: $(awk '$3 == "alive"' "$f" | head -n1)"
+            echo "last alive:  $(awk '$3 == "alive"' "$f" | tail -n1)"
+            echo "ppid changes:"; awk '$3 == "alive" {print $4}' "$f" | uniq -c
+          done
+          d="$RUNNER_TEMP/_runner_file_commands"
+          ls -la "$d"
+          grep -l 'S6-SIGNAL-SUMMARY st-composite' "$d"/step_summary_* || echo "marker not found"
+
+  # ---------------------------------------------------------------------------------------------
+  # Point 20 for a user's cancel (through the API, as the Cancel button does) on the action's real
+  # shape, a composite action whose inner step execs the program; point 4 and the summary after
+  # it; and that cancelled() and always() steps run afterwards, and for how long. A pass:
+  #   - sig-uc-composite.log: SIGINT at T, about 25 s after "armed"; SIGTERM at T+7.5 s; last
+  #     alive at about T+10 s; a parent line that names Runner.Worker;
+  #   - verdict fail and outcome cancelled; "cancelled() step ran" printed; the logs printed;
+  #   - with window-seconds=330, the last "still running at" line dates the worker's end: about
+  #     4 min 45 s after the cancel (a cancel timeout of 5 min, less 15 s), or the server's 5 min.
+  # It cancels its own run, so it runs only as part=runner-user-cancel. Its if: is not always(),
+  # so the cancel reaches it.
+  # ---------------------------------------------------------------------------------------------
+  user-cancel:
+    if: inputs.part == 'runner-user-cancel'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    permissions:
+      actions: write     # gh run cancel
+      contents: read
+    steps:
+      - *setup
+
+      - name: arm the canceller (gh run cancel in 25 s)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          nohup bash -c 'sleep 25; echo "cancel sent at $(date +%s.%N)"; gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"' > canceller.log 2>&1 < /dev/null &
+          echo "armed at $(date +%s.%N)"
+
+      - name: a composite action's inner exec, under a user's cancel
+        id: uc
+        uses: ./.proof/act
+        with:
+          mode: record
+          label: uc-composite
+
+      - name: cancelled() step
+        if: cancelled()
+        shell: bash
+        run: echo "cancelled() step ran at $(date +%s.%N)"
+
+      - name: always() step, then the cancel window
+        if: always()
+        shell: bash
+        env:
+          UC_VERDICT: ${{ steps.uc.outputs.verdict }}
+          UC_OUTCOME: ${{ steps.uc.outcome }}
+          WINDOW: ${{ inputs.window-seconds }}
+        run: |
+          echo "always() step started at $(date +%s.%N)"
+          echo "uc outcome=$UC_OUTCOME (cancelled expected) verdict=$UC_VERDICT (fail expected)"
+          cat canceller.log || true
+          for f in sig-*.log; do echo "== $f"; awk '$3 != "alive"' "$f"; echo "last alive: $(awk '$3 == "alive"' "$f" | tail -n1)"; done
+          d="$RUNNER_TEMP/_runner_file_commands"
+          ls -la "$d"
+          grep -l 'S6-SIGNAL-SUMMARY uc-composite' "$d"/step_summary_* || echo "marker not found"
+          end=$(( $(date +%s) + WINDOW ))
+          while [ "$(date +%s)" -lt "$end" ]; do echo "still running at $(date +%s)"; sleep 15; done
+
+  # ---------------------------------------------------------------------------------------------
+  # Point 4, one more fact: when a step writes two values for one output, the runner keeps the
+  # last. The tool writes verdict when it starts and again when it ends (section 8), so the
+  # verdict that a caller reads rests on it. Tried in the plain form (NAME=VALUE), in the
+  # delimiter form (NAME<<DELIMITER), in both orders of the two, and through a composite action's
+  # outputs: once ending well, and once with a second value of fail and exit 1 under
+  # continue-on-error, which is the shape of the action's own test. A pass: the last step's table
+  # is all PASS.
+  # ---------------------------------------------------------------------------------------------
+  last-value:
+    if: inputs.part == 'all' || inputs.part == 'runner-last-value'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: write a throwaway action that writes one output twice
+        shell: bash
+        run: |
+          mkdir -p .proof/twice
+          cat > .proof/twice/action.yml <<'YAML'
+          name: proof-twice
+          description: throwaway composite action that writes one output twice
+          inputs:
+            end:
+              description: the second value of verdict, pass or fail; fail also exits 1
+              default: pass
+          outputs:
+            verdict:
+              description: written twice by the inner step
+              value: @{{ steps.inner.outputs.verdict }}
+            out:
+              description: written once, before the two
+              value: @{{ steps.inner.outputs.out }}
+          runs:
+            using: composite
+            steps:
+              - id: inner
+                shell: bash
+                env:
+                  END: @{{ inputs.end }}
+                run: |
+                  put() { printf '%s<<S6DELIM\n%s\nS6DELIM\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
+                  put out /tmp/results
+                  put verdict not-verified
+                  put verdict "$END"
+                  if [ "$END" = fail ]; then exit 1; fi
+          YAML
+          D='$'
+          sed -i "s/@{{/${D}{{/g" .proof/twice/action.yml
+
+      - name: the plain form, twice
+        id: plain
+        shell: bash
+        run: |
+          echo "verdict=not-verified" >> "$GITHUB_OUTPUT"
+          echo "verdict=pass" >> "$GITHUB_OUTPUT"
+
+      - name: the delimiter form, twice
+        id: delim
+        shell: bash
+        run: |
+          put() { printf '%s<<S6DELIM\n%s\nS6DELIM\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
+          put verdict not-verified
+          put verdict pass
+
+      - name: one form, then the other
+        id: mixed
+        shell: bash
+        run: |
+          put() { printf '%s<<S6DELIM\n%s\nS6DELIM\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
+          put a not-verified
+          echo "a=pass" >> "$GITHUB_OUTPUT"
+          echo "b=not-verified" >> "$GITHUB_OUTPUT"
+          put b pass
+
+      - name: through a composite action, ending well
+        id: comp_pass
+        uses: ./.proof/twice
+
+      - name: through a composite action, the second value fail and exit 1
+        id: comp_fail
+        continue-on-error: true
+        uses: ./.proof/twice
+        with:
+          end: fail
+
+      - name: assert and print
+        if: always()
+        shell: bash
+        env:
+          PLAIN: ${{ steps.plain.outputs.verdict }}
+          DELIM: ${{ steps.delim.outputs.verdict }}
+          MIXED_A: ${{ steps.mixed.outputs.a }}
+          MIXED_B: ${{ steps.mixed.outputs.b }}
+          COMP_PASS: ${{ steps.comp_pass.outputs.verdict }}
+          COMP_PASS_OUT: ${{ steps.comp_pass.outputs.out }}
+          COMP_FAIL: ${{ steps.comp_fail.outputs.verdict }}
+          COMP_FAIL_OUT: ${{ steps.comp_fail.outputs.out }}
+          COMP_FAIL_OUTCOME: ${{ steps.comp_fail.outcome }}
+          COMP_FAIL_CONCLUSION: ${{ steps.comp_fail.conclusion }}
+        run: |
+          fails=0
+          check() {  # what, expected, actual
+            if [ "$2" = "$3" ]; then r=PASS; else r=FAIL; fails=$((fails+1)); fi
+            printf '| %s | %s | `%s` | `%s` |\n' "$r" "$1" "$2" "$3" | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+          printf '| result | what | expected | actual |\n| --- | --- | --- | --- |\n' | tee -a "$GITHUB_STEP_SUMMARY"
+          check 'plain form twice: the last value'                    pass         "$PLAIN"
+          check 'delimiter form twice: the last value'                pass         "$DELIM"
+          check 'delimiter form, then plain: the last value'          pass         "$MIXED_A"
+          check 'plain form, then delimiter: the last value'          pass         "$MIXED_B"
+          check 'composite action, ending well: the last value'       pass         "$COMP_PASS"
+          check 'composite action, ending well: the other output'     /tmp/results "$COMP_PASS_OUT"
+          check 'composite action, exit 1: the last value'            fail         "$COMP_FAIL"
+          check 'composite action, exit 1: the other output'          /tmp/results "$COMP_FAIL_OUT"
+          check 'composite action, exit 1: outcome'                   failure      "$COMP_FAIL_OUTCOME"
+          check 'composite action, exit 1: conclusion under continue-on-error' success "$COMP_FAIL_CONCLUSION"
+          echo "failed checks: $fails"
+          exit "$fails"
+
+  # ---------------------------------------------------------------------------------------------
+  # The tests under the build tag cluster, on the runner's Docker: internal/cluster,
+  # internal/images, internal/probe and internal/watch. They need an engine that runs privileged
+  # containers, go on the PATH (the images tests build a small program, and the engine builds an
+  # image FROM scratch), and network access for the node, registry and pause images; no Helm, no
+  # kubectl, nothing under .tools/. CGO_ENABLED=0 because the tool's runner check, and the probe
+  # tests, refuse a test binary that is not statically linked.
+  # This job is the proof of two open facts on Docker:
+  #   - the 5 s node setting (section 14, point 24): TestCreateAndDelete reads
+  #     net.netfilter.nf_conntrack_tcp_timeout_syn_sent in every node;
+  #   - the engine's save format (docs/proofs/README.md, "Still unproved"): the images tests store
+  #     an archive that docker save wrote.
+  # go test's -timeout applies to each package's test binary; the longest, internal/cluster, makes
+  # seven clusters.
+  # ---------------------------------------------------------------------------------------------
+  cluster-tests:
+    if: inputs.part == 'all' || inputs.part == 'docker-cluster-tests'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: projects/rollproof
+    env:
+      CGO_ENABLED: "0"
+      KIND_EXPERIMENTAL_PROVIDER: docker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27"
+          cache-dependency-path: projects/rollproof/go.sum
+      - name: The cluster tests, on Docker
+        run: go test -tags cluster -p 1 -count=1 -v -timeout 35m ./internal/cluster/ ./internal/images/ ./internal/probe/ ./internal/watch/
+
+  # ---------------------------------------------------------------------------------------------
+  # The suite's first fixture under Helm 3 and Helm 4, on Docker (section 14, point 5, and the
+  # first run of the suite on Docker). The harness needs the engine, the Helm binaries and kubectl
+  # under .tools/ (fetchhelm), and pulls busybox and builds the fixture images itself. The pattern
+  # selects TestFirstFixture alone, with its two subtests helm-3 and helm-4. Each fixture run has
+  # its own 15 min limit in the harness. On a failure the results folder that the harness keeps,
+  # rollproof-e2e-results under the system's temporary folder, is uploaded for 3 days.
+  # ---------------------------------------------------------------------------------------------
+  first-fixture:
+    if: inputs.part == 'all' || inputs.part == 'docker-first-fixture'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    defaults:
+      run:
+        shell: bash
+        working-directory: projects/rollproof
+    env:
+      CGO_ENABLED: "0"
+      KIND_EXPERIMENTAL_PROVIDER: docker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27"
+          cache-dependency-path: projects/rollproof/go.sum
+      - name: Helm and kubectl
+        run: go run ./hack/fetchhelm
+      - name: The first fixture under both Helm majors
+        run: go test -tags e2e -p 1 -count=1 ./e2e/ -run '^TestFirstFixture$' -v -timeout 40m
+      - name: Where the harness keeps the results
+        id: results
+        if: failure()
+        run: echo "dir=${TMPDIR:-/tmp}/rollproof-e2e-results" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: first-fixture-results
+          path: ${{ steps.results.outputs.dir }}
+          retention-days: 3
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------------------------
+  # A try, not a proof that anyone will chase: TestCreateAndDelete through rootful Podman, for the
+  # 5 s node setting under Podman (section 14, point 24). The test runs as root with this user's
+  # PATH and Go settings, and a build cache of its own so that root writes nothing into this
+  # user's cache. KIND_EXPERIMENTAL_PROVIDER=podman picks the engine. The image's registries.conf
+  # lists two search registries; the alias names the registry of kind's node image's short name
+  # (kindest/node), by which the tool pulled it when this job was written. The tool, as kind's
+  # Podman provider does, now asks Podman for docker.io/kindest/node (podmanName), so the alias is
+  # no longer needed and stays harmless (step 6 plan, decision 22).
+  # ---------------------------------------------------------------------------------------------
+  podman-node-setting:
+    if: inputs.part == 'podman-node-setting'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+        working-directory: projects/rollproof
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27"
+          cache-dependency-path: projects/rollproof/go.sum
+      - name: The modules, as this user
+        run: go mod download
+      - name: Rootful Podman, and an alias for kind's node image
+        run: |
+          sudo podman version
+          sudo podman info
+          sudo mkdir -p /etc/containers/registries.conf.d
+          printf '[aliases]\n"kindest/node" = "docker.io/kindest/node"\n' | sudo tee /etc/containers/registries.conf.d/99-rollproof-kind-node.conf
+      - name: TestCreateAndDelete as root, through Podman
+        run: |
+          sudo env "PATH=$PATH" "GOPATH=$(go env GOPATH)" "GOMODCACHE=$(go env GOMODCACHE)" \
+            "GOCACHE=$RUNNER_TEMP/go-build-root" "GOTOOLCHAIN=$(go env GOTOOLCHAIN)" \
+            CGO_ENABLED=0 KIND_EXPERIMENTAL_PROVIDER=podman \
+            go test -tags cluster -p 1 -count=1 -run '^TestCreateAndDelete$' -v -timeout 25m ./internal/cluster/
+      - name: What Podman holds after a failure
+        if: failure()
+        run: |
+          sudo podman ps -a
+          sudo podman network ls
+          sudo podman images

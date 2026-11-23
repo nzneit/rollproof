@@ -38,6 +38,10 @@ var root = func() string {
 // engine is the container engine's command name, chosen in TestMain.
 var engine string
 
+// majors is the Helm binaries under .tools/ that the fixtures run under, set by TestMain from
+// helmMajors(os.Getenv(helmVar)).
+var majors []string
+
 // busyboxRef is busybox 1.37.0 by the digest of its tag's index, the image of the TCP loop.
 // Measured on 2026-11-19 with
 //
@@ -57,17 +61,24 @@ var archives = map[string]string{"busybox": busyboxArchive}
 // an archive under it.
 var archiveDigests = map[string]string{}
 
-// TestMain picks the engine, checks the Helm binaries and kubectl, builds the binary, the two
-// fixture images and the fixture probe's image once, saves the fixture images as archives into a
-// temporary folder that it removes after the tests, fetches busybox's archive when .tools/ does
-// not hold it, and then runs the tests. A failure prints the command and its output to standard
-// error and exits 1.
+// TestMain sets majors from ROLLPROOF_E2E_HELM, picks the engine, checks the Helm binaries and
+// kubectl, builds the binary, the two fixture images and the fixture probe's image once, saves the
+// fixture images as archives into a temporary folder that it removes after the tests, fetches
+// busybox's archive when .tools/ does not hold it, and then runs the tests. A failure prints the
+// command and its output to standard error and exits 1.
 func TestMain(m *testing.M) {
+	var err error
+	if majors, err = helmMajors(os.Getenv(helmVar)); err != nil {
+		fmt.Fprintln(os.Stderr, "e2e:", err)
+		os.Exit(1)
+	}
 	engine = pickEngine()
 	if engine == "" {
 		fmt.Fprintln(os.Stderr, "e2e: no container engine: set KIND_EXPERIMENTAL_PROVIDER, or install docker, nerdctl or podman")
 		os.Exit(1)
 	}
+	// Both, whatever ROLLPROOF_E2E_HELM selects: the fourteenth row's control runs under Helm 3 in
+	// every run of the suite.
 	for _, helm := range []string{"helm-3", "helm-4"} {
 		if fi, err := os.Stat(filepath.Join(root, ".tools", helm, "helm")); err != nil || !fi.Mode().IsRegular() {
 			fmt.Fprintln(os.Stderr, "the Helm binaries are missing under .tools/; run: go run ./hack/fetchhelm")
@@ -299,8 +310,11 @@ func expect(t *testing.T, got, want result) {
 // they apply. While the tool runs, it calls the fixture's action, if any, with
 // the window marks, and fails the test when the run ended before the action
 // reported done. It keeps the tool's standard output in the results folder as
-// console.txt and its standard error as stderr.txt. TestMain builds the
-// binary and the images once for the whole test run.
+// console.txt and its standard error as stderr.txt. It checks the lines for
+// GitHub's workflow commands in both streams by the run's own GITHUB_ACTIONS
+// (workflowCommandFaults). TestMain builds the binary and the images once for
+// the whole test run. The tool never sees the job's GITHUB_OUTPUT or
+// GITHUB_STEP_SUMMARY; a fixture with github gets files of its own.
 func runFixture(t *testing.T, f fixture) result {
 	t.Helper()
 	out := outDir(t)
@@ -310,11 +324,31 @@ func runFixture(t *testing.T, f fixture) result {
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		t.Fatalf("%s: the results folder %s: %v", f.name, out, err)
 	}
+	// The tool appends to GitHub's files and never makes them, as on GitHub's runner, so a run with
+	// files of its own gets them empty before it starts.
+	var gh *githubFiles
+	if f.github {
+		gh = &githubFiles{filepath.Join(out, "github-output"), filepath.Join(out, "github-summary")}
+		for _, path := range []string{gh.output, gh.summary} {
+			if err := os.WriteFile(path, nil, 0o644); err != nil {
+				t.Fatalf("%s: %v", f.name, err)
+			}
+		}
+	}
 	t.Cleanup(func() {
 		if !t.Failed() {
 			return
 		}
 		t.Logf("%s: the results folder is %s", f.name, out)
+		// A command that failed, was stopped or has not ended: what it printed is in its
+		// evidence, which a hosted run whose job uploads nothing keeps nowhere else.
+		logs, err := failedCommands(filepath.Join(out, "evidence", "commands"), 40)
+		if err != nil {
+			t.Logf("%s: evidence/commands: %v", f.name, err)
+		}
+		for _, c := range logs {
+			t.Logf("%s: the last %d lines of evidence/commands/%s:\n%s", f.name, len(c.lines), c.name, strings.Join(c.lines, "\n"))
+		}
 		b, err := os.ReadFile(filepath.Join(out, "evidence", "probe.log"))
 		if err != nil {
 			t.Logf("%s: evidence/probe.log: %v", f.name, err)
@@ -345,7 +379,7 @@ func runFixture(t *testing.T, f fixture) result {
 			t.Fatalf("%s: the %s link: %v", f.name, name, err)
 		}
 	}
-	env := helmEnv(helmDir)
+	env := runEnv(os.Environ(), helmDir, gh)
 	if f.commands != nil {
 		renderManifests(t, f, filepath.Dir(file), env)
 	}
@@ -359,6 +393,8 @@ func runFixture(t *testing.T, f fixture) result {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// A child of the tool that still holds a pipe would keep Wait blocked past the context's limit.
+	cmd.WaitDelay = 10 * time.Second
 	// While SIGINT is handled here, the tool starts with SIGINT at its default action, also when
 	// go test was started with SIGINT ignored.
 	c := make(chan os.Signal, 1)
@@ -377,6 +413,11 @@ func runFixture(t *testing.T, f fixture) result {
 	go func() { ended <- cmd.Wait() }()
 	acted, actErr := act(f, newRunning(cmd.Process, env), filepath.Join(out, "evidence", "windows.json"), ended, 100*time.Millisecond)
 	runErr := <-ended
+	// On GitHub's runner the lines of this log are read for workflow commands too: go test
+	// indents them, and the runner trims that. So the logged stop lines of a run with
+	// GITHUB_ACTIONS true keep the runner's commands stopped for the rest of the go test step,
+	// which prints none: the logged resume line is followed at once by the run's stop line of
+	// standard error, which stops them again (design, section 12, "The suite's workflow").
 	t.Logf("%s (%s):\n%s%s", f.name, f.helm, stdout.String(), stderr.String())
 	if err := os.WriteFile(filepath.Join(out, "console.txt"), stdout.Bytes(), 0o644); err != nil {
 		t.Errorf("%s (%s): console.txt: %v", f.name, f.helm, err)
@@ -404,6 +445,11 @@ func runFixture(t *testing.T, f fixture) result {
 		}
 	default:
 		t.Fatalf("%s (%s): %v", f.name, f.helm, runErr)
+	}
+	// The run's own GITHUB_ACTIONS decides which lines it prints; on GitHub every run has it, and
+	// on a developer's machine only the runs with files of their own.
+	for _, fault := range workflowCommandFaults(stdout.String(), stderr.String(), envValue(env, "GITHUB_ACTIONS") == "true", r.signal != "") {
+		t.Errorf("%s (%s): %s", f.name, f.helm, fault)
 	}
 
 	b, err := os.ReadFile(filepath.Join(out, "result.json"))
@@ -592,6 +638,44 @@ func removeKeptCluster(t *testing.T) {
 // cluster rollproof-e2e, which the tool removes when it starts.
 func outDir(t *testing.T) string {
 	return filepath.Join(os.TempDir(), "rollproof-e2e-results", strings.ReplaceAll(t.Name(), "/", "-"))
+}
+
+// checkGitHubFiles fails the test unless the run's GitHub files in out say what a
+// run whose verdict is value (pass, fail or not-verified), and whose first line
+// writes word (PASS, FAIL or NOT VERIFIED), writes: the output out once, as out,
+// and verdict as not-verified and then value; and a summary whose first line
+// begins "### rollproof: " + word, the only line that begins "### rollproof: ",
+// and which holds the line "results: " + out followed by the fence that closes
+// its block exactly once, not necessarily at its end: a warning after the console
+// is appended after that block (summaryFaults judges it). It returns the summary.
+func checkGitHubFiles(t *testing.T, out, word, value string) (summary string) {
+	t.Helper()
+	outputs, err := readGitHubOutputs(filepath.Join(out, "github-output"))
+	if err != nil {
+		t.Errorf("the step's outputs: %v", err)
+	} else {
+		want := map[string][]string{"out": {out}, "verdict": {"not-verified", value}}
+		if diff := cmp.Diff(want, outputs); diff != "" {
+			t.Errorf("the step's outputs (-want +got):\n%s", diff)
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(out, "github-summary"))
+	if err != nil {
+		t.Fatalf("the job summary: %v", err)
+	}
+	summary = string(b)
+	// A warning after the console is appended after the results block, so the summary need not
+	// end with it. The fence is three backticks unless a line of that block holds a run of three
+	// or more backticks. Its lines are the run's reasons with their details, its warnings and the
+	// results line, and no run that calls this is expected to hold such a run of backticks.
+	faults := summaryFaults(summary, out, word)
+	for _, fault := range faults {
+		t.Errorf("the job summary: %s", fault)
+	}
+	if len(faults) > 0 {
+		t.Logf("the job summary:\n%s", summary)
+	}
+	return summary
 }
 
 // readTransitions reads the key transitions of out/result.json.

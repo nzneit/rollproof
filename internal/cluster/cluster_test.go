@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -478,6 +479,7 @@ func TestCreateWritesRegistrySettings(t *testing.T) {
 		"/etc/containerd/certs.d/registry.example/hosts.toml":      HostSettings(s.Registries[0], c.NodeRegistry),
 		"/etc/containerd/certs.d/registry.example/ca.pem":          string(caBytes),
 		"/etc/containerd/certs.d/docker.io/hosts.toml":             HostSettings(s.Registries[1], ""),
+		"/etc/containerd/certs.d/docker.io/ca.pem":                 string(caBytes),
 		"/etc/containerd/certs.d/registry.example:5000/hosts.toml": HostsTOML(c.NodeRegistry),
 		"/etc/containerd/certs.d/rollproof.test/hosts.toml":        HostsTOML(c.NodeRegistry),
 		"/var/lib/kubelet/config.json":                             string(Credentials(s.Registries)),
@@ -498,5 +500,98 @@ func TestCreateWritesRegistrySettings(t *testing.T) {
 				t.Errorf("node %s: %s holds %q, want %q", n, path, out, want[path])
 			}
 		}
+	}
+}
+
+// A signal during kind's creation: Create returns at once, kind's abandoned call runs to its end,
+// and the next run's first step removes what it left (section 10, "On a signal"). The test checks
+// that no attempt of kind's Create has ended at the cancel, so that the result it then waits for
+// is the one of the call that the signal abandoned, not an earlier attempt's.
+func TestAnAbandonedCreateIsRemovedByTheNextRun(t *testing.T) {
+	e := testEngine(t)
+	s := testSpec("abandoned", 1)
+	t.Cleanup(func() { remove(context.Background(), e, s.Name, s.RunDir) })
+
+	// ended has room for every attempt that createKind makes, so that no send of the wrapper waits.
+	began, ended := make(chan struct{}), make(chan error, createAttempts)
+	var once sync.Once
+	wrapped := kindCreate
+	t.Cleanup(func() { kindCreate = wrapped })
+	kindCreate = func(p *kindcluster.Provider, name string, options ...kindcluster.CreateOption) error {
+		once.Do(func() { close(began) })
+		err := wrapped(p, name, options...)
+		ended <- err
+		return err
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	returned := make(chan error, 1)
+	go func() {
+		_, err := Create(ctx, s, e)
+		returned <- err
+	}()
+	select {
+	case <-began:
+	case err := <-returned:
+		t.Fatalf("Create returned before kind's Create began: %v", err)
+	case <-time.After(5 * time.Minute):
+		t.Fatal("kind's Create did not begin within 5 minutes")
+	}
+	time.Sleep(10 * time.Second)
+	select {
+	case err := <-ended:
+		t.Fatalf("kind's Create ended before the signal (%v), so no call was abandoned", err)
+	default:
+	}
+	cancel()
+	cancelled := time.Now()
+
+	select {
+	case err := <-returned:
+		if took := time.Since(cancelled); took >= 3*time.Second {
+			t.Errorf("Create returned %v after the cancel, want within 3s", took)
+		}
+		c := verdict.AsCondition(err)
+		if c.Code != verdict.ClusterFailed || !strings.Contains(c.Text, "context canceled") {
+			t.Errorf("Create = %s: %q, want cluster-failed with context canceled", c.Code, c.Text)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Create did not return within 3s of the cancel")
+	}
+
+	select {
+	case err := <-ended:
+		t.Logf("kind's abandoned Create ended: %v", err)
+	case <-time.After(5 * time.Minute):
+		t.Fatal("kind's abandoned Create did not end within 5 minutes")
+	}
+
+	abandoned := func() []string {
+		t.Helper()
+		out, err := engine(t, e, "ps", "-a", "--format", "{{.Names}}")
+		if err != nil {
+			t.Fatalf("%s ps: %v\n%s", e.Binary, err, out)
+		}
+		var left []string
+		for _, n := range strings.Fields(out) {
+			if strings.HasPrefix(n, s.Name+"-") {
+				left = append(left, n)
+			}
+		}
+		return left
+	}
+	if left := abandoned(); len(left) == 0 {
+		t.Fatal("the engine lists no container of the abandoned cluster, want kind's nodes")
+	}
+
+	if err := remove(context.Background(), e, s.Name, s.RunDir); err != nil {
+		t.Fatalf("the next run's removal: %v", err)
+	}
+	if left := abandoned(); len(left) != 0 {
+		t.Errorf("containers left after the removal: %v", left)
+	}
+	if _, err := os.Stat(s.RunDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the run's folder is left after the removal: %v", err)
 	}
 }

@@ -98,7 +98,8 @@ func (m *Masker) String(s string) string {
 // form until more come; Close writes them, masked where a form is whole, and
 // then closes w. An error of w is returned by the call that met it, and a
 // write of w that is short with no error counts as io.ErrShortWrite. A nil
-// Masker returns w itself.
+// Masker returns w itself. A writer it returns is not safe for concurrent use:
+// one goroutine at a time writes to it and closes it.
 func (m *Masker) Writer(w io.WriteCloser) io.WriteCloser {
 	if m.empty() {
 		return w

@@ -348,12 +348,6 @@ func TestInstallTextNamesTheMirror(t *testing.T) {
 	img := "registry.example/team/orders@sha256:" + strings.Repeat("a", 64)
 	const note = "the nodes pull registry.example only from its mirror mirror.corp.example/registry-example, and a pull's error may name the image alone"
 	o := options()
-	o.MirrorNote = func(image string) string {
-		if image == img {
-			return note
-		}
-		return ""
-	}
 	// An init container that waits for an image on another host with a mirror.
 	initImg := "docker.io/team/migrate@sha256:" + strings.Repeat("b", 64)
 	const initNote = "the nodes pull docker.io only from its mirror mirror.corp.example/docker-io, and a pull's error may name the image alone"

@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The mirror job of section 12: two runs of the real binary through a
@@ -52,6 +54,7 @@ func TestMirror(t *testing.T) {
 			}
 		}
 		checkOnlyLoopback(t, realName, standinLogOf(t, realName))
+		checkGitHubFiles(t, outDir(t), "PASS", "pass")
 		checkPasswordGone(t, forms)
 	})
 
@@ -86,6 +89,7 @@ func TestMirror(t *testing.T) {
 			t.Errorf("the real host's log does not hold %q: it did not hold the candidate", load)
 		}
 		checkOnlyLoopback(t, realName, realLog)
+		checkGitHubFiles(t, outDir(t), "FAIL", "fail")
 		checkPasswordGone(t, forms)
 	})
 }
@@ -93,8 +97,9 @@ func TestMirror(t *testing.T) {
 // holdRunImages makes sure that the engine holds the node image and the registry image that
 // bin/rollproof version names on its lines "node image REF" and "registry image REF": each is
 // pulled now when `E image inspect REF` fails, so that the run asks the engine for no pull: the
-// job cuts the nodes' route to public registries and not the engine's (decision 18). A version
-// command that fails, a line that is missing, or a pull that fails, fails the test.
+// job cuts the nodes' route to public registries and not the engine's (decision 18). The inspect
+// runs under a limit of inspectLimit and the pull under pullLimit. A version command that fails, a
+// line that is missing, or a pull that fails or does not end within its limit, fails the test.
 func holdRunImages(t *testing.T) {
 	t.Helper()
 	out, err := exec.Command(filepath.Join(root, "bin", "rollproof"), "version").CombinedOutput()
@@ -115,13 +120,40 @@ func holdRunImages(t *testing.T) {
 		refs = append(refs, ref)
 	}
 	for _, ref := range refs {
-		if exec.Command(engine, "image", "inspect", ref).Run() == nil {
+		if inspectImage(ref) == nil {
 			continue
 		}
-		if out, err := exec.Command(engine, "pull", ref).CombinedOutput(); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), pullLimit)
+		pull := exec.CommandContext(ctx, engine, "pull", ref)
+		// A child of the engine that still holds the output pipe would keep Wait blocked past the limit.
+		pull.WaitDelay = 10 * time.Second
+		out, err := pull.CombinedOutput()
+		cut := ctx.Err() != nil
+		cancel()
+		if cut {
+			t.Fatalf("%s pull %s did not end within %v\n%s", engine, ref, pullLimit, out)
+		}
+		if err != nil {
 			t.Fatalf("%s pull %s: %v\n%s", engine, ref, err, out)
 		}
 	}
+}
+
+// The limits of holdRunImages's engine commands.
+const (
+	inspectLimit = time.Minute
+	pullLimit    = 10 * time.Minute
+)
+
+// inspectImage runs `E image inspect ref` under inspectLimit and returns its error: nil when the
+// engine holds ref.
+func inspectImage(ref string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), inspectLimit)
+	defer cancel()
+	inspect := exec.CommandContext(ctx, engine, "image", "inspect", ref)
+	// A child of the engine that outlives it would keep Wait blocked past the limit.
+	inspect.WaitDelay = 10 * time.Second
+	return inspect.Run()
 }
 
 // clearStandins removes the job's stand-ins before a run and again when the test ends; when the

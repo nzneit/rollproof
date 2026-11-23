@@ -122,7 +122,8 @@ func raise(sig syscall.Signal) {
 
 // realMain runs the command line args: the subcommand in args[0], writing to
 // stdout and stderr and reading the environment through getenv. It returns the
-// exit code.
+// exit code. For run, it prints the lines of withWorkflowCommandsStopped around
+// the command.
 func realMain(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usageText)
@@ -130,7 +131,11 @@ func realMain(args []string, stdout, stderr io.Writer, getenv func(string) strin
 	}
 	switch args[0] {
 	case "run":
-		return runCommand(args[1:], stdout, stderr, getenv)
+		// The lines for GitHub's workflow commands go around the whole command, its usage errors
+		// included (section 8, "Workflow commands").
+		return withWorkflowCommandsStopped(stdout, stderr, getenv, signalCame, func() int {
+			return runCommand(args[1:], stdout, stderr, getenv)
+		})
 	case "probe":
 		return probeCommand(args, stdout, stderr)
 	case "version":

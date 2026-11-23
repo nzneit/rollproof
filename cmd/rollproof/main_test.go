@@ -205,36 +205,40 @@ func TestFailedClientError(t *testing.T) {
 	cleanUp := errors.New("the engine is gone")
 	noLogs := "; the cluster's logs were not all collected: no nodes"
 	for _, tc := range []struct {
-		name        string
-		keep        bool
-		cancelled   bool
-		collectErr  error
-		deleteErr   error
-		wantCollect int
-		wantCalls   int
-		wantOrder   []string
-		wantText    string
-		wantJoined  string
+		name         string
+		keep         bool
+		cancelled    bool
+		cancelDuring string // "collect" or "delete": that call cancels the run's context and returns its error
+		collectErr   error
+		deleteErr    error
+		wantCollect  int
+		wantCalls    int
+		wantOrder    []string
+		wantText     string
+		wantJoined   string
 	}{
-		{"kept", true, false, nil, cleanUp, 1, 0, []string{"collect"},
+		{"kept", true, false, "", nil, cleanUp, 1, 0, []string{"collect"},
 			reached + ". The cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x", ""},
-		{"the run's context has ended", false, true, nil, cleanUp, 0, 0, nil, reached, ""},
-		{"the run's context has ended, and the cluster is kept", true, true, nil, cleanUp, 0, 0, nil,
+		{"the run's context has ended", false, true, "", nil, cleanUp, 0, 0, nil, reached, ""},
+		{"the run's context has ended, and the cluster is kept", true, true, "", nil, cleanUp, 0, 0, nil,
 			reached + ". The cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x", ""},
-		{"the delete succeeds", false, false, nil, nil, 1, 1, []string{"collect", "delete"}, reached, ""},
-		{"the delete fails", false, false, nil, cleanUp, 1, 1, []string{"collect", "delete"}, left,
+		{"the delete succeeds", false, false, "", nil, nil, 1, 1, []string{"collect", "delete"}, reached, ""},
+		{"the delete fails", false, false, "", nil, cleanUp, 1, 1, []string{"collect", "delete"}, left,
 			"the clean-up after it failed: the engine is gone"},
-		{"the logs cannot be collected", false, false, errors.New("no nodes"), nil, 1, 1,
+		{"the logs cannot be collected", false, false, "", errors.New("no nodes"), nil, 1, 1,
 			[]string{"collect", "delete"}, reached + noLogs, ""},
-		{"the logs cannot be collected, and the cluster is kept", true, false, errors.New("no nodes"), nil, 1, 0,
+		{"the logs cannot be collected, and the cluster is kept", true, false, "", errors.New("no nodes"), nil, 1, 0,
 			[]string{"collect"},
 			reached + noLogs + ". The cluster is kept: kubeconfig /tmp/rollproof-x/kubeconfig, context kind-rollproof-x", ""},
+		{"a signal during the collection", false, false, "collect", nil, nil, 1, 0, []string{"collect"},
+			reached + "; the cluster's logs were not all collected: context canceled", ""},
+		{"a signal during the delete", false, false, "delete", nil, nil, 1, 1, []string{"collect", "delete"}, left,
+			"the clean-up after it failed: context canceled"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			if tc.cancelled {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
 			var order []string
@@ -242,12 +246,20 @@ func TestFailedClientError(t *testing.T) {
 			collect := func(context.Context) error {
 				order = append(order, "collect")
 				collectCalls++
+				if tc.cancelDuring == "collect" {
+					cancel()
+					return ctx.Err()
+				}
 				return tc.collectErr
 			}
 			calls := 0
 			del := func(context.Context) error {
 				order = append(order, "delete")
 				calls++
+				if tc.cancelDuring == "delete" {
+					cancel()
+					return ctx.Err()
+				}
 				return tc.deleteErr
 			}
 			err := failedClientError(ctx, tc.keep, kept, collect, del, clientErr)
@@ -282,29 +294,35 @@ func TestStoreFailedTakesTheLogs(t *testing.T) {
 	internal := verdict.Condition{Code: verdict.InternalError, Text: "boom"}
 	noLogs := "; the cluster's logs were not all collected: no nodes"
 	for _, tc := range []struct {
-		name       string
-		err        error
-		cancelled  bool
-		collectErr error
-		wantCalls  int
-		wantErr    error  // the error that must come back unchanged
-		wantText   string // the condition's text, when the error is replaced
+		name         string
+		err          error
+		cancelled    bool
+		cancelDuring bool // the collection cancels the run's context and returns its error
+		collectErr   error
+		wantCalls    int
+		wantErr      error  // the error that must come back unchanged
+		wantText     string // the condition's text, when the error is replaced
 	}{
-		{"a cluster-failed error", failed, false, nil, 1, failed, ""},
-		{"the logs cannot be collected", failed, false, errors.New("no nodes"), 1, nil, failed.Text + noLogs},
-		{"an internal-error error", internal, false, nil, 0, internal, ""},
-		{"the run's context has ended", failed, true, nil, 0, failed, ""},
+		{"a cluster-failed error", failed, false, false, nil, 1, failed, ""},
+		{"the logs cannot be collected", failed, false, false, errors.New("no nodes"), 1, nil, failed.Text + noLogs},
+		{"an internal-error error", internal, false, false, nil, 0, internal, ""},
+		{"the run's context has ended", failed, true, false, nil, 0, failed, ""},
+		{name: "a signal during the collection", err: failed, cancelDuring: true, wantCalls: 1,
+			wantText: failed.Text + "; the cluster's logs were not all collected: context canceled"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			if tc.cancelled {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
 			calls := 0
 			collect := func(context.Context) error {
 				calls++
+				if tc.cancelDuring {
+					cancel()
+					return ctx.Err()
+				}
 				return tc.collectErr
 			}
 			got := storeFailed(ctx, tc.err, collect)
@@ -775,6 +793,9 @@ const (
 	fakeWaits   = "waits"   // prints started, waits until its context ends, prints returned and returns 2
 	fakeLingers = "lingers" // prints started, prints cancelled when its context ends, waits 30 s and prints returned
 	fakeFails   = "fails"   // prints fakeFailsLine and returns 1 at once
+	// prints started, waits until its context ends, prints returned and returns 1, the code of a
+	// decided fail whose final result.json could not be written
+	fakeRefusedFail = "refused-fail"
 )
 
 // fakeFailsLine is the line that the fails fake prints before it returns 1, so
@@ -833,6 +854,15 @@ func TestHelperProcess(t *testing.T) {
 		case fakeFails:
 			fmt.Fprintln(o.Stdout, fakeFailsLine)
 			return 1
+		case fakeRefusedFail:
+			fmt.Fprintln(o.Stdout, "started")
+			select {
+			case <-ctx.Done():
+			case <-orphaned:
+				return 3
+			}
+			fmt.Fprintln(o.Stdout, "returned")
+			return 1
 		}
 		fmt.Fprintf(o.Stderr, "no fake run is named %q\n", fake)
 		return 3
@@ -849,9 +879,12 @@ type helperChild struct {
 	exited chan struct{} // closed when Wait has returned and the output is complete
 }
 
-// startChild starts the child with the fake run that fake names. The child is
-// killed at the end of the test if it still runs.
-func startChild(t *testing.T, fake string) *helperChild {
+// startChild starts the child with the fake run that fake names, and env added to
+// its environment. The child gets no GITHUB_ACTIONS from this process, so that it
+// prints the lines for GitHub's workflow commands only when env asks for them, on
+// this machine and on GitHub's runner alike. The child is killed at the end of
+// the test if it still runs.
+func startChild(t *testing.T, fake string, env ...string) *helperChild {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -859,7 +892,13 @@ func startChild(t *testing.T, fake string) *helperChild {
 	}
 	c := &helperChild{exited: make(chan struct{})}
 	c.cmd = exec.Command(exe, "-test.run=^TestHelperProcess$")
-	c.cmd.Env = append(os.Environ(), "ROLLPROOF_HELPER="+fake)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "GITHUB_ACTIONS=") {
+			c.cmd.Env = append(c.cmd.Env, entry)
+		}
+	}
+	c.cmd.Env = append(c.cmd.Env, "ROLLPROOF_HELPER="+fake)
+	c.cmd.Env = append(c.cmd.Env, env...)
 	c.cmd.Stdout = &c.stdout
 	c.cmd.Stderr = &c.stderr
 	if err := c.cmd.Start(); err != nil {
@@ -966,6 +1005,21 @@ func TestASignalEndsTheToolByIt(t *testing.T) {
 				t.Errorf("the process ended before the run returned%s", c.output())
 			}
 		})
+	}
+}
+
+// After a signal, the process ends by it also when the run returned 1, as a run does whose final
+// result.json could not be written after a fail was decided (section 8; section 10, "On a signal").
+func TestASignalEndsTheToolByItAfterARefusedWrite(t *testing.T) {
+	c := startChild(t, fakeRefusedFail)
+	c.waitFor(t, "started")
+	c.signal(t, syscall.SIGTERM)
+	ws := c.wait(t, 10*time.Second)
+	if !ws.Signaled() || ws.Signal() != syscall.SIGTERM {
+		t.Errorf("the child ended %s, want by %s%s", ending(ws), syscall.SIGTERM, c.output())
+	}
+	if !strings.Contains(c.stdout.String(), "returned\n") {
+		t.Errorf("the process ended before the run returned%s", c.output())
 	}
 }
 

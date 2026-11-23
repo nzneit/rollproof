@@ -2,7 +2,7 @@
 
 ## Question
 
-Point 8 of section 14: kind calls itself alpha grade and has not committed to its library surface. Does the linked release, `sigs.k8s.io/kind` v0.33.0 used as a library, create a cluster through the engine on this machine with the node settings of section 9, and which exact settings worked? This record covers nerdctl; the Docker half is not run.
+Point 8 of section 14: kind calls itself alpha grade and has not committed to its library surface. Does the linked release, `sigs.k8s.io/kind` v0.33.0 used as a library, create a cluster through the engine on this machine with the node settings of section 9, and which exact settings worked? This record covers nerdctl and, since 2026-11-22, Docker on GitHub's hosted runner (section `## Docker`).
 
 ## Machine and versions
 
@@ -188,7 +188,67 @@ The cause, found on 2026-11-21 by reading nerdctl's source after step 5's e2e ru
 
 ## Docker
 
-not run; waits for the maintainer's word
+Run once on 2026-11-22, in run 45014226495 of the workflow `.github/workflows/rollproof-proofs.yml` at commit `cd7bc1f6eb0635c75832de73c47464ed9c026b32`, started with `gh workflow run rollproof-proofs.yml --ref rollproof-step6-design -f part=all`: job `proofs` (job 137182961058), its step "kind as a library, on Docker", from 10:48:46 to 10:51:19 UTC. The job's log runs from 10:48:43 to 10:52:44 UTC, with `p01-registry-order` as the step after this one.
+
+**Machine and versions.**
+
+- GitHub's hosted runner, image `ubuntu-24.04` version 20261116.376.1, Ubuntu 24.04.5 LTS, runner 2.338.2, by the job's first lines (`Current runner version: '2.338.2'`, `24.04.5`, `Image: ubuntu-24.04`, `Version: 20261116.376.1`).
+- Go 1.27.4, which `actions/setup-go` found in the runner's tool cache (`Found in cache @ /opt/hostedtoolcache/go/1.27.4/x64`, `go version go1.27.4 linux/amd64`).
+- Engine: Docker, rootful. The log shows `info: docker -v exits 0` and the `SecurityOptions` of `docker info` (below), not Docker's version. The image's software list gives Docker client and server 28.0.4 (`images/ubuntu/Ubuntu2404-Readme.md` of `actions/runner-images` at commit `0e63d4f9d2c29043b4cf1d2f40d1812a7cde1369`, which describes image version 20261116.376.1, lines 76 and 77): read, not shown by the run.
+- kind v0.33.0 and its default node image, as the checks print them below; in the nodes, containerd v2.3.4 (`RuntimeVersion` of `crictl version`); Kubernetes v1.37.0, the server's `GitVersion`.
+
+**Method.** The same command, from `projects/rollproof/proofs/` (the job's working folder), with `KIND_EXPERIMENTAL_PROVIDER` unset and no path in `KUBECONFIG` (the program printed a line for no such path):
+
+```
+go run ./p08-kind-library
+```
+
+The program is the one of the nerdctl runs, unchanged. The lab has changed since: it tries kind's `Create` again, at most 4 attempts in all, when the error is kind's wait for a node's log line, and prints `lab: Create attempt K of 4 failed …` for each retry; and its registries run with a tmpfs. This run printed no retry line, so `Create` took one attempt.
+
+**Result.** Every check passed. The output, with the twelve lines that check each node shown once for the control-plane node; each worker printed the same three lines with its own name:
+
+```
+info: $HOME/.kube/config does not exist
+info: KIND_EXPERIMENTAL_PROVIDER is unset
+info: docker -v exits 0
+lab: Create returned after 59.35s; 0 of 4 nodes Ready
+lab: every node Ready after 1m14.345s
+info: the lab picked docker
+ok: docker inspect rollproof-proof-p08-control-plane exits 0
+ok: l.Nodes() has four names, the first rollproof-proof-p08-control-plane: rollproof-proof-p08-control-plane rollproof-proof-p08-worker rollproof-proof-p08-worker2 rollproof-proof-p08-worker3
+ok: after Up, $HOME/.kube/config does not exist
+ok: l.Kubeconfig() exists at /tmp/rollproof-proof-p08-2459203191/kubeconfig and its current context is kind-rollproof-proof-p08
+ok: the control-plane node rollproof-proof-p08-control-plane has no label topology.kubernetes.io/zone
+ok: the control-plane node rollproof-proof-p08-control-plane has the taint node-role.kubernetes.io/control-plane:NoSchedule
+ok: worker rollproof-proof-p08-worker has topology.kubernetes.io/zone=rollproof-zone-1
+ok: worker rollproof-proof-p08-worker2 has topology.kubernetes.io/zone=rollproof-zone-2
+ok: worker rollproof-proof-p08-worker3 has topology.kubernetes.io/zone=rollproof-zone-3
+ok: the workers' zones are rollproof-zone-1, rollproof-zone-2 and rollproof-zone-3, once each
+ok: rollproof-proof-p08-control-plane: /var/lib/kubelet/config.json holds {"auths":{}}
+ok: rollproof-proof-p08-control-plane: containerd config dump has config_path = '/etc/containerd/certs.d'
+ok: rollproof-proof-p08-control-plane: crictl version exits 0: RuntimeVersion:  v2.3.4
+info: docker info SecurityOptions: ["name=apparmor" "name=seccomp,profile=builtin" "name=cgroupns"]; one contains rootless: false
+ok: version.Version() is 0.33.0
+ok: defaults.Image is kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+info: docker inspect rollproof-proof-p08-control-plane: Image "sha256:24f646398ba8fe575fbdcf6f48831e3a88d0853da8ecc9d2774168070e5a3bea", Config.Image "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
+ok: the server's GitVersion is v1.37.0
+ok: l.Down() returned no error
+ok: the folder of l.Kubeconfig() is gone
+ok: docker ps -a lists no name that starts with rollproof-proof-p08
+ok: after Down, $HOME/.kube/config does not exist
+p08: all checks passed
+```
+
+- The engine. With `KIND_EXPERIMENTAL_PROVIDER` unset and `docker -v` passing, the lab picked Docker, as the test of `cluster.DetectNodeProvider` that it copies does (docker first). The program judges the choice only where Docker is absent, so here the line is `info:`, not `ok:`.
+- `Create` with a wait time of zero returned after 59.35 s with no node Ready, and the lab's own wait found every node Ready after 1 min 14.345 s, 14.995 s later. The nerdctl runs returned after 21.407 s to 35.931 s and waited 12 s more. Whether the 59.35 s include a pull of the node image, the log does not show.
+- Every setting of the Method held: no zone label and the taint on the control-plane node, one zone label on each worker, the credentials file in every node, `config_path` in every node's containerd, and the kubeconfig only in the lab's folder, with `$HOME/.kube/config` absent before, after Up and after Down.
+- Rootful. No `SecurityOptions` entry contains `rootless`, so the lab added no `NoNewKeyring` patch (its rule, in the Method above).
+- The node image's ID differs by engine. `docker inspect` gives an `Image` ID, `sha256:24f6463…`, that is not the digest of the reference, where nerdctl gave the digest `sha256:a1ed56c…` itself; `Config.Image` names the reference without `docker.io/`.
+- `Down` returned no error, its folder was gone, and `docker ps -a` listed no container of the cluster.
+
+The same job then ran `p01-registry-order` on Docker; its record says how.
 
 Plan assumed: "Through nerdctl, kind v0.33.0 as a library creates one control-plane node and three workers with: a zone label on each worker from the cluster description; the containerd patch that sets config_path to /etc/containerd/certs.d; a file of the runner mounted into every node; a kubeconfig written only to the path the tool gives. cluster.DetectNodeProvider picks nerdctl where Docker is absent. With a wait time of zero, Create waits for no node, so the tool waits for every node itself. A rootless engine is shown by a SecurityOptions entry of `ENGINE info` that contains rootless."
 Holds: no
+Plan assumed: "Through Docker, kind v0.33.0 as a library creates one control-plane node and three workers with: a zone label on each worker from the cluster description; the containerd patch that sets config_path to /etc/containerd/certs.d; a file of the runner mounted into every node; a kubeconfig written only to the path the tool gives. cluster.DetectNodeProvider picks docker where it is present. With a wait time of zero, Create waits for no node, so the tool waits for every node itself."
+Holds: yes

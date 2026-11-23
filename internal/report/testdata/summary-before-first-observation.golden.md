@@ -1,0 +1,14 @@
+### rollproof: NOT VERIFIED `orders (Helm) on Kubernetes v1.37.0 in kind`
+
+```
+releases    previous   orders 1.4.2, oci://registry.example/charts/orders; chart defaults
+            candidate  orders 1.5.0, ./chart; values: inline (image)
+images      orders     run by no watched pod
+probe       built-in HTTP: GET http://orders.orders.svc/api/orders/latest
+            200 a second (one check every 5 ms), timeout 2 s, status 200-299
+```
+
+```
+could not test: no observation within limits.timeout; the pod is Pending; container probe is waiting: ImagePullBackOff   [probe-not-started]
+results: /tmp/rollproof-results-7f3a
+```

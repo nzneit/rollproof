@@ -1,8 +1,11 @@
 name: rollproof e2e suite
 
-# A placeholder. The default branch holds a file of this name so that the workflow can be started
-# by hand on the branch of rollproof's build-order step 6, which writes its jobs. Its one job never
-# runs.
+# The suite of rollproof's design, section 12, on Docker, started by hand only. First the tests
+# under the build tag cluster; then, when they have passed, the suite under Helm 3 on ubuntu-24.04
+# and under Helm 4 on ubuntu-26.04, side by side. The harness takes the Helm major from
+# ROLLPROOF_E2E_HELM and runs the fourteenth row's control in both jobs. Each go test has a limit
+# below its job's, so that its report is not cut off. A Helm job that fails uploads the results
+# folders that the harness keeps, for three days; a job that passes uploads nothing.
 
 on:
   workflow_dispatch:
@@ -10,9 +13,89 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+    working-directory: projects/rollproof
+
 jobs:
-  placeholder:
-    if: false
+  cluster:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CGO_ENABLED: "0"
+      KIND_EXPERIMENTAL_PROVIDER: docker
     steps:
-      - run: "true"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27"
+          cache-dependency-path: projects/rollproof/go.sum
+      - name: The tests under the build tag cluster
+        run: go test -tags cluster -p 1 -count=1 -v -timeout 35m ./internal/cluster/ ./internal/images/ ./internal/probe/ ./internal/watch/ ./hack/action/
+
+  helm-3:
+    needs: cluster
+    runs-on: ubuntu-24.04
+    timeout-minutes: 130
+    env:
+      CGO_ENABLED: "0"
+      KIND_EXPERIMENTAL_PROVIDER: docker
+      ROLLPROOF_E2E_HELM: "3"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27"
+          cache-dependency-path: projects/rollproof/go.sum
+      - name: Helm and kubectl
+        run: go run ./hack/fetchhelm
+      - name: The suite under Helm 3
+        run: go test -tags e2e -p 1 -count=1 ./e2e/ -v -timeout 120m
+      - name: Where the harness keeps the results
+        id: results
+        if: failure()
+        run: echo "dir=${TMPDIR:-/tmp}/rollproof-e2e-results" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: e2e-helm-3-results
+          path: ${{ steps.results.outputs.dir }}
+          retention-days: 3
+          if-no-files-found: warn
+
+  helm-4:
+    needs: cluster
+    runs-on: ubuntu-26.04
+    timeout-minutes: 130
+    env:
+      CGO_ENABLED: "0"
+      KIND_EXPERIMENTAL_PROVIDER: docker
+      ROLLPROOF_E2E_HELM: "4"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27"
+          cache-dependency-path: projects/rollproof/go.sum
+      - name: Helm and kubectl
+        run: go run ./hack/fetchhelm
+      - name: The suite under Helm 4
+        run: go test -tags e2e -p 1 -count=1 ./e2e/ -v -timeout 120m
+      - name: Where the harness keeps the results
+        id: results
+        if: failure()
+        run: echo "dir=${TMPDIR:-/tmp}/rollproof-e2e-results" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: e2e-helm-4-results
+          path: ${{ steps.results.outputs.dir }}
+          retention-days: 3
+          if-no-files-found: warn

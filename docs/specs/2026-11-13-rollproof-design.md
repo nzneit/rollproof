@@ -1,7 +1,7 @@
 # rollproof: design
 
-Date: 2026-11-13. Revised on 2026-11-16. Amended and revised on 2026-11-17. Amended on 2026-11-18
-and 2026-11-19.
+Date: 2026-11-13. Revised on 2026-11-16. Amended and revised on 2026-11-17. Amended on
+2026-11-18, 2026-11-19, 2026-11-20 and 2026-11-22.
 
 Status: the design below was agreed section by section in conversation on 2026-11-13. Three
 reviews followed. The first two:
@@ -60,6 +60,20 @@ were adopted, the exception for a too-early `t` written during the drain among t
 maintainer then widened to every fault of a failed check's line written there (section 6;
 section 14, point 29).
 
+Before the plan for step 5, the runs of section 14's points 2 and 19 left choices about mirrors,
+and the maintainer ruled on them on 2026-11-20 (points 30 and 31). Before the plan for step 6, a
+cold reading of this text and a reading of the source of GitHub's runner left more open than the
+build order gives to that step, and runs on GitHub's hosted runners on 2026-11-22 settled points
+3, 4 and 20. The maintainer ruled on four choices that day. The drafting session made the smaller
+ones, and the maintainer may strike any of them (point 32). A cold re-read of that amendment
+found 24 places, a check of their corrections found 12 more, the writing of the plan found 11,
+and a last read of those corrections found 6 in this text. This text carries the corrections
+that are the text's, and the rest are the plan's, which lists them. Once the plan was written,
+the maintainer made the choice that point 32 had left open, and kept one choice of the plan
+that costs minutes (point 32). While the plan was built, a reading of the runner's source found
+that the runner reads workflow commands in every line that a step prints, which this text had
+not considered; the maintainer approved a defence the same day (section 8; point 33).
+
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
 Fable model wrote each of the first two reviews. AI agents on an Opus model gathered the evidence,
 did the two readings, wrote the third review, eight of them with one part of the text each, and
@@ -72,11 +86,15 @@ The amendments of 2026-11-18 and the first of 2026-11-19 were written by an AI s
 model, at the maintainer's rulings. An AI agent on a Fable model wrote the review of 2026-11-19,
 and an AI agent on an Opus model wrote its rulings and corrections into the text, and then the
 fixes of the cold re-read.
+The amendments of 2026-11-20 and 2026-11-22 were written by an AI session at the maintainer's
+rulings, the second of them on a Fable model. AI agents on an Opus model ran or recorded the
+proofs for both, and re-read each amendment.
 Where a statement rests on a measurement, a page or a source file that was read, section 16 names
 the source. Everything else is design, not fact. Nothing here had been run when the design was
 agreed. The revision of 2026-11-17 rests on one result of the first plan's runs, and the rulings
 of section 14, point 29, on a run of 2026-11-19. Sections 6, 9 and 14 also rest on the proofs of
-the build order's second step. Section 16 names them all.
+the build order's second step, and sections 8 to 10 and 12 on the runs of 2026-11-22. Section 16
+names them all.
 
 `rollproof` is a working name. It has not been checked for collisions.
 
@@ -349,7 +367,7 @@ The tool is one Go binary. Each unit has one job.
 | `probe` | The probe contract: start, stop, collect observations. The built-in HTTP probe and the custom probe. Before the probe starts it checks the built-in probe's target, and names that Service to `run`. At the first observation it checks the clock | The probe's pod, and for the built-in probe its URL |
 | `run` | Sequences the phases and marks the windows on the timeline. It reads the probe's observations from the moment the probe starts, so that none waits for a reader | The two contracts as interfaces, and every other unit only as a step it calls |
 | `verdict` | Turns observations and transition results into pass, fail or not verified, with reasons, and says at the end of each window, the install window's included, whether the run goes on | Nothing. It is a pure function |
-| `report` | Writes the console text, `result.json`, the GitHub job summary and the evidence folder | File formats |
+| `report` | Writes the console text, `result.json`, the GitHub outputs and job summary, and the evidence folder | File formats |
 
 Flow of one run: `config`, then `cluster`, then `images`. `config` then fills in the image forms,
 `deploy` fetches the charts and runs the `setup` commands, and `deploy` installs. `probe` starts,
@@ -1406,7 +1424,13 @@ empty string, and a workflow started from a fork gets no secrets at all.
 be a single `${env.NAME}`; a password written in the file is rejected, and the text that rejects
 any configuration never quotes a value. The tool masks every such password in everything it
 writes, in its plain form and in the encoded form in which the nodes' credentials file holds it.
-That includes the output of commands and the pod logs that it copies into the evidence.
+That includes the output of commands and the pod logs that it copies into the evidence. Two
+things it does not mask. The step's outputs on GitHub hold a word of the verdict's vocabulary
+and the results folder's absolute path, which the tool makes from the caller's `--out` or
+chooses itself, and the first of them is written before the configuration is read. And the log
+that the Kubernetes client library writes on standard error (section 10, "Console") does not
+pass through the tool's masker: it holds the API server's warnings, and nothing that the tool
+sends to the API server holds the password, which goes to the nodes in a file.
 
 The tool masks nothing else. A chart value or a probe header's value is written as it was given,
 so a caller who passes a real secret there keeps the evidence to themselves. GitHub's own masking
@@ -1483,34 +1507,97 @@ one action, and a lockfile pins one.
 
 | Output | Meaning |
 | --- | --- |
-| `verdict` | `pass`, `fail` or `not-verified` |
+| `verdict` | `pass`, `fail` or `not-verified`; empty when the tool never started, could not open its results folder or could not write the outputs |
 | `out` | The folder that holds `result.json` and the evidence |
 
 The output is not named `outcome`, because GitHub gives every step an `outcome` of its own, with
 other values, and a condition written against the wrong one is silently false.
 
-How the tool reaches the runner: the action checks that the runner is Linux, finds the container
-engine as kind does, pulls the tool's image by digest and copies the binary out of it. Everything
-the tool needs from the network is then an image, so an organization mirrors one kind of thing,
-and a digest names content, not a location. An organization that mirrors the image changes the
-repository and keeps the digest. Each release also attaches plain Linux binaries, for laptops and
-for other CI systems.
+The tool writes the outputs at two moments. As soon as it has the results folder it writes `out`,
+and `verdict` as `not-verified`, with the first `result.json` (section 10). When the verdict
+exists it writes `verdict` again, right after the final `result.json`. GitHub keeps the last
+value written for a name (section 14, point 4). So `verdict` is the verdict that decides the
+exit code: `pass` with 0, `fail` with 1, `not-verified` with 2. After a signal it is the verdict
+that the final `result.json` holds, and the tool ends by the signal (section 10). When the final
+`result.json` cannot be written, `verdict` is `fail` for a fail that was already decided and
+`not-verified` otherwise, as the exit code is then 1 or 2; after a signal the tool ends by the
+signal then too. A run that is killed before it writes `verdict` the second time leaves
+`not-verified`, which a caller reads as a run that did not finish. An empty `verdict` means that
+the tool could not open the results folder or write the outputs, or never started: the action
+stopped before it, on a runner that is not Linux or has no engine, or on an image that could not
+be pulled. A caller treats an empty `verdict` as not verified. An output that cannot be written
+is a warning and changes no verdict (section 10, rule 10); when the outputs' file cannot be
+written at all, `verdict` stays empty although the tool ran, and the console's warning says so.
 
-The action starts the tool in place of its own shell, with `exec`. GitHub sends a cancel signal
-to the first process of a step, and the tool has to be that process to learn of it (section 14,
-point 20).
+How the tool reaches the runner: the action checks that the runner is Linux, finds the container
+engine, pulls the tool's image by digest and copies the binary out of it. It finds the engine as
+the tool does: the engine that the variable `KIND_EXPERIMENTAL_PROVIDER` names, when its value
+is one that kind's command line takes (`docker`, `podman`, `nerdctl`, `finch` or
+`nerdctl.lima`), or else the first of `docker`, `nerdctl` and `podman` whose `-v` succeeds with
+`Docker version`, `nerdctl version` or `podman version` at the start of its first line. It then
+starts the tool with that variable set to the engine it found, so that the action's pull and the
+tool's run go through one engine even where the action's script and the tool would read the rule
+differently. Everything the tool needs from the network is then an image, so an organization
+mirrors one kind of thing, and a digest names content, not a location. An organization that
+mirrors the image changes the repository and keeps the digest. Each release also attaches plain
+Linux binaries, for laptops and for other CI systems. When the action itself fails, it exits 2
+with a message, and `verdict` is empty.
+
+The action starts the tool in place of its own shell, with `exec`. GitHub's runner signals only
+the first process of a step, and the tool has to be that process to learn of a cancel: a program
+that a shell started as its child got no signal and was left running when its step ended (section
+14, point 20). A cancel, the job's time limit and a `timeout-minutes` on the caller's step all
+reach the tool the same way (section 10, "On a signal"): the runs showed a cancel and a step's
+limit through a composite action and the job's limit on a plain step, and the runner's source
+has one path for the three. The caller's step must not carry `if: always()`: the runner does not
+cancel a running step whose condition still holds after the cancel. That last fact is read in
+the runner's source and was not run.
 
 The version and the image digest are written into `action.yml` at release time. A composite action
-cannot rely on reading its own ref at run time.
+cannot rely on reading its own ref at run time. Until the first release the file carries no
+digest, so `image` must then be a reference with a digest, and the action stops with a message
+when it has none.
 
 The tool writes the outputs and the job summary itself when it detects GitHub Actions, so the
 action holds no logic beyond fetching the binary and calling it. A caller whose runner already
-holds the binary needs no action: a plain step that runs `rollproof run` gives the same outputs
-and the same summary.
+holds the binary needs no action: a plain step whose script starts the tool with
+`exec rollproof run` gives the same outputs and the same summary. Without `exec` the runner's
+signals reach the step's shell and not the tool, as they would in the action, and the same
+caution about `if: always()` holds. The tool detects GitHub Actions by the variable
+`GITHUB_ACTIONS` being `true`, which a caller's `env:` cannot change there. It then writes the
+outputs when `GITHUB_OUTPUT` names a file, and the summary when `GITHUB_STEP_SUMMARY` does.
 
-Two things in this section rest on open points. That `env:` on the step that calls the action
-reaches the action's own steps is not shown (section 14, point 3). Neither is that the `verdict`
-output is kept when the step exits non-zero (point 4).
+**Workflow commands.** GitHub's runner reads every line that a step prints, on standard output
+and on standard error, for workflow commands: a line that begins with `::` after its leading
+white space, and the older form `##[`, anywhere in a line. Such a line can add an annotation,
+add a mask that hides later text in the log, set an output or fold the log. The tool prints text
+from outside it, such as a pod's message in a reason's detail, a command's error or a warning,
+and a line of it could be read as a command. So, when the tool detects GitHub Actions,
+`rollproof run` prints `::stop-commands::TOKEN` as its first line on standard output and as its
+first line on standard error, before anything else, a usage error included, with a token drawn
+anew for each run from the system's random source. The runner then reads no command until a
+line `::TOKEN::`. The tool prints that line last on standard output when it ends by itself,
+whatever its exit code, so that a step that calls the tool from a script of its own can use
+commands again afterwards. It does not print it when it ends by a signal, nor after a crash
+that escapes its run, and elsewhere than on GitHub Actions it prints neither line. The runner
+reads the two streams each in its own order, so each needs its own first line; the second that
+the runner meets is a plain line. The action's
+script prints the same line on both streams with a token of its own, once it knows that the
+runner is Linux and before any line that can hold an input or an engine's output, and never
+resumes: after its `exec` the step is the tool, whose own lines the runner then shows as plain
+text. Two things stay open, both because the runner reads the two streams apart. A line that
+the tool writes on standard error just before it ends can reach the runner after the resume
+line, and is then read for commands; section 10 says what can stand there ("Console"). And
+when a run ends within a moment of its start, as a usage error does, the stop line of standard
+error can reach the runner after the resume line: the runner then stops its commands again and
+reads none for the rest of the step, a later one of the caller's own script included. Section
+14, point 33, gives the reading and the choices that lost.
+
+Two things in this section rested on open points, and a run on 2026-11-22 settled both
+(`docs/proofs/p03-p04-p20-github-runner.md`). `env:` on the step that calls the action reaches
+the action's own steps, as does `env:` of the job and of the workflow (section 14, point 3). The
+`verdict` output is kept, through the action's own outputs, when the step exits non-zero, when it
+is cancelled and when it runs into a time limit (point 4).
 
 The action uploads nothing. The documentation shows the caller's own upload step, which uses the
 `out` output.
@@ -1563,9 +1650,11 @@ binaries are statically linked, because the binary is also the probe's whole ima
   except after a signal (section 10). The registry goes with its volumes. Because every name
   carries the prefix, the tool never deletes a cluster that it did not name. `--keep-cluster`
   leaves them for debugging, a cluster that failed to come up included, and the next run replaces
-  them. The stable name is what cleans up after a cancelled job: on a runner
-  that persists, a cancelled step has about 10 seconds before its processes are killed, and
-  deleting a cluster took 12 to 22 s in the experiments.
+  them. The stable name is what cleans up after a cancelled job: a cancelled step has 7.5 s
+  before the tool is ended (section 10, "On a signal"), and deleting a cluster took 12 to 22 s
+  in the experiments, so on a runner that persists the next run finds the cluster and removes
+  it. The 7.5 s were measured on hosted runners. A runner that persists runs the same program,
+  and none was tried.
 - **The kubeconfig.** The tool gives kind a kubeconfig file of its own, in the run's folder, when
   it creates the cluster and when it deletes one. Left alone, kind's library writes a new cluster
   into the caller's own kubeconfig, makes it the current context, and clears that context when
@@ -1599,8 +1688,10 @@ binaries are statically linked, because the binary is also the probe's whole ima
   window (section 7). A node on which the value cannot be set fails the cluster
   (`cluster-failed`). Section 14, point 24, has the runs and what the setting hides.
 - **What linking kind costs.** A new Kubernetes minor reaches users only after a kind release and
-  then a release of this tool. The project accepts that rhythm and automates it: a dependency
-  update that moves kind runs the cluster suite, and a green run is released.
+  then a release of this tool. The project accepts that rhythm and automates it once it has a
+  repository of its own (section 13, step 7): a dependency update that moves kind runs the
+  cluster suite, and a green run is released. Nothing of that is built while the project
+  incubates.
 
 ### Values for the test
 
@@ -1837,7 +1928,16 @@ them, but for a host with a mirror they go to the mirror, not to the host they w
 - **Engines other than Docker.** kind marks its Podman and nerdctl providers experimental. Docker
   is the supported engine. The project is developed on nerdctl, so nerdctl is expected to work and
   is not promised. An engine that runs without root counts as one that may run privileged
-  containers.
+  containers. Podman is not promised either. One test ran through it, as root on a hosted runner,
+  on 2026-11-22, with an alias that named the registry of kind's node image: it created a
+  cluster, read the nodes' setting of 5 s, pulled from the run's registry and deleted the
+  cluster (`docs/proofs/p24-hosted-runner.md`). Nothing else has run on Podman. Under Podman the
+  tool asks the engine for a node image by the name that kind's Podman provider uses:
+  `docker.io/` in front of a name with no registry host, `docker.io/library/` in front of a
+  name of one segment, and no tag when the name has a digest. Otherwise kind asks the engine
+  for another name than the tool pulled, and may pull the image itself, outside
+  `limits.timeout`; no run shows whether it does (section 14, points 28 and 32; section 16).
+  The report keeps the name as the configuration wrote it.
 
 ## 10. Verdict and report
 
@@ -2065,6 +2165,32 @@ results: /tmp/rollproof-results-7f3a
     (section 6), or, when the tool did not judge the probe's stop, why not. The console names
     each variable that the tool took out of its commands' environment (section 7), and prints
     every warning.
+  - Text from the cluster, from commands and from the configuration is cleaned before it is
+    printed: a line end, every other control character, the line and paragraph separators and
+    the bidirectional controls each become a space, so that none of it can redraw or split a
+    line. That holds for the console's blocks and for every other line that the tool itself
+    prints, a warning after the console's text among them. It does not hold for the two things
+    on standard error that the tool does not print itself (below): the log of the Kubernetes
+    client library, which quotes such text on one line, and the trace of a crash that escapes
+    the run.
+  - On GitHub Actions the line that stops the runner's workflow commands comes first on
+    standard output and on standard error, and the line that resumes them comes last on
+    standard output, after everything else that the run prints there, unless a signal or a
+    crash ended the run (section 8, "Workflow commands"). Neither is part of the console's
+    blocks, and the summary holds neither.
+  - Standard error holds what is not the console: the usage text and the command line's errors,
+    before a run; the line `rollproof: cannot write results: …` when the results folder cannot
+    be opened, when the final `result.json` cannot be written, and when it cannot be written
+    again after a warning that came later; and the log of the Kubernetes client library, which
+    writes there a warning that the API server sends with a response, its text quoted on one
+    line (section 16); and, for a crash that escapes the run, the trace that Go's runtime
+    writes. After the verdict the tool's own lines there are those on `result.json`: their text
+    is the results folder's path and the system's error, or, where the write of the final file
+    itself crashed, that crash's text. A line of the library's log can
+    come while the evidence is completed and the watcher stops, and its text is the API
+    server's: it cannot begin with `::`, but it can hold `##[`. Either can reach GitHub's runner
+    after the line that resumes its commands (section 14, point 33). Whether the library's
+    watch code writes there at its default level of detail was not read.
 - **`result.json`.** The same facts for machines. It is the stable contract for wrappers. It
   holds:
   - a schema version, and whether the file is final;
@@ -2127,22 +2253,36 @@ results: /tmp/rollproof-results-7f3a
   folder: `not-verified`, with the reason `internal-error` and the text "the run did not
   finish", and marked as not final. With that first file it replaces the `evidence` folder, and
   it writes the evidence as the run goes. It replaces `result.json` in one step when the verdict
-  exists, before it completes the evidence and before it deletes the cluster. When a warning
-  arises after that, it replaces the file once more, with the same verdict. A run that is killed
+  exists, before it completes the evidence and before it deletes the cluster. On GitHub Actions
+  the outputs go with both files, and the job summary with the final one, right after it
+  (section 8). The console's text is printed next, from the same record, and only then does the
+  tool complete the evidence. When a warning arises after that, it replaces the file once more,
+  with the same verdict, and prints the warning as a line of its own. A run that is killed
   therefore leaves a file that says it did not finish, and never an earlier run's pass. A rejected
   configuration gets a final file too. A wrapper treats a missing file, or one that is not final,
   as not verified.
 
   **On a signal.** SIGINT or SIGTERM stops the run at once. The tool stops a command that is
-  running (section 7), writes the final `result.json` and the outputs first, and then completes
-  what evidence it can. It leaves the cluster, with the probe's pod in it, for the next run to
-  delete (section 9). A cancelled step has about 10 seconds, which is
-  not enough to delete a cluster.
+  running (section 7). A call into kind it cannot cut short. Where such a call comes before the
+  verdict, it stops waiting for kind instead: while kind creates a cluster, while it deletes an
+  earlier run's before that, and while it takes the logs of a set-up that failed and deletes
+  that cluster; and in the short calls by which it lists the nodes and writes their settings.
+  The next run removes what kind left. The tool writes the final `result.json`, the outputs and
+  the job summary and prints the console's text first, and then completes what evidence it can.
+  It leaves the cluster, with the probe's pod in it, for the next run to delete (section 9).
+
+  On GitHub a step that is cancelled, or that runs into a time limit, gets SIGINT, and SIGTERM
+  7.5 s later. That is a second signal, which ends the tool at once (below). So the tool has
+  7.5 s there. That is not enough to delete a cluster, and evidence that is not complete by then
+  is missing (section 14, point 20). That it is enough for the results is expected and was not
+  timed: the action's own test, with its run cut short, is the first run that shows it (section
+  12).
 
   A signal that comes while the tool is stopping the probe, after the last window has ended, is
   `interrupted` too. Results that the probe had still to write may be lost, so the run is not
   verified, unless that window had already failed. A signal that comes after the verdict was
-  decided changes nothing and is a warning (rule 10).
+  decided changes nothing and is a warning (rule 10). The delete of the cluster at a run's end
+  comes after the verdict, so the tool does not cut it short for a signal.
 
   When it has written its results and completed its evidence, the tool ends by the signal that
   came, so that the shell learns of it as of any program that a user interrupts: the status is
@@ -2150,8 +2290,20 @@ results: /tmp/rollproof-results-7f3a
   `result.json`. A second signal ends the tool at once. Evidence that it had still to complete is
   then missing, and a `result.json` that it had not yet replaced says that the run did not
   finish (section 14, point 27).
-- **GitHub job summary.** The same tables and lists as Markdown, written only when the tool
-  detects GitHub Actions.
+- **GitHub job summary.** Written only when the tool detects GitHub Actions (section 8). It
+  holds the same blocks as the console, in the same order, for every verdict and for every
+  ending of a run: the first line as a heading, the tables as Markdown tables, the lists as
+  Markdown lists, and every other line as text. The tool appends it to the step's summary file
+  once, right after the final `result.json` and the outputs, before the console's text is
+  printed and before it completes the evidence, so that a run that is cancelled has one. A
+  warning that arises later is appended as a line. The summary is masked as the console is
+  (section 8), and text that came from outside the tool is written so that it cannot change
+  how the page reads: inside code that it cannot close, or escaped. A run whose final
+  `result.json` could not be written prints no console block and writes no summary; the run's
+  warnings are then printed as lines on the console. A summary that cannot be written is a
+  warning (rule 10), and so is a crash while it is rendered or appended; the console is printed
+  all the same. GitHub shows no summary for a step whose file is larger than 1 MiB, and the
+  step stays green; the console's blocks are far below that.
 - **Evidence folder.**
   - The probe's raw lines; the window boundaries and the moment each transition finished, each
     written when it happens; a per-second timeline that puts failure counts beside pod events
@@ -2239,8 +2391,8 @@ A line leaves the list when a fixture shows the tool catching what it names.
 - **No diagnosis.** The report says which pods were starting or stopping when the first failure
   came, and the timeline shows the rest. The tool does not guess the cause.
 - **Workload logs are the workload's own text.** The tool masks registry passwords everywhere it
-  writes, the pod logs it copies included, and nothing else in them. The caller decides whether
-  to upload the evidence.
+  writes but the step's outputs (section 8), the pod logs it copies included, and nothing else
+  in them. The caller decides whether to upload the evidence.
 
 ## 11. Security
 
@@ -2257,8 +2409,17 @@ A line leaves the list when a fixture shows the tool catching what it names.
   images that no entry names, each with its entry's credentials when it has them, and the token
   services that those hosts name. Helm's pulls, with the caller's own logins. Nothing else.
 - A registry password arrives only through an environment variable. It is masked, in its plain
-  and its encoded form, in everything the tool writes. Nothing else is masked (section 8). This
-  rule has not had a security review (section 14).
+  and its encoded form, in everything the tool writes but the step's outputs on GitHub, which
+  hold no value of the configuration, and the client library's log on standard error, which
+  holds the API server's warnings (section 8). Nothing else is masked. This rule has not had a
+  security review (section 14).
+- On GitHub the tool's first lines, and the action's, stop the runner from reading a workflow
+  command in what they print, so that text from a chart, a command or the API server cannot
+  become one (section 8). Two things stay open where a step of the caller's own script runs
+  the tool: a line on standard error just before the tool's end can still be read (section
+  10), and after a run that ends at once the runner may read no later command of that script,
+  an `::add-mask::` among them (section 8). This has not had a security review either (section
+  14, point 13).
 - The credentials file mounted into the nodes holds only the hosts the configuration lists. It
   lives in the run's folder and is removed with the cluster. While the cluster lives, every pod
   in it can read the file (section 9), so the credentials should be able to read only, and
@@ -2325,13 +2486,14 @@ A line leaves the list when a fixture shows the tool catching what it names.
   the API server refuses.
 - The target check: each form of host, a headless Service, a pod's name, a node-local policy, a
   Service that does not exist.
-- Golden files for the report formats, one for each verdict and one for each ending of a run
-  that the console list names: before the probe's first observation, in the install window, and
-  with the install window deciding the verdict. One more is for a custom probe that gives neither
-  `ms` nor `lag`. Golden files, too, for the kind configuration and node settings the tool
-  generates. Among them a host that has `as`, a mirror, a `ca` and credentials together, a
-  mirror under a prefix, a mirror whose path begins with `v2`, and an entry for `docker.io`. One
-  more report is for a stall whose waiting container's image has a host with a mirror.
+- Golden files for the report formats, the job summary among them, one for each verdict and one
+  for each ending of a run that the console list names: before the probe's first observation,
+  in the install window, and with the install window deciding the verdict. One more is for a
+  custom probe that gives neither `ms` nor `lag`. Golden files, too, for the kind configuration
+  and node settings the tool generates. Among them a host that has `as`, a mirror, a `ca` and
+  credentials together, a mirror under a prefix, a mirror whose path begins with `v2`, and an
+  entry for `docker.io`. One more report is for a stall whose waiting container's image has a
+  host with a mirror.
 - The deploy drivers against a fake command runner that records the arguments, the environment
   and the folder: the flags of section 7, that the variables it lists are gone, how each ending
   of a command maps to a reason, a command stopped at the limit, and one stopped because a signal
@@ -2343,8 +2505,30 @@ A line leaves the list when a fixture shows the tool catching what it names.
 - `result.json`: the first file, its replacement, a rejected configuration, a signal, a results
   folder that holds an earlier run, and the install record of a run that ended before the install
   was ready, before the probe's first observation, before the install had settled, and after.
+- What the tool writes for GitHub, with the three variables of section 8 set by the test: the
+  outputs at both moments, in the form that cannot be misread, with a value that holds the
+  delimiter; what `verdict` says after each ending, a signal and a final `result.json` that
+  cannot be written among them; that nothing is written unless `GITHUB_ACTIONS` is `true`, and
+  each file only when its variable names one; an output or a summary that cannot be written, as
+  a warning; the summary appended once, a later warning as one more line of it, text from
+  outside the tool kept from changing the page, and no summary after a final `result.json` that
+  cannot be written;
+  and the order of the final `result.json`, the outputs, the summary, the console's text and
+  the evidence.
+- The lines for GitHub's workflow commands: on GitHub Actions the stop line first on both
+  streams and the resume line last on standard output, a usage error, a rejected configuration
+  and a results folder that cannot be opened among the endings; no resume line after a signal,
+  in a child process, nor after a crash; neither line elsewhere, nor for `version` and `probe`;
+  a new token for each run. The action's script with fake engines: its stop line first on both
+  streams, after the check for Linux and never before it, no resume line, and exit 2 when it
+  gets no token or cannot write one of the two lines. The suite's harness checks both lines in
+  the console and the standard error of every run, by the run's own `GITHUB_ACTIONS`.
+- A signal during each call into kind that comes before the verdict (section 10, "On a
+  signal"), with kind's calls replaced by ones that do not return: the run returns all the
+  same, with a final `result.json` and the reason `interrupted`.
 - Names: the cluster's name from the file's path, `--name`, and that a cluster without the prefix
-  is never deleted.
+  is never deleted. A node image's name as kind's Podman provider asks for it, on the cases of
+  kind's own test.
 - The checks that raise a reason outside a window, each against a fake: every check of the
   runner, the clock check, a node that cannot pull a stored image, a chart that cannot be
   fetched, and a probe's pod that the API server refuses.
@@ -2434,6 +2618,33 @@ StatefulSet's and the DaemonSet's is a Deployment.
 under Helm 3 and once under Helm 4. The first fixture alone also runs on the oldest node image
 that kind lists for the linked release. A release promises what the suite ran on (section 9).
 
+**The suite's workflow.** Three jobs, started by hand. The first runs the tests under the build
+tag `cluster` on `ubuntu-24.04`, which took 16 minutes there. The other two start when it has
+passed and run side by side: the suite under Helm 3 on `ubuntu-24.04`, and the suite under Helm 4
+on `ubuntu-26.04`. Each image is paired with the Helm major that it carries itself (section 14,
+point 5), though the suite runs its own pinned Helm binaries. The second runner image is the one
+that `ubuntu-latest` comes to name from November 2026, over one or two months. It has Docker 29,
+and nothing of this project had run on it when this was written. The harness takes the Helm
+major from a variable, and runs both when the variable is not set, as a developer's run does. A
+`-run` pattern must not choose it: the fourteenth row's control is a subtest of its own, and a
+pattern for one Helm major skips it without a word. The control runs in both Helm jobs, whatever
+the variable says: each job has a runner image, a kernel and a Docker of its own, and the
+control shows there that the cluster's network plugin enforces the policy. The harness keeps
+GitHub's variables for the outputs and the summary out of the runs it starts, so that a job's
+summary is not the sum of its runs' summaries; of the suite's tests, the first fixture's alone
+sets the three variables of section 8 for its run, with files of its own for both, which it
+reads. Each job gives `go test` a time limit below its own, so that the test's report is not
+cut off. `go test` logs each run's two streams with their lines indented, and the runner trims
+a line before it parses it, so the stop lines that are logged keep the runner's workflow
+commands stopped for the rest of that `go test` step: a logged resume line is followed at once
+by the run's stop line of standard error, which stops them again. The same holds in the mirror
+job, and in the first job for the log of the action's script, whose stop line is never
+resumed. Those steps print no command, so nothing is lost (section 8, "Workflow commands"). A
+job that fails uploads the results folders of its runs, kept for three days; a job that passes
+uploads nothing. From the first fixture's time on a hosted runner, one run of the workflow is
+about 172 to 205 billed minutes, and about 1 hour 30 minutes to 1 hour 50 minutes from its
+start to its end (section 14, point 32).
+
 **The mirror job.** A registry inside the job stands for an organization's mirror. It needs a
 login, it sits under a path of its host, and it serves TLS from a private authority. The previous
 release's image is named after a public host and reaches the nodes only through that mirror. The
@@ -2444,14 +2655,44 @@ registry fails; a public pull that passes before the cut and fails after it show
 holds. The engine's route is not cut: before the run, the job makes sure that the engine holds
 the node image and the registry image, so the run asks the engine for no pull (section 14, point
 31). This is the proof of the mirror, certificate and credential settings. The job ends with the
-search for the password, in both forms, in everything the run wrote. It is a test of the suite
-under a build tag of its own, so it runs on a developer's machine as well; its workflow starts
-only by hand until the maintainer says otherwise.
+search for the password, in both forms, in everything the run wrote; its runs get files of their
+own for GitHub's outputs and summary, as the first fixture's does, so that the search reads
+those too. It is a test of the suite under a build tag of its own, so it runs on a developer's
+machine as well; its workflow starts only by hand until the maintainer says otherwise.
 
-**The action.** A workflow uses the action from its own repository, on the first fixture and on
-one that fails. It builds the tool's image in the job, pushes it to a registry container there,
-and passes it as `image` with its digest, so that the code under test runs and not the last
-release. It asserts the `verdict` and `out` outputs and the job summary for both runs.
+**The action.** A workflow uses the action from its own repository, in three runs. It builds the
+tool's image in the job, pushes it to a registry container there, and passes it as `image` with
+its digest, so that the code under test runs and not the last release.
+
+- **A pass.** The first fixture, from a file that needs a variable which only `env:` on the
+  action's step sets. A pass shows that the variable reached the tool (section 14, point 3).
+- **A fail.** The candidate with no readiness probe, which fails in its deploy. The step carries
+  `continue-on-error`, and a later step reads `verdict` as `fail` (point 4).
+- **A run cut short.** The first fixture again, from a file that gives it a steady window far
+  longer than a `timeout-minutes` on the action's step, which ends it. GitHub takes whole
+  minutes for that limit, and where a limit of a minute or two falls in a run differs from one
+  runner to the next; the long window makes sure that it falls before the verdict. A later step
+  finds a final `result.json` with the reason `interrupted`, and `verdict` as `not-verified`
+  (point 20), whether the limit fell in the steady window or in set-up, kind's creation of the
+  cluster included (section 10, "On a signal"). A final file there also shows that 7.5 s are
+  enough for the results. GitHub sends the same signals for a cancel as for this time limit,
+  and a workflow cannot cancel one of its own steps another way without a token that may cancel
+  runs.
+
+For each run the workflow asserts the `verdict` and `out` outputs and the job summary. A later
+step cannot read an earlier step's summary through anything GitHub documents. The runner keeps
+each step's summary, after masking, in a file under its own temporary directory until the job
+ends, and the workflow reads that copy. Because GitHub does not promise the folder, the workflow
+fails with a message that names it when the copy is not there, and never passes without having
+read a summary. The golden files of the unit tests pin the summary's exact text. The job's log
+is expected to show, at the start of each run's step, the script's stop line with its token
+masked, and the tool's own lines after it as plain text; the record of the runs says what it
+showed. No run plants a command, so none shows one that is ignored (section 16). The step after
+the first run prints one notice of its own: when the run shows it as an annotation, the runner
+read that step's commands again, so the script's stop ended with the action's step (section 14,
+point 33).
+
+The action's test starts by hand only, as the suite and the mirror job do (section 13).
 
 **The false-failure bound.** The project states its bound, from repeated runs of the first
 fixture, and its catch counts for the broken ones, as the second experiment did. A false failure
@@ -2504,9 +2745,17 @@ During incubation:
 - `OWNER` and `COMMIT` in this document stand for the future repository's owner and for a commit
   of that repository.
 - The project's workflows sit in the host repository's root workflow folder as `rollproof-*.yml`,
-  limited to the project's paths, because GitHub runs workflows only from there. Unit tests run on
-  every pull request that touches the project. The cluster suite, the mirror job and the action's
-  own test run on manual trigger only, because the host repository's minutes are billed.
+  limited to the project's paths, because GitHub runs workflows only from there. Unit tests
+  (`rollproof-unit.yml`) run on every pull request that touches the project. The cluster suite
+  (`rollproof-e2e.yml`), the mirror job (`rollproof-mirror.yml`), the action's own test
+  (`rollproof-action.yml`) and the proofs that need a hosted runner (`rollproof-proofs.yml`) run
+  on manual trigger only, because the host repository's minutes are billed. GitHub's pages say
+  that a workflow starts by hand only when the default branch holds a file of its name, and one
+  adds that a workflow which has run once can be started against any branch through the API.
+  In the one case seen, `main` held such a file and the file that ran was the chosen branch's;
+  the other case was not tried (section 16). Every workflow names its runner's image and never
+  `ubuntu-latest`: GitHub moves that name to Ubuntu 26.04 from November 2026, over one or two
+  months, with another Helm major and another Docker (section 14, point 5).
 - No series of repeated runs is started on GitHub without the maintainer's word.
 
 Graduation:
@@ -2562,7 +2811,8 @@ the next plan reads them: `docs/plans/2026-11-16-first-plan/README.md` and
 keeps no such list; its rulings are in section 14, point 24 (the node setting under Docker and
 Podman, and a `limits.settle` under about 7 s) and points 26 to 28. The plan for step 4 keeps its
 list in `docs/plans/2026-11-19-step4/README.md`, and its rulings are in point 29. Step 5's
-rulings before its plan are in points 30 and 31.
+rulings before its plan are in points 30 and 31, and step 6's in point 32, with point 33 for a
+ruling made while its plan was built.
 
 ## 14. Open points for the plan
 
@@ -2571,14 +2821,18 @@ decides. Points 6, 17 and 18 are settled and stay here for the record. The proof
 order's second step answered points 1 and 9 to 12, what point 5 says of the command lines in each
 Helm major, and point 8 for nerdctl only: there kind's own 30-second wait for a node's log line
 failed in 5 of 9 creations, and the tool tries the creation again. Their records are under
-`docs/proofs/`, whose index lists what they left unproved, point 8 with Docker among it. Points 7
+`docs/proofs/`, whose index lists what they left unproved; point 8 with Docker was among it until
+a run of step 6. Points 7
 and 16 are settled by the fixture runs, and points 13 and 14 before the first release. Point 15 is a
 caveat with nothing to settle, point 22 records two rules that stand for now, and point 23 records
 why the install settles under the probe and what that leaves open. Points 24 to 28 record findings
 and rulings of 2026-11-18 and 2026-11-19, and point 29 the rulings of 2026-11-19 before the plan for
 step 4. The proofs of step 5 settled points 2 and 19, and points 30 and 31 record the rulings of
-2026-11-20 before the plan for step 5. The build order of section 13 says which step proves which
-point.
+2026-11-20 before the plan for step 5. The runs of step 6, on 2026-11-22, settled points 3, 4 and
+20, point 8 for Docker, and what point 24 left open for Docker and Podman; point 32 records the
+rulings of that day before the plan for step 6, and point 33 the ruling on the runner's workflow
+commands, made while that plan was built. The build order of section 13 says which step proves
+which point.
 
 1. **Registry order in the nodes.** That a node tries the run's registry first for a host and then
    falls back to the real registry is what the container runtime's documentation and source say
@@ -2622,17 +2876,26 @@ point.
    signed, and the token services of named products; a settings folder for a host with a port,
    and the runtime's `_default` folder; `as` on Docker Hub, and a Docker Hub path other than
    `library/`; a mirror started before the cluster; an image index; and any of it on Docker.
-3. **Environment variables into a composite action.** Whether `env:` on the step that calls a
-   composite action reaches the action's inner steps was not found in the pages read. The plan
-   settles it with a run. If it does not, the first way out is `env:` at the job's level, which
-   needs no new input. An input that carries names and values is the last resort: it is the
-   string encoding that the design of section 8 avoids.
-4. **Outputs of a step that fails.** Whether the outputs a step wrote are kept when that step then
-   exits non-zero, and whether a composite action passes them on, was not checked. The `verdict`
-   output depends on it.
+3. **Environment variables into a composite action.** Settled by a run on 2026-11-22
+   (`docs/proofs/p03-p04-p20-github-runner.md`). `env:` on the step that calls a composite action
+   reaches the action's inner steps, and so does `env:` of the job and of the workflow. An inner
+   step's own `env:` wins over all three. So the action takes no input for variables, and the
+   string encoding that the design of section 8 avoids is not needed. The same run showed that a
+   caller's `env:` cannot change `GITHUB_ACTIONS`, `RUNNER_TEMP` or `GITHUB_STEP_SUMMARY`, and
+   that an inner step sees no `INPUT_` variable: the action passes its inputs to its step
+   through `env:`.
+4. **Outputs of a step that fails.** Settled by the same run. The outputs a step wrote are kept
+   when the step then exits non-zero, when it is cancelled and when it runs into a time limit, and
+   a composite action passes an inner step's output on in each case. The runner reads the file
+   when the step has ended, and the last value written for a name is the one it keeps. The tool
+   writes `verdict` twice (section 8) and rests on that, so one more job showed it the same day:
+   in both forms of an output's line, in both orders of the two, and through a composite action
+   whose step then exits 1 under `continue-on-error`. A line that is no output fails the step,
+   and the lines after it are lost, so the tool writes each output in the form that cannot be
+   misread whatever the value holds.
 5. **Helm's two majors.** GitHub's hosted images carry Helm: 3.22 on the image that `ubuntu-latest`
-   names today, and 4.3 on the next one, on x64 and arm64 alike (read twice on 2026-11-16,
-   section 16). A job on `ubuntu-latest`
+   named when this was read, and 4.3 on the next one, on x64 and arm64 alike (read twice on
+   2026-11-16, section 16). A job on `ubuntu-latest`
    therefore changes Helm major when that label moves, so the first release is tested with both.
    The command lines of section 7 exist in both with the same meaning. Helm 4 differs in what they
    do: it applies objects on the server by default, a rollback included, and such an apply fails
@@ -2655,11 +2918,12 @@ point.
    with the node settings section 9 needs. The proof `docs/proofs/p08-kind-library.md` ran it
    through nerdctl only: there kind's own 30-second wait for a node's log line failed in 5 of 9
    creations, and the tool tries the creation again. Every setting held where the creation
-   returned. Docker was not run.
+   returned. Docker ran on a hosted runner on 2026-11-22, once: the creation returned at its
+   first attempt, and every setting that the record's method checks held (the same record).
 9. **Which kind release to link**, and the node images kind lists for it. The tool promises those
    of them that its suite ran on (section 12). `docs/proofs/p09-kind-release.md` answered it: the
    tool links kind v0.33.0, whose default node image is `kindest/node:v1.37.0`, and the oldest of
-   the four images it lists, v1.34.11, is the suite's second image (section 12).
+   the four images it lists, v1.34.11, is the suite's second node image (section 12).
 10. **The rollout rules.** Whether the Go package that holds the rules of `kubectl rollout status`
     can be imported. Copied rules have to be read again at every Kubernetes minor.
     `docs/proofs/p10-rollout-rules.md` answered it: importing the package made the binary more
@@ -2679,7 +2943,12 @@ point.
     stays well under it, the setting leaves the tool. `docs/proofs/p12-keys.md` measured more than
     half the quota while the nodes were deleted, so the setting stays (section 9).
 13. **Masking, and what leaves the runner.** The rule of section 8 needs a security reviewer's eye
-    before the first release. So do five facts of section 11: the change under test runs with the
+    before the first release. So does the way the job summary keeps text that came from
+    outside the tool from changing a run's page, which renders it as Markdown with some HTML
+    (section 10; the plan for step 6 gives the rule in one of its decisions). So does the way
+    the tool and the action keep GitHub's runner from reading a workflow command in what they
+    print, and the two things that stay open there (point 33). So do
+    five facts of section 11: the change under test runs with the
     job's power, every pod in the cluster can read the nodes' credentials, a registry entry's
     credentials reach its mirror and the token service that a challenge names, a chart's own pull
     secrets for a host with a mirror reach the mirror, and the value of a probe header is not
@@ -2724,10 +2993,21 @@ point.
     or speaks TLS, a caller's own `NO_PROXY`, the variables in lower case only, Helm 4, a pull
     from a mirror or from a registry with credentials behind the proxy, whether a workload's
     pods see the variables, and Helm's and the engine's pulls through a proxy.
-20. **Signals.** GitHub sends a cancel signal to the first process of a step. The action starts
-    the tool with `exec`, so that the tool is that process (section 8). Whether a shell would
-    pass the signal on to a child was not read. The fixture with a signal covers the tool; a run
-    of the action that is cancelled covers the action.
+20. **Signals.** Settled by runs on 2026-11-22 (`docs/proofs/p03-p04-p20-github-runner.md`), after
+    a reading of the runner's source (section 16). GitHub's runner signals the first process of a
+    step and nothing else: SIGINT, SIGTERM 7.5 s later, and a kill 2.5 s after that. It did the
+    same for a cancel of the run and for a step's `timeout-minutes`, both on a step that calls a
+    composite action, and for the job's time limit on a plain step; the source has one path for
+    the three. A program that an inner step of a composite
+    action started with `exec` was that first process, a child of the runner itself. A shell
+    does not pass the signal on: a program that a shell started with no `exec` got no signal,
+    went on after its step had ended, and was ended only when the job ended. The action starts
+    the tool with `exec` (section 8). The output and the summary that a program wrote when
+    SIGINT came were kept. The fixture with a signal covers the tool; the action's own test
+    covers the action, with a run that a time limit cuts short (section 12). Not run: how long a
+    step with `always()` may go on after a cancel, which the source gives as about 4 min 45 s;
+    and that a running step whose condition still holds after a cancel is not cancelled, which
+    is read in the source too.
 21. **Facts that the third review's changes rest on and that nobody read in a source.**
     - That a shell which runs as the first process of a container sets no handler for SIGTERM.
       The kernel's rule for such a process was read. The shell's side was not, until a run on
@@ -2878,12 +3158,14 @@ point.
       from one address as often as the built-in probe does.
     - A connection whose first answer takes longer than 5 s is believed to wait for the
       kernel's next attempt, about 7 s after the first. Nothing in the fixtures does that.
-    - The value was set on nodes of rootless nerdctl only. Docker and Podman are not tried. A
-      reading of kind, Docker, Podman, runc, crun and the kernel, on 2026-11-19, expects rootful
-      Docker and Podman to accept it on the kernels of GitHub's hosted runners: kind runs its
+    - The value was first set on nodes of rootless nerdctl only. A reading of kind, Docker,
+      Podman, runc, crun and the kernel, on 2026-11-19, expected rootful Docker and Podman to
+      accept it on the kernels of GitHub's hosted runners: kind runs its
       nodes privileged, so neither engine makes `/proc/sys` read-only, and the kernel checks the
-      capability against the user namespace that owns the node's network. A run with step 6 is to
-      show it, at the maintainer's ruling.
+      capability against the user namespace that owns the node's network. Runs with step 6, on
+      2026-11-22, showed it on a hosted runner (`docs/proofs/p24-hosted-runner.md`). Under
+      rootful Docker every node read 5, and all the tests under the build tag `cluster` passed.
+      Under rootful Podman 4.9.3 the one test that reads the value passed.
     - With the setting and the revision's code together, the nine runs of the five fixtures
       that reached the probe had no late timeout, and every failure of the probe's start came
       in its first 2 s. In one run every check of the first 0.7 s timed out, 145 of them, and
@@ -3097,6 +3379,182 @@ point.
       and the registry image, so the run asks it for no pull (point 28; section 12). What lost:
       **a cut of the engine's route too**, which needs a network of the engine's own and a proof
       that no run has made.
+32. **The outputs, the action's test, a cancel, the summary and the suite's workflow, rulings of
+    2026-11-22.** Before the plan for step 6, a cold reading of this text against the code, and a
+    reading of the runner's source, left more open than the three points that the build order
+    gives to the step. The maintainer ruled on the first four things below that day, and on
+    the last once the plan was written. The drafting session chose the others, from this text,
+    from the code or from a run. They are not rulings of the maintainer, who may strike any.
+    They are recorded so that the plan does not decide them again.
+    - **The proofs on hosted runners.** Nearly every proof of step 6 needs GitHub's runner, or
+      Docker, which the workstation lacks. The maintainer gave the word for one run of each: what
+      the runner does with `env`, outputs, the summary and a cancel; the two proof programs that
+      waited for Docker; the tests under the build tag `cluster`; the first fixture under both
+      Helm majors; and one test through Podman as root, as a try whose failure nobody would
+      chase. Each ran once, none failed, and together with the job of the next ruling they took
+      42 minutes, with each job's time rounded up to whole minutes as GitHub bills it; the
+      records that section 16 names give each job's times. What lost: **Docker only**, which
+      would have left the nodes' setting unshown under Podman.
+    - **When the outputs are written.** The text said only that a signal's path writes them
+      first. The maintainer chose two moments: `out`, and `verdict` as `not-verified`, with the
+      first `result.json`, and `verdict` again with the final one (section 8). A run that is
+      killed then leaves an answer, and an empty `verdict` means only that the tool never
+      started, could not open its results folder or could not write the outputs. The rule rests
+      on the runner keeping the last of two values, which was read in its source; the
+      maintainer had one more job show it before the plan (point 4). What lost: **once, at the
+      end**, under which a killed run and an action that failed look the same to a caller.
+    - **The action's own test.** Section 12 had two runs, none that was cancelled, none that
+      passed a variable through `env:`, and no way for a workflow to read a summary. The
+      maintainer chose three runs, the third cut short by a time limit on the action's step, and
+      a summary read in the runner's own masked copy, with a failure that says so when that copy
+      is not where it was (section 12). What lost: **a cancel through GitHub's API from a second
+      job**, which is the path of a person's cancel but needs a token that may cancel runs,
+      where the runner's signals for a time limit are the same (point 20); **golden files alone**
+      for the summary, under which no run on GitHub shows that a summary was written; and **a
+      person who reads the run's page**, which asserts nothing.
+    - **The suite's workflow.** The suite as documented was one `go test` of about two and a half
+      hours with a time limit equal to GitHub's own for a job. The maintainer chose three jobs:
+      the tests under the build tag `cluster` first, then Helm 3 on `ubuntu-24.04` and Helm 4 on
+      `ubuntu-26.04` side by side (section 12). A cluster layer that is broken then costs 16
+      minutes and not the run, and Ubuntu 26.04 with Docker 29 is shown while `ubuntu-latest`
+      moves to it. The ruling named no image for the first job; the drafting session put it on
+      `ubuntu-24.04`, where its time was measured. The ruling was made on about 170 to 200
+      billed minutes for a run, with the fourteenth row's control in the Helm 3 job alone. The
+      plan runs the control in both Helm jobs, since each has a runner image, a kernel and a
+      Docker of its own, and the maintainer kept it there the same day: about 172 to 205 billed
+      minutes for a run. What lost: **both Helm jobs on `ubuntu-24.04`**, which changes one
+      thing at a time and leaves the new image unshown; and **one job for the whole suite**,
+      which needs no change to the harness and loses the whole run to a late failure.
+    - **7.5 s after a cancel.** This text said "about 10 seconds" in two places. The runner sends
+      SIGTERM 7.5 s after SIGINT, and point 27 makes a second signal end the tool at once. The
+      text now says 7.5 s, and the outputs and the summary come right after the final
+      `result.json`, before the evidence, whose list of events alone may take 10 s (sections 9
+      and 10). The console's text comes with them, on every run: the code printed it after the
+      evidence, so the log of a cancelled step would often have held none. A warning from the
+      evidence is then a line after the console's text, as one from the clean-up already was.
+      Point 27 stands. What lost: **a SIGTERM after a SIGINT that the tool waits out**, which
+      undoes part of point 27 to gain 2.5 s; and **the console's text last**, which keeps every
+      warning of the evidence inside it and loses it to a cancel.
+    - **What the summary holds.** "The same tables and lists" gave a run that ended before its
+      steady window an empty summary, and gave a fail no reason. The summary now holds the
+      console's blocks for every ending (section 10). Its Markdown form is the plan's, pinned by
+      golden files.
+    - **A signal while kind works.** The text says that a signal stops the run at once. The code
+      waited for kind while it created a cluster, while it deleted an earlier run's before
+      that, and while it took the logs of a set-up that failed and deleted that cluster. Each
+      can take longer than a cancelled step has. The short calls by which the code lists the
+      nodes and writes their settings take no context either. The code changes to the text:
+      before the verdict the tool stops waiting for kind, in every one of these, and the next
+      run removes what kind left (section 10). The delete at a run's end comes after the
+      verdict and is still not cut short. What lost: **an exception in the text**, under which
+      a cancel during set-up leaves a `result.json` that says the run did not finish.
+    - **One engine for the action and the tool.** The action finds the engine by the tool's
+      rule, written a second time in its script, and two writings of one rule can differ. The
+      action therefore starts the tool with `KIND_EXPERIMENTAL_PROVIDER` set to the engine it
+      found (section 8). What lost: **the rule twice and nothing more**, under which the image
+      could be pulled through one engine and the cluster made through another.
+    - **Where the limit of the action's third run falls.** GitHub takes whole minutes for a
+      step's limit, and the first fixture took 138 s and 166 s on a hosted runner, so a limit of
+      one minute falls in set-up and one of two minutes may fall after the verdict. That run's
+      file gives it a steady window far longer than the limit (section 12).
+    - **The results of a job that failed.** The suite's workflow and the workflow of the
+      action's own test upload the results folders of a job that failed, for three days, and
+      nothing of a job that passed. The action itself uploads nothing (section 8).
+    - **kind's node image under Podman.** The tool handed a node image to the engine's pull by
+      the name that the configuration or kind's default gives it. kind's own Podman provider
+      asks the engine for another name: `docker.io/` in front of a name with no registry host,
+      `docker.io/library/` in front of a name of one segment, and no tag when the name has a
+      digest. The tool names a node image to the engine in three places: where it looks for
+      it, where it pulls it, and where it reads its digest. GitHub's image gives Podman two
+      registries to search, and the try through Podman ran with an alias for the name, so a
+      pull with no alias is not shown. Under Podman the plan for step 6 has the tool ask for
+      every node image by the name that kind's provider uses, in all three places, so that kind
+      asks for the name that the tool pulled (section 9; point 28). Podman stays not promised.
+    - **What waits for a repository of its own.** The digest in `action.yml`, and the action's
+      use from another repository, come with the first release (section 8). The automation of
+      kind's updates comes with step 7 (section 9). Until then the README says that the action
+      cannot be used from outside.
+    - **How the two new workflows are started.** GitHub's pages say that a workflow starts by
+      hand only when the default branch holds a file of its name. One adds that a workflow
+      which has run once can be started against any branch through the API or the command
+      line; whether that holds for a file that is on no branch but the chosen one was not
+      tried (section 16). `rollproof-proofs.yml` was on `main` before step 6, so the branch's
+      file could be started. `rollproof-e2e.yml` and `rollproof-action.yml` are new, and step 6
+      has to run both before it is merged. The maintainer chose, once the plan was written: a
+      small pull request first that puts both names on `main` as files that do nothing yet,
+      which is the case that was seen. The plan for step 6 has it as one task that only the
+      runs on GitHub depend on. What lost: **the new jobs as further parts of
+      `rollproof-proofs.yml`** until the step is merged, which leaves the two files themselves
+      unrun; and **a trigger other than by hand for the time of the step**, which spends
+      minutes on every push while it stays, unless one run by it is enough for a start by hand
+      afterwards, which is the untried case.
+33. **Workflow commands in what the tool prints, a ruling of 2026-11-22.** While the plan for
+    step 6 was built, a reading of the runner's source at `7e211dc` found that the runner reads
+    every line that a step prints for workflow commands, a thing this text had not considered:
+    - Every line of a `run` step's standard output and standard error goes to the runner's
+      parser of commands (`src/Runner.Worker/Handlers/ScriptHandler.cs`, lines 332 to 336;
+      `src/Runner.Worker/Handlers/OutputManager.cs`, lines 77 to 87).
+    - A line is a command when, after its leading white space, it begins with `::` and names a
+      command that the runner knows. The older form `##[name …]` is found anywhere in a line
+      (`src/Runner.Common/ActionCommand.cs`, lines 62, 63 and 86, and 132 and 156).
+    - The commands it knows include `error`, `warning`, `notice`, `add-mask`, `set-output`, which
+      still sets an output, `group`, `endgroup`, `add-matcher`, `debug`, `echo` and
+      `save-state`. `set-env` and `add-path` are refused unless the job allows them, and a
+      command that fails marks the step failed (`src/Runner.Worker/ActionCommandManager.cs`,
+      lines 125 to 143, 259 and 478). A job output whose value the log's masker changes is
+      dropped (`src/Runner.Worker/JobExtension.cs`, lines 820 to 825).
+    - After `::stop-commands::TOKEN` no command is read until a line `::TOKEN::`, or `##[TOKEN]`
+      anywhere in a line. The token is matched without regard to case, is added to the log's
+      masker when it is longer than 6 characters, and may not be empty, the name of a command or
+      `pause-logging` (`ActionCommandManager.cs`, lines 83 to 123 and 156 to 186). A resume
+      forgets the token (line 94), so the same stop line, read after it, is a stop again.
+    - Each step's handler makes a parser of its own, which the step's two streams share
+      (`src/Runner.Worker/Handlers/Handler.cs`, line 172; `ScriptHandler.cs`, lines 332 and
+      333), so a stop lasts for one step.
+    - Two readers take the two streams, each in its own order, and at each turn the runner hands
+      on the lines of standard error that it holds before those of standard output
+      (`src/Runner.Sdk/ProcessInvoker.cs`, lines 400 to 438 and 507 to 529).
+    - A step's files, its outputs among them, are read after its process has ended
+      (`src/Runner.Worker/ActionRunner.cs`, line 282). They are not lines of the log, and a stop
+      does not touch them, so the values of `verdict` and `out` come from the file and come last.
+
+    So a text from outside the tool that the tool prints, such as a pod's message in a reason's
+    detail, which may begin a wrapped line, a late warning or an error's text, could be read as a
+    command: an annotation that the tool did not write, a mask that hides later text in the log
+    or makes the job drop an output that holds it, a folded log, or a refused command that fails
+    the step. The maintainer approved the defence of section 8 that day: on GitHub Actions the
+    tool's first line on each stream stops the commands, and its last line on standard output
+    resumes them when it ends by itself; the action's script stops them with a token of its own
+    and never resumes. The tool's token comes from Go's `crypto/rand`, the script's from
+    `/proc/sys/kernel/random/uuid`, read with bash's own `read`, so that the script needs no
+    further program. The tool resumes because a step that calls it from a script of its own may
+    use commands afterwards, and an `::add-mask::` that the runner ignored without a word would
+    leave a secret in the log. It does not resume after a signal, which ends the step, nor after
+    a crash that escapes its run. Two things stay open, because the runner's two readers do not
+    keep the order in which the tool wrote to the two streams. A line that the tool writes on
+    standard error just before it ends can reach the runner after the resume line, and is then
+    read for commands; section 10 says what can stand there ("Console", the bullet on standard
+    error). And when a run ends within a moment of its start, as a usage error does, the stop
+    line of standard error can reach the runner after the resume line of standard output; the
+    runner then takes it as a new stop and reads no command for the rest of the step, so that a
+    later command of the caller's own script is ignored without a word, which is what the
+    resume line is there to prevent. Neither was seen in a run, and no test can make the runner
+    read in that order. In the action neither arises, since the script's stop holds for the
+    whole step. Nor does a stop reach the problem matchers that an earlier step of the job
+    registered: they still read every line, and one that matches becomes an annotation
+    (`OutputManager.cs`, lines 101 to 155); which matchers a job registers is its own. What
+    lost:
+    **escaping `::` and `##[` in every line the tool prints**, where every place that is missed
+    is a hole, and the console's golden text changes; **never resuming**, under which a later
+    command of the caller's own script would be ignored without a word; and **a note in the
+    documentation alone**, which leaves the hole open. After the approval the drafting session
+    weighed two more, for the two things left open, and kept what was approved; the maintainer
+    may take either up. **A resume line on standard error too**: the runner hands on standard
+    error's lines first at each turn, so it could resume before it has read the console's last
+    lines, which is worse. **The tool's standard error joined to its standard output on GitHub
+    Actions**, so that the runner reads one stream in the tool's own order and nothing is left
+    open: it takes the tool's errors out of a file to which a caller's script sent standard
+    error, and puts them, with both lines, into a file to which it sent standard output.
 
 ## 15. Not in the first release
 
@@ -3334,9 +3792,56 @@ and output are not filed in the repository.
 | The loop of section 6, unchanged but for its target, the API server's Service, run as user 65532 | That `nc -z -w1` against an open port, `sleep 0.1` and `trap` work in busybox 1.37.0 as that user, though the failure branch did not run; that the loop wrote 756 lines in 76.5 s, every one valid JSON with `ok` true; that the runtime's timestamps on them were 0.101 to 0.106 s apart, so each line reached the log on its own; that its pod, deleted with a grace period of 10 s, was gone after 1.0 s |
 | A shell as the first process of a container, `while true; do sleep 1; done`, with no trap, then with `trap 'exit 0' TERM` | That the shell with no trap ignored SIGTERM: its pod, deleted with a grace period of 10 s, was gone only after 11.1 s, past the grace period. With the trap it was gone after 0.9 s |
 
+Read on 2026-11-22 by an AI agent on an Opus model, from local clones, for sections 8, 10 and 12
+and for section 14, points 3, 4 and 20, before the runs of the next table. The drafting session
+opened the runner's places again for the signals and their times, for when a step's files are
+read, for the order in which outputs are set, and for a composite action's outputs and
+conditions, and found what the reading reported. It opened kind's places itself, for how kind
+finds the engine and how its Podman provider names a node image, and the two pages on starting
+a workflow by hand. It did not open the others.
+
+| Source | What this design takes from it |
+| --- | --- |
+| `actions/runner` at `7e211dc`, version 2.338.0: how a step's process is ended, how a step's files are read, how a composite action runs its steps | That the runner signals one process, by its ID: SIGINT, SIGTERM 7.5 s later, a kill 2.5 s after that, for a cancel and for a time limit alike. That a step's output and summary files are read after its process has ended, whatever its result, and that the last value written for an output's name is kept. That a composite action's outputs are set after its inner steps, failed or not. That every step gets a new summary file, and that the file and its masked copy stay under the runner's temporary directory until the job ends. That a running step whose condition holds again after a cancel is not cancelled, and that a step with `always()` may run for about 4 min 45 s after one |
+| GitHub Docs at `d7487f5`: the reference pages on workflow cancellation, workflow commands, workflow syntax, contexts, the events that trigger workflows, limits and the runners' prices | The 7,500 ms and 2,500 ms. The limit of 1 MiB for a step's summary. That `GITHUB_*` and `RUNNER_*` variables cannot be overwritten. That a workflow is started by hand only when its file is in the default branch; one page adds that a workflow which has run once can be started against any branch through the API or the command line. That `timeout-minutes` takes whole minutes only. 2 CPUs and 8 GB for a private repository, 6 hours for a job, and minutes rounded up for each job |
+| `actions/runner-images` at `0e63d4f`: the software lists of Ubuntu 24.04 and 26.04, and the script that installs the container tools | Docker 28.0.4, Helm 3.22.1 and Podman 4.9.3 on `ubuntu-24.04`; Docker 29.4.2, Helm 4.3.2 and Podman 5.7.0 on `ubuntu-26.04`. That `ubuntu-latest` still named 24.04 at that commit, and moves to 26.04 from November 2026, over one or two months. That the image gives Podman two registries to search for a short image name |
+| kind at `v0.33.0`: how it finds the engine, and the name its Podman provider gives a node image | That its library tries `docker`, `nerdctl` and `podman` in that order, each by a `-v` that prints one line which begins with the engine's name, and `finch` when `nerdctl` gives none; the tool takes the first line of a longer answer, does not try `finch`, and names the engine to kind itself, so kind's own search does not run. That only kind's command line reads `KIND_EXPERIMENTAL_PROVIDER`; the tool reads the variable itself. That the Podman provider asks the engine for every node image by a name with `docker.io/` in front when the name has no registry host, with `docker.io/library/` in front when the name has one segment, and with no tag when it has a digest; its test has 13 cases |
+| `moby/moby` at `8b0c45e4`, `containers/podman` at `06bc48f4` and nerdctl at `v2.4.2`: `create`, `cp`, `export`, and registries without TLS | That Docker's `create` needs a command for an image that has none, and that Docker reaches a registry on `127.0.0.0/8` without TLS. One trial on the workstation: rootless nerdctl refused `cp` from a container that never ran, and `export` worked |
+
+Seen on 2026-11-22, on GitHub's hosted runners: the image `ubuntu-24.04` at version
+20261116.376.1, with runner 2.338.2 and Docker as root. The jobs are those of
+`rollproof-proofs.yml` on the branch of step 6, each part started once by hand. `main` held an
+older file of that name then, which had never run, and GitHub started the branch's file with the
+branch's inputs. Their logs are not filed in the repository; the records under the project's own
+`docs/proofs/` quote them.
+
+| Run | What this design takes from it |
+| --- | --- |
+| Three jobs with a composite action made for the purpose and a program that records its signals, and a fourth that writes one output twice (`docs/proofs/p03-p04-p20-github-runner.md`) | Section 14, points 3, 4 and 20, and the facts about the job summary in sections 10 and 12: all as the reading above gave them, except what that record lists as not run |
+| `p08-kind-library` and `p01-registry-order`, on Docker | That kind as a library creates the cluster through Docker with the node settings that the record's method lists, and that the registry order in the nodes is the same there (section 14, points 1 and 8) |
+| The tests under the build tag `cluster`, on Docker (`docs/proofs/p24-hosted-runner.md`) | That every node of rootful Docker reads the 5 s of section 14, point 24, and that the tool's image store reads what `docker save` writes |
+| The first fixture, on Docker, under Helm 3.22.1 and Helm 4.3.2 (the same record) | That it passes on a runner of 2 CPUs under both, in 166 s and 138 s, about what it takes on the workstation |
+| One test through Podman 4.9.3 as root, with an alias for kind's node image (the same record) | That a node of rootful Podman takes the setting too, and that the runner reached the run's registry and the cluster there. Without the alias: not run |
+
+Read later on 2026-11-22, while the plan for step 6 was built, in the same clone of the runner
+and in the copies of the project's own dependencies that its `go.sum` names, for section 8
+("Workflow commands"), section 10 ("Console") and section 14, point 33. The drafting session
+read the runner's places for a line's parsing, the stop and the resume first. An AI agent on an
+Opus model then read them again, with the others of the two rows below, and wrote the
+amendment. The session opened every place that point 33 names once more, and the client
+library's (`rest/warnings.go`, lines 45 and 103 to 107; `klog.go`, lines 441, 835 to 840 and
+916 to 921), and found what the agent reported. One trial on the workstation: bash 5.3.20's
+`read` takes a token from `/proc/sys/kernel/random/uuid`, and from a file with no line end.
+Nothing else was run.
+
+| Source | What this design takes from it |
+| --- | --- |
+| `actions/runner` at `7e211dc`: how a step's two streams are read and parsed, the commands the runner knows, the stop and the resume of commands, how a job's outputs are set | That every line of both streams of a `run` step is parsed; the two forms of a command; the known commands, and that a command that fails marks the step failed; that a stop lasts for one step, ends only at the token's own line, is matched without regard to case and masks a token longer than 6 characters; that at each turn the lines of standard error are handed on before those of standard output; that a job output whose value the masker changes is dropped; that the problem matchers of earlier steps read every line, commands stopped or not |
+| `k8s.io/client-go` at `v0.37.2` and `k8s.io/klog/v2` at `v2.140.0`: the default handler of the API server's warnings, and where klog writes | That the library logs a warning that the API server sends with a response, as `Warning: ` and its text; that klog writes to standard error by default, at once, with the message quoted on one line |
+
 Still not shown by any run or any page: that 15 s is long enough for an install to settle under the
-probe; that a node of Docker or Podman takes the setting of section 14, point 24; that a shorter
-time between the proxy's syncs would hide failures that the fixtures catch. And, from before the
+probe; that a shorter time between the proxy's syncs would hide failures that the fixtures catch.
+And, from before the
 revision: that nodes behind a proxy on Docker reach the run's registry by its address; that Docker
 Desktop on Linux gives the nodes a clock of their own; that a pod in a privileged node can reach the
 runner; that the fixture for the known miss passes; that a job inside a container can reach the
@@ -3344,19 +3849,33 @@ cluster; that a larger sync time of the proxy gives no delay that can be set; th
 a reloader; that Podman run as root lets the runner reach the node addresses as Docker does; that a
 port mapping cannot be added to a node after it was created; which Go version Helm's released
 binaries are built with; and where a pod goes when the node its volume is tied to cannot take it.
-And, left by the proofs of the build order's second step: that kind creates the cluster through
-Docker. Left by the proofs of step 5: credentials from a credential-provider plugin; a token
+Left by the proofs of step 5: credentials from a credential-provider plugin; a token
 service asked by GET, one that refuses the credentials, one whose certificate another authority
 signed, and the token services of named products; a settings folder for a host with a port, and
 the runtime's `_default` folder; `as` on Docker Hub, and a Docker Hub path other than `library/`;
-a mirror started before the cluster; on Docker, a mirror named by its container's name and a cut
-of the nodes' route; a proxy that needs a login or speaks TLS, a caller's own `NO_PROXY`, the
-proxy variables in lower case only, Helm 4 behind a proxy, a pull from a mirror or from a
-registry with credentials behind a proxy, whether a workload's pods see the proxy variables, and
-Helm's and the engine's pulls through a proxy. That the hosted runner's Docker runs as
-root is read from the image's install script, which no page states. What is known of these is
-reasoned from the sources above or is the drafting session's own knowledge, and section 14 lists
-those of them that need a test.
+a mirror started before the cluster; a proxy that needs a login or speaks TLS, a caller's own
+`NO_PROXY`, the proxy variables in lower case only, Helm 4 behind a proxy, a pull from a mirror
+or from a registry with credentials behind a proxy, whether a workload's pods see the proxy
+variables, and Helm's and the engine's pulls through a proxy. Left by the runs of step 6: how the job summary
+looks on a run's page; how long a step with `always()` may run after a cancel, and that a
+running step whose condition still holds is not cancelled; how long after a cancel the tool has
+its final `result.json`; a job's time limit on a step that calls a composite action; the 7.5 s
+on a runner that persists; whether GitHub starts a workflow by hand whose file is on no branch
+but the chosen one, before or after a run of it by another trigger; the action's way of taking
+the binary out of its image on Podman; on Ubuntu 26.04, anything but the suite under Helm 4, and
+the version of Docker there, which no log of the runs shows; and Podman beyond one test, with the
+tool's pull of kind's node image when no alias names its registry, and whether kind pulls a node
+image again that the tool pulled under another name. Left by section 14, point 33: a workflow
+command printed after the action's stop line, which no run plants (the log of the action's own
+test shows only that the tool's own stop lines, printed after it, were not read as commands;
+`docs/proofs/p32-step6-workflows.md`); the order in which the runner reads the lines of the two
+streams, on which both things that section 8 leaves open depend; and the tool's resume line in a
+step of the caller's own script, which no workflow of the project runs. What is known of these
+is reasoned from the sources above or is the drafting session's own knowledge, and section 14
+lists those of them that need a test.
+
+That the hosted runner's Docker runs as root was read from the image's install script, which no
+page states. The runs of 2026-11-22 showed it: its `info` named no rootless option.
 
 This list named four more facts before. The proofs of the build order's second step showed three
 of them: that a node which the tool asks to pull an image with `crictl pull` uses the settings it
@@ -3374,4 +3893,7 @@ nodes behind a proxy (`docs/proofs/p02-mirror-credentials.md`,
 named two more limits of the proofs of the build order's second step before. A mirror under a
 path in the form with no `server` line no longer applies: step 5 writes a mirror as the `server`
 line. A pull from a real host over HTTPS ran in p02, with a private authority, a `ca` at the top
-of the settings file and no mirror.
+of the settings file and no mirror. The runs of step 6, on 2026-11-22, showed two more facts that
+this list named: that kind creates the cluster through Docker, and that a node of Docker or of
+Podman takes the setting of section 14, point 24 (`docs/proofs/p08-kind-library.md`,
+`docs/proofs/p24-hosted-runner.md`).

@@ -419,7 +419,7 @@ func TestSinkFinishPassesOnEachPartialLine(t *testing.T) {
 		t.Fatalf("before finish the evidence holds %q, want %q", got, want)
 	}
 	s.finish(ExitedNonZero, 1)
-	if got, want := ev.String(), "the command\nerr one\nout one\nout twoerr two\nrollproof: exit-nonzero, exit code 1\n"; got != want {
+	if got, want := ev.String(), "the command\nerr one\nout one\nout two\nerr two\nrollproof: exit-nonzero, exit code 1\n"; got != want {
 		t.Errorf("after finish the evidence holds %q, want %q", got, want)
 	}
 	if ev.closes != 1 {
@@ -429,6 +429,20 @@ func TestSinkFinishPassesOnEachPartialLine(t *testing.T) {
 	_, _ = io.WriteString(stderr, "late\n")
 	if got := ev.String(); strings.Contains(got, "late") {
 		t.Errorf("a line written after finish reached the evidence: %q", got)
+	}
+}
+
+func TestSinkFinishWithOnePartialLine(t *testing.T) {
+	// A stream with no partial line adds no line end at finish: no empty line stands before the other
+	// stream's partial line.
+	ev := &bufferCloser{}
+	s := &sink{w: ev}
+	stderr := stream{s, &s.stderr}
+	_, _ = io.WriteString(s, "the command\n")
+	_, _ = io.WriteString(stderr, "err two")
+	s.finish(ExitedNonZero, 1)
+	if got, want := ev.String(), "the command\nerr two\nrollproof: exit-nonzero, exit code 1\n"; got != want {
+		t.Errorf("after finish the evidence holds %q, want %q", got, want)
 	}
 }
 

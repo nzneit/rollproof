@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -42,17 +43,20 @@ func TestCreateKindRetries(t *testing.T) {
 		deleteErr        error   // what each delete of a failed attempt returns
 		cancel           bool    // ctx ends while the first attempt runs
 		creates, deletes int
-		want             string // the error's text; empty for none
+		want             string   // the error's text; empty for none
+		wantAny          []string // the texts of which the error's is one, in place of want when set
 	}{
-		{"the first attempt succeeds", []error{nil}, nil, false, 1, 0, ""},
-		{"a missed line twice, then success", []error{missedLine(1), missedLine(2), nil}, nil, false, 3, 2, ""},
+		{"the first attempt succeeds", []error{nil}, nil, false, 1, 0, "", nil},
+		{"a missed line twice, then success", []error{missedLine(1), missedLine(2), nil}, nil, false, 3, 2, "", nil},
 		{"a missed line four times", []error{missedLine(1), missedLine(2), missedLine(3), missedLine(4), nil}, nil, false, 4, 3,
-			missedLine(4).Error()},
-		{"another failure is not tried again", []error{other, nil}, nil, false, 1, 0, other.Error()},
-		{"another failure after a missed line", []error{missedLine(1), other, nil}, nil, false, 2, 1, other.Error()},
-		{"ctx has ended", []error{missedLine(1), nil}, nil, true, 1, 0, missedLine(1).Error()},
+			missedLine(4).Error(), nil},
+		{"another failure is not tried again", []error{other, nil}, nil, false, 1, 0, other.Error(), nil},
+		{"another failure after a missed line", []error{missedLine(1), other, nil}, nil, false, 2, 1, other.Error(), nil},
+		// The stub cancels ctx and returns at once, and untilDone may see either first.
+		{"ctx has ended", []error{missedLine(1), nil}, nil, true, 1, 0, "",
+			[]string{missedLine(1).Error(), context.Canceled.Error()}},
 		{"the delete of a failed attempt fails", []error{missedLine(1), nil}, errors.New("exit status 1"), false, 1, 1,
-			missedLine(1).Error() + "; delete the failed attempt 1: exit status 1"},
+			missedLine(1).Error() + "; delete the failed attempt 1: exit status 1", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
@@ -62,7 +66,8 @@ func TestCreateKindRetries(t *testing.T) {
 			var creates, deletes int
 			kindCreate = func(_ *kindcluster.Provider, n string, options ...kindcluster.CreateOption) error {
 				if creates == len(tc.results) {
-					t.Fatalf("attempt %d of kind's Create, want at most %d", creates+1, len(tc.results))
+					t.Errorf("attempt %d of kind's Create, want at most %d", creates+1, len(tc.results))
+					return errors.New("an attempt too many")
 				}
 				if n != name || len(options) != 1 {
 					t.Errorf("kind's Create(%q, %d options), want (%q, 1 option)", n, len(options), name)
@@ -86,6 +91,12 @@ func TestCreateKindRetries(t *testing.T) {
 			err := createKind(ctx, nil, name, kubeconfig, kindcluster.CreateWithRetain(true))
 			if creates != tc.creates || deletes != tc.deletes {
 				t.Errorf("%d attempts and %d deletes, want %d and %d", creates, deletes, tc.creates, tc.deletes)
+			}
+			if tc.wantAny != nil {
+				if err == nil || !slices.Contains(tc.wantAny, err.Error()) {
+					t.Errorf("error %v, want one of %q", err, tc.wantAny)
+				}
+				return
 			}
 			if tc.want == "" {
 				if err != nil {
@@ -161,6 +172,52 @@ func TestKept(t *testing.T) {
 	c.Context = "kind-rollproof-test-kept-app"
 	if got, want := c.Kept(), "the cluster is kept: kubeconfig "+c.Kubeconfig+", context kind-rollproof-test-kept-app"; got != want {
 		t.Errorf("Kept() = %q, want %q", got, want)
+	}
+}
+
+// Create hands the engine's pull the node image by nodeImageName's name, so that kind's own check
+// finds the image that was pulled, and the pull's failure is the step's.
+func TestCreatePullsTheNodeImageByTheEnginesName(t *testing.T) {
+	const digest = "@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d"
+	for _, tc := range []struct {
+		name   string
+		engine string
+		named  string // Spec.NodeImage
+		want   string // what the pull of the node image is given
+	}{
+		{"podman, no node image", "podman", "", podmanName(DefaultNodeImage())},
+		{"podman, a node image with a digest", "podman", "kindest/node:v1.34.11" + digest,
+			"docker.io/kindest/node" + digest},
+		{"nerdctl, no node image", "nerdctl", "", DefaultNodeImage()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeEngineOnPath(t, tc.engine)
+			oldDelete, oldPull := kindDelete, pullImage
+			t.Cleanup(func() { kindDelete, pullImage = oldDelete, oldPull })
+			kindDelete = func(*kindcluster.Provider, string, string) error { return nil }
+			var pulled string
+			pullImage = func(_ Engine, _ context.Context, image string, _ time.Duration) error {
+				pulled = image
+				return errors.New("stop here")
+			}
+			s := Spec{
+				Name:      "rollproof-test-unit",
+				RunDir:    filepath.Join(t.TempDir(), "rollproof-test-unit"),
+				Workers:   1,
+				Namespace: "app",
+				Timeout:   time.Minute,
+				NodeImage: tc.named,
+			}
+
+			_, err := Create(context.Background(), s, Engine{Binary: tc.engine})
+			c := verdict.AsCondition(err)
+			if want := "pull the node image: stop here"; c.Code != verdict.ClusterFailed || c.Text != want {
+				t.Errorf("Create = %s: %q\nwant cluster-failed: %q", c.Code, c.Text, want)
+			}
+			if pulled != tc.want {
+				t.Errorf("the pull of the node image was given %q, want %q", pulled, tc.want)
+			}
+		})
 	}
 }
 
@@ -258,19 +315,22 @@ func TestCreateFailureTexts(t *testing.T) {
 			runDir := filepath.Join(t.TempDir(), name)
 			kindCreate = func(*kindcluster.Provider, string, ...kindcluster.CreateOption) error {
 				if creates == len(tc.creates) {
-					t.Fatalf("attempt %d of kind's Create, want %d", creates+1, len(tc.creates))
+					t.Errorf("attempt %d of kind's Create, want %d", creates+1, len(tc.creates))
+					return errors.New("an attempt too many")
 				}
 				creates++
 				if tc.writeKubeconfig {
 					if err := os.WriteFile(filepath.Join(runDir, "kubeconfig"), []byte("apiVersion: v1\n"), 0o600); err != nil {
-						t.Fatal(err)
+						t.Errorf("write the kubeconfig: %v", err)
+						return err
 					}
 				}
 				return tc.creates[creates-1]
 			}
 			kindDelete = func(*kindcluster.Provider, string, string) error {
 				if deletes == len(tc.deletes) {
-					t.Fatalf("delete %d of kind's Delete, want %d", deletes+1, len(tc.deletes))
+					t.Errorf("delete %d of kind's Delete, want %d", deletes+1, len(tc.deletes))
+					return errors.New("a delete too many")
 				}
 				deletes++
 				return tc.deletes[deletes-1]
