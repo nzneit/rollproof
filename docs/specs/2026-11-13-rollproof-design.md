@@ -3798,15 +3798,15 @@ that was made for the series. The build order of section 13 says which step prov
 
 ## 16. Sources
 
-Paths in the first table are from the host repository's root. Those files stay behind at
-graduation.
+The first table's sources are research reports of the incubating repository. They are not published
+and stay behind at graduation. Each is named by what it is and by the date of its folder.
 
 | Source | What this design takes from it |
 | --- | --- |
-| `RESEARCH/2026-11-12/L5-kind-rollout.md` | The experiment on a workstation: the variants, the two-signal gate, the effect of the client's connections, the failures that went on after a rollout had finished (its section 5, item 6), the time a cluster takes to delete, the test service and the load generator that the fixture and the built-in probe are copied from, the kernel key quota on a rootless engine |
-| `RESEARCH/2026-11-12/L6-kind-rollout-on-actions.md` | The 160 jobs on hosted runners: the false-failure bound, the job time, 200 requests a second on 2 CPUs, the digest trials and the registry's set-up time, the slowest successful request |
-| `RESEARCH/2026-11-12/W16-shift-left-rollout-confidence.md` | That `kubectl rollout status` does not wait for terminating pods, and the share of failed requests that began after it returned (section 7 of that report) |
-| `RESEARCH/2026-11-13/W18-rollout-test-prior-art.md` | The prior-art search and its limits |
+| Experiment L5, on a workstation: its report of 2026-11-12 | The experiment on a workstation: the variants, the two-signal gate, the effect of the client's connections, the failures that went on after a rollout had finished (its section 5, item 6), the time a cluster takes to delete, the test service and the load generator that the fixture and the built-in probe are copied from, the kernel key quota on a rootless engine |
+| Experiment L6, on hosted runners: its report of 2026-11-12 | The 160 jobs on hosted runners: the false-failure bound, the job time, 200 requests a second on 2 CPUs, the digest trials and the registry's set-up time, the slowest successful request |
+| The reading W16: its report of 2026-11-12 | That `kubectl rollout status` does not wait for terminating pods, and the share of failed requests that began after it returned (section 7 of that report) |
+| The search W18: its report of 2026-11-13 | The prior-art search and its limits |
 
 Pages read on 2026-11-13 from local clones of the projects' documentation:
 

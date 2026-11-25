@@ -24,6 +24,8 @@ Points 3, 4 and 20 of section 14. Point 3: does `env:` on the step that calls a 
 
 ## Method
 
+The name of the repository in which the jobs ran is written `REPOSITORY` in the lines quoted below.
+
 The workflow file is `.github/workflows/rollproof-proofs.yml` at commit `cd7bc1f6eb0635c75832de73c47464ed9c026b32` of the branch `rollproof-step6-design`. It starts only by hand, and its input `part` picks the jobs: `part=all` runs `files-then-job-timeout` and `step-timeout`, with three jobs that other records cover; `part=runner-user-cancel` runs `user-cancel` alone, because that job cancels its own run. The workflow sets `env:` at its own level, `WF_LEVEL: workflow` and `OVERRIDE_ME: workflow`.
 
 **The first step of each job** writes three files into the workspace:

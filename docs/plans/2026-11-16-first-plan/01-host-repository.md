@@ -8,10 +8,12 @@ This is the one task that changes the host repository's own files, so it follows
 
 This plan's folder is committed with this task and not before. Until `projects/` is a folder that the citation check does not read, the check reads the plan's files and reports every path in them that is not built yet.
 
+This file quotes the incubating repository's citation tool and its rule files. In what follows, `ROW` stands for the ID of a row of that repository's log and `RESEARCH/` for the path of its research folder; neither is published with the project.
+
 Paths and commands in this task are from the repository root.
 
 **Files:**
-- Modify: `docs/decisions-and-open-items.md` (one row, directly under the table's header, above the row `ROW`)
+- Modify: `docs/decisions-and-open-items.md` (one row, directly under the table's header, above its newest row)
 - Modify: `AGENTS.md` (the list under "How to work")
 - Modify: `CLAUDE.md` (the list of notes)
 - Modify: `README.md` (the table of folders)
@@ -73,11 +75,9 @@ Expected: PASS, with no failing test.
 
 - [ ] **Step 5: Add the row to `docs/decisions-and-open-items.md`**
 
-Insert this one line directly under the header of the Decisions table, above the row that begins `| ROW |`. It is one line in the file.
+Insert one line directly under the header of the Decisions table, above its newest row. It is one line in the file.
 
-```markdown
-| ROW | (the text of this row is not published) |
-```
+The row's text is not published with the project: it belongs to the incubating repository's log. Section 13 of the design says what it decided.
 
 - [ ] **Step 6: Add the matching lines to the two rule files and to the README**
 

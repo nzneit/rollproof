@@ -32,7 +32,7 @@
   readiness probe on /readyz. spread (true) forbids two pods on one node.
   The strategy is always one more pod and none unavailable.
 
-Read first: section 12 ("With a cluster": the fixture, why the two images differ, the first four rows), and from the repository root `RESEARCH/2026-11-12/L5/src/svc/main.go`, `RESEARCH/2026-11-12/L5/manifests/A-compliant.yaml` and `base.yaml` beside it, for the service and the Deployment's shape.
+Read first: section 12 ("With a cluster": the fixture, why the two images differ, the first four rows), and the experiment's service and its two manifests, `A-compliant.yaml` and `base.yaml`, which are files of the incubating repository and are not published, for the service and the Deployment's shape.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -226,7 +226,7 @@ Expected: FAIL: `undefined: serve`
 
 - [ ] **Step 3: Copy the experiments' service into `fixtures/service/main.go` and change it**
 
-Copy `RESEARCH/2026-11-12/L5/src/svc/main.go` (from the repository root) unchanged, then make exactly these changes:
+Copy the experiment's service source, a file of the incubating repository that is not published, unchanged, then make exactly these changes:
 
 1. The package comment: its first line says the file is the service of the experiments that the project grew from (section 3), changed so that a test can run it; the `VERSION` line becomes `version is built in: -ldflags "-X main.version=…" (default dev), so that two builds are two images`.
 2. Add `var version = "dev"` at package level, and delete the reading of `VERSION`.
