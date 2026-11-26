@@ -83,7 +83,7 @@ the session's default model made the first requests and were stopped by the mode
 rate limit, and the session read what they had saved and made the rest. A background agent on
 the same model read GitHub's pages on runners and billing on 2026-11-24, and the session
 opened the passages that point 34 rests on and found them as reported (section 16). No agent
-on a Fable model ran. The security review of point 13 was had on 2026-11-26, in the form that
+on a Fable model ran. The security review of point 13 was had on 2026-11-25, in the form that
 point 34 gives; its record is `docs/proofs/p13-security-review.md`.
 
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
@@ -2438,7 +2438,7 @@ A line leaves the list when a fixture shows the tool catching what it names.
   hold no value of the configuration, and the client library's log on standard error, which
   holds the API server's warnings (section 8). Nothing else is masked. A name the caller gives,
   such as a workload's, is written as it was given where it names a file of the evidence, as a
-  chart value or a probe header is. The security review of 2026-11-26 (section 14, point 13)
+  chart value or a probe header is. The security review of 2026-11-25 (section 14, point 13)
   found 1 thing that this rule does not cover; they are accepted or documented in
   `docs/proofs/p13-security-review.md`.
 - On GitHub the tool's first lines, and the action's, stop the runner from reading a workflow
@@ -2453,7 +2453,7 @@ A line leaves the list when a fixture shows the tool catching what it names.
   that redirects or captures the tool's standard output, as `rollproof run > run.log` does, sends
   the resume line where the runner does not read it, and the runner then reads no command of that
   script again; such a script must leave the tool's standard output connected. The security
-  review of 2026-11-26 (section 14, point 13) found 2 things that this rule does not cover; they
+  review of 2026-11-25 (section 14, point 13) found 2 things that this rule does not cover; they
   are accepted or documented in `docs/proofs/p13-security-review.md`.
 - The credentials file mounted into the nodes holds only the hosts the configuration lists. It
   lives in the run's folder and is removed with the cluster. While the cluster lives, every pod
@@ -3030,7 +3030,7 @@ that was made for the series. The build order of section 13 says which step prov
     job's power, every pod in the cluster can read the nodes' credentials, a registry entry's
     credentials reach its mirror and the token service that a challenge names, a chart's own pull
     secrets for a host with a mirror reach the mirror, and the value of a probe header is not
-    masked. The review was had on 2026-11-26, in the form that point 34 gives. Its record is
+    masked. The review was had on 2026-11-25, in the form that point 34 gives. Its record is
     `docs/proofs/p13-security-review.md`, with every finding and the maintainer's ruling.
 14. **The name.** The probe's namespace and label carry it (section 6). So do the prefix of every
     cluster's name and the registry host `rollproof.test` (section 9), the command itself, the
