@@ -2438,9 +2438,10 @@ A line leaves the list when a fixture shows the tool catching what it names.
   hold no value of the configuration, and the client library's log on standard error, which
   holds the API server's warnings (section 8). Nothing else is masked. A name the caller gives,
   such as a workload's, is written as it was given where it names a file of the evidence, as a
-  chart value or a probe header is. The security review of 2026-11-25 (section 14, point 13)
-  found 1 thing that this rule does not cover; it is documented in
-  `docs/proofs/p13-security-review.md`.
+  chart value or a probe header is. The credentials file that the tool writes into the nodes is
+  not masked either: it holds the password in its encoded form, because the kubelet needs it.
+  The security review of 2026-11-25 (section 14, point 13) found 1 thing that this rule does not
+  cover; it is documented in `docs/proofs/p13-security-review.md`.
 - On GitHub the tool's first lines, and the action's, stop the runner from reading a workflow
   command in what they print, so that text from a chart, a command or the API server cannot
   become one (section 8). Two things stay open where a step of the caller's own script runs
