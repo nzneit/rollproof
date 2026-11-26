@@ -2440,8 +2440,11 @@ A line leaves the list when a fixture shows the tool catching what it names.
   become one (section 8). Two things stay open where a step of the caller's own script runs
   the tool: a line on standard error just before the tool's end can still be read (section
   10), and after a run that ends at once the runner may read no later command of that script,
-  an `::add-mask::` among them (section 8). This has not had a security review either (section
-  14, point 13).
+  an `::add-mask::` among them (section 8). The line on standard error can be the failure of a
+  results folder that cannot be opened, which holds the folder's path as the caller gave it,
+  unescaped: a path that holds a workflow command could then be read as one, so a caller gives a
+  results folder's path that holds none. This has not had a security review either (section 14,
+  point 13).
 - The credentials file mounted into the nodes holds only the hosts the configuration lists. It
   lives in the run's folder and is removed with the cluster. While the cluster lives, every pod
   in it can read the file (section 9), so the credentials should be able to read only, and
