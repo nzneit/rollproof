@@ -463,7 +463,7 @@ func TestTheScriptFailsWithExit2AndWritesNoOutput(t *testing.T) {
 		{name: "not Linux",
 			change: func(t *testing.T, r *scriptRun) { r.command("uname", "printf '%s\\n' Darwin\n") },
 			text: func(*scriptRun) string {
-				return "rollproof: the runner is not Linux (uname -s printed Darwin); the action runs only on Linux"
+				return "rollproof: the runner is not Linux; the action runs only on Linux"
 			},
 			exact: true, beforeStop: true},
 		{name: "a uname that fails",
@@ -607,6 +607,60 @@ func textLines(s string) []string {
 		return nil
 	}
 	return strings.Split(s, "\n")
+}
+
+// TestTheScriptPrintsNothingOfUnameBeforeItsStopLine checks that nothing of what uname prints
+// reaches the runner: the script runs uname before it stops the runner's workflow commands, so a
+// wrapped uname on the PATH could print a command that the runner reads, with no stop line before
+// it (finding P3-7 of the security review). Its standard error goes to /dev/null, and the message
+// of a runner that is not Linux prints none of its output.
+func TestTheScriptPrintsNothingOfUnameBeforeItsStopLine(t *testing.T) {
+	// readAsCommand gives the lines of a stream that the runner could read as a workflow command:
+	// one that begins with "::" after its white space, or holds "##[" anywhere. The script's own
+	// stop line is not one of them.
+	readAsCommand := func(stream string) (lines []string) {
+		for _, l := range textLines(stream) {
+			if !scriptStopLine.MatchString(l) &&
+				(strings.HasPrefix(strings.TrimLeft(l, " \t"), "::") || strings.Contains(l, "##[")) {
+				lines = append(lines, l)
+			}
+		}
+		return lines
+	}
+	for _, tc := range []struct {
+		name string
+		// uname is the body of the fake uname.
+		uname string
+		code  int
+		// stderr, when not empty, is what stderr must be whole: a run that ends before the stop
+		// line.
+		stderr string
+	}{
+		{name: "uname reports Linux and prints a command on standard error",
+			uname: "printf '%s\\n' Linux\nprintf '%s\\n' '::add-mask::REVIEWSECRET' >&2\n",
+			code:  7},
+		{name: "uname reports another system, with a command on each stream",
+			uname:  "printf 'Darwin\\n::add-mask::REVIEWSECRET\\n'\nprintf '%s\\n' '##[add-mask]REVIEWSECRET' >&2\n",
+			code:   2,
+			stderr: "rollproof: the runner is not Linux; the action runs only on Linux\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := startingRun(t)
+			r.command("uname", tc.uname)
+			stdout, code, stderr := r.start(r.script)
+			if code != tc.code {
+				t.Errorf("exit code %d, want %d; stderr:\n%s", code, tc.code, stderr)
+			}
+			for name, lines := range map[string][]string{"stdout": readAsCommand(stdout), "stderr": readAsCommand(stderr)} {
+				for _, l := range lines {
+					t.Errorf("%s holds a line the runner could read as a command: %q", name, l)
+				}
+			}
+			if tc.stderr != "" && stderr != tc.stderr {
+				t.Errorf("stderr is %q, want %q", stderr, tc.stderr)
+			}
+		})
+	}
 }
 
 func TestTheScriptStopsWorkflowCommandsFirst(t *testing.T) {
