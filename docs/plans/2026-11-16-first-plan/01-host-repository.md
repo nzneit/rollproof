@@ -4,7 +4,7 @@
 
 ### Task 1: Record the incubation in the host repository
 
-This is the one task that changes the host repository's own files, so it follows the host's rule for changing a rule: the row first, then the files that cite it, in one commit. The row's text below is a proposal. **The maintainer agrees its text before this task starts**; a change to the text changes the three lines that follow from it.
+This is the one task that changes the host repository's own files, so it follows the host's rule for changing a rule: the row first, then the files that cite it, in one commit. **The maintainer agrees its text before this task starts**; a change to the text changes the three lines that follow from it.
 
 This plan's folder is committed with this task and not before. Until `projects/` is a folder that the citation check does not read, the check reads the plan's files and reports every path in them that is not built yet.
 
