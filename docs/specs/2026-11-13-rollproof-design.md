@@ -2443,8 +2443,11 @@ A line leaves the list when a fixture shows the tool catching what it names.
   an `::add-mask::` among them (section 8). The line on standard error can be the failure of a
   results folder that cannot be opened, which holds the folder's path as the caller gave it,
   unescaped: a path that holds a workflow command could then be read as one, so a caller gives a
-  results folder's path that holds none. This has not had a security review either (section 14,
-  point 13).
+  results folder's path that holds none. A third place is no matter of order: a caller's script
+  that redirects or captures the tool's standard output, as `rollproof run > run.log` does, sends
+  the resume line where the runner does not read it, and the runner then reads no command of that
+  script again; such a script must leave the tool's standard output connected. This has not had a
+  security review either (section 14, point 13).
 - The credentials file mounted into the nodes holds only the hosts the configuration lists. It
   lives in the run's folder and is removed with the cluster. While the cluster lives, every pod
   in it can read the file (section 9), so the credentials should be able to read only, and
