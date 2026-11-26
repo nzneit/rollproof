@@ -2431,7 +2431,8 @@ A line leaves the list when a fixture shows the tool catching what it names.
   services that those hosts name. Helm's pulls, with the caller's own logins. The action's pull of
   the tool's own image, with the runner's engine login. The engine's pull of the node image, to
   the image's own host with the runner's engine login and not to the mirrors the configuration
-  lists. Nothing else.
+  lists. The engine's pull of the run's registry image, to the image's own host with the runner's
+  engine login as well. Nothing else.
 - A registry password arrives only through an environment variable. It is masked, in its plain
   and its encoded form, in everything the tool writes but the step's outputs on GitHub, which
   hold no value of the configuration, and the client library's log on standard error, which
