@@ -2439,7 +2439,7 @@ A line leaves the list when a fixture shows the tool catching what it names.
   holds the API server's warnings (section 8). Nothing else is masked. A name the caller gives,
   such as a workload's, is written as it was given where it names a file of the evidence, as a
   chart value or a probe header is. The security review of 2026-11-25 (section 14, point 13)
-  found 1 thing that this rule does not cover; they are accepted or documented in
+  found 1 thing that this rule does not cover; it is documented in
   `docs/proofs/p13-security-review.md`.
 - On GitHub the tool's first lines, and the action's, stop the runner from reading a workflow
   command in what they print, so that text from a chart, a command or the API server cannot
