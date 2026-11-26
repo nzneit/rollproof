@@ -22,8 +22,8 @@ No program under `proofs/` was written for this point. The method is four review
    - The job summary: text from outside the tool stands in the summary only inside a fenced code block or a code span. The card asks for Markdown and HTML in every string of the record.
    - Workflow commands: on GitHub Actions the tool's first line on each stream stops the runner's workflow commands and its last line on standard output resumes them when the tool ended by itself; the action's script stops them and never resumes. The card asks for what may be printed before the stop line or after the resume line.
    - The five facts and what leaves the runner: the first bullet of section 11, its list of what leaves the runner, and the facts on the credentials file, a mirror's credentials, a chart's pull secrets and a probe header. The card asks for a pod, a command or a pull that reaches a secret or a place section 11 does not name, or for something the list leaves out.
-2. **Reviewers in copies.** Each reviewer worked in a copy of the project made with `cp -a`, which holds no git repository, and changed nothing outside it. Reviewers 1 and 2 ran first; 3 and 4 started when both had reported. A reviewer that stopped before its report was to be dispatched again; none did. Each left its tests in place, named `review_pn_k_test.go`, with the command that runs each and its output; reviewer 1 put its package, `reviewp1`, beside the project's, and the others put theirs among the packages of the code they tried to break.
-3. **The re-runs.** The session ran every try again on 2026-11-25 from its copy's root, with the command the report gave, and set one of three verdicts: `holds` when both outputs show the rule broken, `does not hold` when the re-run shows the rule keeping, and `differs` when they disagree. The five tries of part 1 that need no engine were run with `-count=1`, which the reviewer's commands lack, so that the tests ran and were not taken from the build cache. The nine tries that create a cluster ran one at a time, from 18:06 to 18:14, after all four reviewers had reported. Before and after them `nerdctl ps -a --format "{{.Names}}"` printed nothing, and no network, volume or image named `rollproof-review-` remained.
+2. **Reviewers in copies.** Each reviewer worked in a copy of the project made with `cp -a`, which holds no git repository, and changed nothing outside it. Reviewers 1 and 2 ran first; 3 and 4 started when both had reported. A reviewer that stopped before its report was to be dispatched again; none did. Each left its tests in place, named `review_pn_k_test.go`, with the command that runs each and its output. Reviewer 1 put its seven in a package of its own, `reviewp1`, and reviewer 4 its first in a package of its own, `review-p4`; the other 37 stand among the packages of the code they tried to break.
+3. **The re-runs.** The session ran every try again on 2026-11-25 from its copy's root, with the command the report gave, but in eight tries with `-count=1` or the name between `^` and `$` added, as each try's line says, and set one of three verdicts: `holds` when both outputs show the rule broken, `does not hold` when the re-run shows the rule keeping, and `differs` when they disagree. The five tries of part 1 that need no engine were run with `-count=1`, which the reviewer's commands lack, so that the tests ran and were not taken from the build cache. The nine tries that need the engine ran one at a time, from 18:06 to 18:14, after all four reviewers had reported; two of them, P4-2 and P4-9, make no cluster, because the engine's pull of the image fails first. Before and after them `nerdctl ps -a --format "{{.Names}}"` printed nothing, and no network, volume or image named `rollproof-review-` remained.
 4. **One reading by the session.** P2-3's reviewer was unclear whether GitHub's table splitter reads a run of backslashes before a pipe. The session read the source of github/cmark-gfm, its table extension's scanner, and wrote what it read, and what it did not run, beside the finding.
 5. **The rulings.** The session asked the maintainer one question per finding, in the order of the IDs: fix it, document it, or accept it with a reason. The answer and its reason stand with the finding in Result.
 6. **The fix round.** Each finding ruled fix got a test in the package that owns the rule: the test was seen to fail, the smallest change was made, and the test passed; one commit for each finding. Each finding ruled document got its text in section 11 of the design, in one commit. Each ruled accept changed nothing. Before each commit stood the plan's checks: `gofmt`, `go test ./...` and the four vets when code changed, and always the search for what may not be published and the citation check.
@@ -158,7 +158,7 @@ func linesWith(text, form string) string {
 }
 ````
 
-- Command, from the copy's root: `go test ./reviewp1 -run TestP1K1FailureClassIsAPassword -v`. The re-run adds -count=1, so that the test runs and is not taken from the build cache.
+- Command, from the copy's root: `go test ./reviewp1 -run TestP1K1FailureClassIsAPassword -v`. The re-run adds -count=1 and writes the name between ^ and $, so that the test runs and is not taken from the build cache.
 - Rule: "The tool masks every such password in everything it writes, in its plain form and in the encoded form in which the nodes' credentials file holds it." (section 8, "Secrets.")
 - Reviewer's output (its verdict: broken: the password is a map key, and `mask.go` keeps map keys):
 
@@ -256,7 +256,7 @@ func TestP1K2ProbeClassReachesTheVerdict(t *testing.T) {
 }
 ````
 
-- Command, from the copy's root: `go test ./reviewp1 -run TestP1K2ProbeClassReachesTheVerdict -v`. The re-run adds -count=1, so that the test runs and is not taken from the build cache.
+- Command, from the copy's root: `go test ./reviewp1 -run TestP1K2ProbeClassReachesTheVerdict -v`. The re-run adds -count=1 and writes the name between ^ and $, so that the test runs and is not taken from the build cache.
 - Rule: "The tool masks every such password in everything it writes" (section 8, "Secrets."), at the point where the probe's line enters the record.
 - Reviewer's output (its verdict: broken, the mechanism of P1-1):
 
@@ -527,7 +527,7 @@ func excerpt(b []byte, form string) string {
 }
 ````
 
-- Command, from the copy's root: `go test ./reviewp1 -run TestP1K3PromisedFormsInEvidenceAndRecord -v`. The re-run adds -count=1, so that the test runs and is not taken from the build cache.
+- Command, from the copy's root: `go test ./reviewp1 -run TestP1K3PromisedFormsInEvidenceAndRecord -v`. The re-run adds -count=1 and writes the name between ^ and $, so that the test runs and is not taken from the build cache.
 - Reviewer's output:
 
 ````text
@@ -805,7 +805,7 @@ probe:
 }
 ````
 
-- Command, from the copy's root: `go test ./reviewp1 -run TestP1K4ConfigRejection -v`. The re-run adds -count=1, so that the test runs and is not taken from the build cache.
+- Command, from the copy's root: `go test ./reviewp1 -run TestP1K4ConfigRejection -v`. The re-run adds -count=1 and writes the name between ^ and $, so that the test runs and is not taken from the build cache.
 - Reviewer's output:
 
 ````text
@@ -1321,7 +1321,7 @@ review_p1_5_test.go:321: result.json holds the password form "cnYxdXNlcjpyMXMzY3
 The pod log is masked:
 2026-11-25T22:41:07.405562899Z review1 pod log ***
       "auth": "***=="
-The forms the rule does not name survive in evidence/commands/setup:
+The promised forms in the setup evidence, the pod log, `probe.log` and `probe-pod.json` were all masked. The forms the rule does not name survived in `evidence/commands/setup`:
 not a promised form (url B) survives in evidence/commands/setup: "rv%22%26%3C%0Aline2%09tab%5Cslash%FFend"
 not a promised form (b64-of-password B) survives in evidence/commands/setup: "cnYiJjwKbGluZTIJdGFiXHNsYXNo/2VuZA=="
 not a promised form (upper B) survives in evidence/commands/setup: "RV\"&<\nLINE2\tTAB\\SLASH�END"
@@ -1444,7 +1444,7 @@ func firstBytes(text string, n int) string {
 }
 ````
 
-- Command, from the copy's root: `go test ./reviewp1 -run TestP1K6CommandLineAndOutput -v`. The re-run adds -count=1, so that the test runs and is not taken from the build cache.
+- Command, from the copy's root: `go test ./reviewp1 -run TestP1K6CommandLineAndOutput -v`. The re-run adds -count=1 and writes the name between ^ and $, so that the test runs and is not taken from the build cache.
 - Reviewer's output:
 
 ````text
@@ -2182,7 +2182,6 @@ func TestReviewP2Try6BidiControls(t *testing.T) {
 
 ````
     review_p2_6_test.go:17: PAYLOAD "A\u202aB\u202bC\u202cD\u202dE\u202eF\u2066G\u2067H\u2068I\u2069J\u200eK\u200fL\u061cM"
-    review_p2_6_test.go:18: SUMMARY START
     review_p2_6_test.go:24: heading quoted: "### rollproof: FAIL `A B C D E F G H I J\u200eK\u200fL\u061cM (Helm) on Kubernetes A B C D E F G H I J\u200eK\u200fL\u061cM in kind`"
     review_p2_6_test.go:29: U+202A survives in the heading: false; in the whole summary: false
     review_p2_6_test.go:29: U+202B survives in the heading: false; in the whole summary: false
@@ -4101,7 +4100,7 @@ func TestReviewP4ActionPullsTheToolImage(t *testing.T) {
 }
 ````
 
-- Command, from the copy's root: `env CGO_ENABLED=0 go test ./review-p4 -run ^TestReviewP4ActionPullsTheToolImage$ -count=1 -v`.
+- Command, from the copy's root: `env CGO_ENABLED=0 go test ./review-p4 -run '^TestReviewP4ActionPullsTheToolImage$' -count=1 -v`. The re-run writes the name between ^ and $.
 - Rule: "What leaves the runner through the tool. The nodes' pulls: to the mirrors that the configuration lists in place of their hosts, to the other hosts it lists, and to the hosts of images that no entry names, each with its entry's credentials when it has them, and the token services that those hosts name. Helm's pulls, with the caller's own logins. Nothing else." (section 11)
 - Reviewer's output (its verdict: broken, the list leaves it out: `action.sh` pulls the tool's image before it starts the tool, with the runner's engine login):
 
@@ -4271,7 +4270,7 @@ func TestReviewP4EnginePullsTheNodeImage(t *testing.T) {
 }
 ````
 
-- Command, from the copy's root: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 go test ./internal/cluster -run ^TestReviewP4EnginePullsTheNodeImage$ -count=1 -v`.
+- Command, from the copy's root: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 ./internal/cluster -run TestReviewP4EnginePullsTheNodeImage -v`.
 - Rule: "What leaves the runner through the tool. … Nothing else." (section 11)
 - Reviewer's output (its verdict: broken, the list leaves it out: `cluster.Create` asks the engine to pull the node image; the request went to the image's own host with the engine's login, `docker-user:engine-login-p4`, and the configuration's mirror for that host was never contacted):
 
@@ -4627,7 +4626,7 @@ func reviewP4ContainerIP(engine, name string) (string, error) {
 }
 ````
 
-- Command, from the copy's root: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 go test ./internal/cluster -run ^TestReviewP4MirrorRedirectKeepsCredentials$ -count=1 -v -timeout 9m`.
+- Command, from the copy's root: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 ./internal/cluster -run TestReviewP4MirrorRedirectKeepsCredentials -v -timeout 9m`.
 - Rule: "A registry entry's credentials go to the entry's mirror when it has one, and to its host otherwise, and to a token service that the mirror's or host's challenge names." (section 11)
 - Reviewer's output (its verdict: broken: the mirror `m.review4.example` asked once, then answered 307 to `https://m.review4.example:8443`; the target received the same Basic credentials, `huser:hunter2-p4`, on a port the configuration never names, without asking):
 
@@ -4822,7 +4821,7 @@ func TestReviewP4CredentialsFileReadByPods(t *testing.T) {
 }
 ````
 
-- Command, from the copy's root: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 go test ./internal/cluster -run ^TestReviewP4CredentialsFileReadByPods$ -count=1 -v -timeout 9m`.
+- Command, from the copy's root: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 ./internal/cluster -run TestReviewP4CredentialsFileReadByPods -v -timeout 9m`.
 - Reviewer's output:
 
 ````text
@@ -4955,7 +4954,7 @@ func TestReviewP4SetupEnvironment(t *testing.T) {
 }
 ````
 
-- Command, from the copy's root: `env CGO_ENABLED=0 go test ./internal/deploy -run ^TestReviewP4SetupEnvironment$ -count=1 -v`.
+- Command, from the copy's root: `env CGO_ENABLED=0 go test ./internal/deploy -run '^TestReviewP4SetupEnvironment$' -count=1 -v`. The re-run writes the name between ^ and $.
 - Reviewer's output:
 
 ````text
@@ -5046,7 +5045,7 @@ func TestReviewP4ProbeHeaderInEvidence(t *testing.T) {
 }
 ````
 
-- Command, from the copy's root: `env CGO_ENABLED=0 go test ./internal/probe -run ^TestReviewP4ProbeHeaderInEvidence$ -count=1 -v`.
+- Command, from the copy's root: `env CGO_ENABLED=0 go test ./internal/probe -run '^TestReviewP4ProbeHeaderInEvidence$' -count=1 -v`. The re-run writes the name between ^ and $.
 - Reviewer's output:
 
 ````text
@@ -5278,7 +5277,7 @@ func reviewP4BuildBasicStandin(work string) (string, error) {
 }
 ````
 
-- Command, from the copy's root: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 go test ./internal/cluster -run ^TestReviewP4ChartPullSecretGoesToTheMirror$ -count=1 -v -timeout 9m`.
+- Command, from the copy's root: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 ./internal/cluster -run TestReviewP4ChartPullSecretGoesToTheMirror -v -timeout 9m`.
 - Reviewer's output:
 
 ````text
@@ -5577,7 +5576,7 @@ func reviewP4BuildTokenStandin(work string) (string, error) {
 }
 ````
 
-- Command, from the copy's root: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 go test ./internal/cluster -run ^TestReviewP4TokenServiceGetsTheCredentials$ -count=1 -v -timeout 9m`.
+- Command, from the copy's root: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 ./internal/cluster -run TestReviewP4TokenServiceGetsTheCredentials -v -timeout 9m`.
 - Reviewer's output:
 
 ````text
@@ -5688,7 +5687,7 @@ func TestReviewP4EnginePullsTheRegistryImage(t *testing.T) {
 }
 ````
 
-- Command, from the copy's root: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 go test ./internal/cluster -run ^TestReviewP4EnginePullsTheRegistryImage$ -count=1 -v`.
+- Command, from the copy's root: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 ./internal/cluster -run TestReviewP4EnginePullsTheRegistryImage -v`.
 - Rule: "What leaves the runner through the tool. … Nothing else." (section 11)
 - Reviewer's output (its verdict: broken, the list leaves it out: `startRegistry` calls the engine's `pull`; the request went to the registry image's host with the engine's login, `registry-user:registry-login-p4`, and no entry of the configuration nor the nodes' settings was involved):
 
@@ -5981,7 +5980,7 @@ func reviewP4BuildHostStandin(work string) (string, error) {
 }
 ````
 
-- Command, from the copy's root: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 go test ./internal/cluster -run ^TestReviewP4MirrorRedirectToAnotherHost$ -count=1 -v -timeout 9m`.
+- Command, from the copy's root: `env KIND_EXPERIMENTAL_PROVIDER=nerdctl CGO_ENABLED=0 go test -tags cluster -p 1 -count=1 ./internal/cluster -run TestReviewP4MirrorRedirectToAnotherHost -v -timeout 9m`.
 - Rule: "A registry entry's credentials go to the entry's mirror when it has one, and to its host otherwise, and to a token service that the mirror's or host's challenge names." (section 11)
 - Reviewer's output (its verdict: broken: the mirror `m.review4.example` redirected to `https://r.review4.example/...`, a host named neither by the configuration nor by a token challenge. Go strips the header on a cross-host redirect; `r` answered 401; on the retry `r` received `huser:hunter2-p4`):
 
