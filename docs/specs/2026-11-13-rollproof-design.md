@@ -110,8 +110,8 @@ names them all.
 
 `rollproof` is a working name until the first release. It was checked for collisions on
 2026-11-24 (`docs/proofs/p14-name.md`; section 14, point 14), and the maintainer ruled that it
-stays. The trademark databases refuse a script; the maintainer searches them in a browser
-before graduation.
+stays. The trademark databases refuse a script; the maintainer searched them in a browser on
+2026-11-26, and what they showed is in the same record.
 
 ## 1. Purpose
 
@@ -2806,7 +2806,8 @@ Graduation:
   repository, with the fixture series of section 12 and the automation of kind's updates. Each
   waits for the maintainer's word.
 - **Before.** Check the name for collisions, and have the security review of section 14,
-  point 13. The name was checked on 2026-11-24 (`docs/proofs/p14-name.md`).
+  point 13. The name was checked on 2026-11-24 (`docs/proofs/p14-name.md`). Its trademark half was
+  searched on 2026-11-26 (the same record).
 
 Graduation happens in this order. Where a step says the maintainer's word, nothing in it is done
 until that word is given (section 14, point 34):
@@ -3039,9 +3040,9 @@ that was made for the series. The build order of section 13 says which step prov
     does the tool's work, and the name is free under the maintainer's account. One repository of
     the name is an attendance application, one company of the name sells a car protector, and
     `ch0992/rollout-proof` is a project for the tool's purpose with no release (section 3). The
-    maintainer ruled that the name stays. The trademark databases refuse a script, so the
-    maintainer searches them in a browser before anything is pushed. A mark for software stops
-    the plan for graduation, and the name is chosen again.
+    maintainer ruled that the name stays. The trademark databases refuse a script; the
+    maintainer searched them in a browser on 2026-11-26, before anything was pushed, and found no
+    mark for software in the nice classes 9 and 42 (`docs/proofs/p14-name.md`).
 15. **Prior art.** The search could not read GitHub Marketplace in full text and did not open
     several tools. Finding an existing tool later would change the project's reason to exist, not
     this design. One was found on 2026-11-24, by the name check: `ch0992/rollout-proof`

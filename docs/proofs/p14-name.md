@@ -23,7 +23,8 @@ model service's rate limit, each before writing a note; the session read their s
 15:23 UTC on and made the rest of the requests itself. Tools: `gh` 2.103.3 for GitHub's API, GET
 requests only; Python 3.14's `urllib` for the other APIs, GET only but one Flathub search; the
 session's web search tool, which does not show which engine it asks. The raw answers are not filed
-in the repository.
+in the repository. The five searches of the trademark databases were made by the maintainer in a
+browser on 2026-11-26.
 
 ## Method
 
@@ -138,6 +139,16 @@ deploy OR release testing tool`; `"rollproof" app OR software OR developer OR de
 | `https://trademarks.justia.com/search?q=rollproof` (secondary, 15:28 UTC) | 403, a challenge page | not read |
 | OpenCorporates, `https://api.opencorporates.com/v0.4/companies/search?q=rollproof` (15:17 UTC) | "Invalid Api Token" | not read |
 
+The maintainer searched the five databases in a browser on 2026-11-26, for the word `rollproof`:
+
+| Database | What the search showed | Finding |
+| --- | --- | --- |
+| TMview | Two marks, each with the status `Ended` and the office of origin "United States - USPTO". One: "039 - Men's trousers", the applicant "EMBU INVESTMENTS SP. Z O.O., BRANCH IN LUXEMBOURG". The other: `ROLLPRUF`, number 71649051, the applicant "PIONEER RUBBER COMPANY, THE", "044 - Surgeons' gloves made from rubber or rubber-like material". The report gives "Trade Marks: 13976490 (updated 25/11/2026)" with each. | noted |
+| EUIPO's eSearch | No results for "rollproof". | none |
+| WIPO's Global Brand Database | `ROLLPROOF`: nice class 39, an "IPRNational Trademark Application" whose country of filing is the USA, with the status "Ended (June 1, 2012)", number 72305887. | noted |
+| The USPTO's search | Two wordmarks. `ROLLPROOF`: "Dead Cancelled"; "US 039: [ MEN'S TROUSERS ]"; class 025; serial 72305887; owner "EMBU INVESTMENTS SP. Z O.O., BRANCH IN LUXEMBOURG (LIMITED LIABILITY COMPANY; POLAND)". `ROLLPRUF`: "Dead"; "US 044: [ SURGEONS' GLOVES MADE FROM RUBBER OR RUBBER-LIKE MATERIAL ]"; class 010; serial 71649051; owner "PIONEER RUBBER COMPANY, THE (CORPORATION; OHIO, USA)". | noted |
+| The United Kingdom's | No results for "rollproof". | none |
+
 ## Decision
 
 - **The name can be taken.** No GitHub user or organization is called `rollproof`, `nzneit/rollproof`
@@ -152,12 +163,10 @@ deploy OR release testing tool`; `"rollproof" app OR software OR developer OR de
   changes the project's reason to exist, not its design. **The maintainer ruled on 2026-11-24: the
   name `rollproof` stays.** `rollout-proof` is another name, and the design's paragraph on prior
   art should name the project.
-- **The trademark half is open.** Five offices' databases refuse a script, so the third assumption
-  below is not measured. **The maintainer's ruling of 2026-11-24: the maintainer runs the five
-  searches in a browser before the split**, with the word `rollproof`, in TMview or EUIPO's
-  eSearch, WIPO's Global Brand Database, the USPTO's search and the United Kingdom's. A mark for
-  software, in the nice classes 9 and 42, stops the graduation plan, and the name is chosen again.
-  What the searches show is written here when it is reported.
+- **The trademark half is closed.** The maintainer searched the five databases in a browser on
+  2026-11-26, before anything was pushed, and found no mark for software in the nice classes 9 and
+  42. What each showed is above. Two marks outside those classes were noted: `ROLLPROOF`, dead and
+  cancelled, for men's trousers, and `ROLLPRUF`, dead, for surgeons' gloves.
 - **Not searched at all:** Bitbucket, Codeberg, Gitea and SourceForge; a companies register; app
   stores other than the United States'; and anything a search engine does not index.
 
@@ -168,4 +177,4 @@ Plan assumed: "No GitHub repository, action, package or image called `rollproof`
 Holds: yes
 
 Plan assumed: "No trademark for software, in the nice classes 9 and 42, called `rollproof` is registered with the offices of the United States, the European Union, the United Kingdom or under the Madrid system."
-Holds: not measured here
+Holds: yes
