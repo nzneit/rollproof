@@ -2457,8 +2457,9 @@ A line leaves the list when a fixture shows the tool catching what it names.
   should expire soon.
 - A registry entry's credentials go to the entry's mirror when it has one, and to its host
   otherwise, and to a token service that the mirror's or host's challenge names. A mirror
-  replaces its host, so the real host never sees credentials meant for the mirror. A chart's own
-  pull secrets for a host with a mirror go to the mirror as well (section 9).
+  replaces its host, so the real host never sees credentials meant for the mirror. A mirror that
+  answers a redirect sends them on to the place it names, such as another port of itself. A
+  chart's own pull secrets for a host with a mirror go to the mirror as well (section 9).
 - The built-in probe does not verify a server's certificate. It sends nothing secret, unless the
   caller put a credential into a header, and a header's value is not masked.
 - The tool does not read, copy or change the runner's Helm logins, its container engine's logins
