@@ -1445,13 +1445,15 @@ empty string, and a workflow started from a fork gets no secrets at all.
 be a single `${env.NAME}`; a password written in the file is rejected, and the text that rejects
 any configuration never quotes a value. The tool masks every such password in everything it
 writes, in its plain form and in the encoded form in which the nodes' credentials file holds it.
-That includes the output of commands and the pod logs that it copies into the evidence. Two
+That includes the output of commands and the pod logs that it copies into the evidence. Three
 things it does not mask. The step's outputs on GitHub hold a word of the verdict's vocabulary
 and the results folder's absolute path, which the tool makes from the caller's `--out` or
 chooses itself, and the first of them is written before the configuration is read. And the log
 that the Kubernetes client library writes on standard error (section 10, "Console") does not
 pass through the tool's masker: it holds the API server's warnings, and nothing that the tool
-sends to the API server holds the password, which goes to the nodes in a file.
+sends to the API server holds the password, which goes to the nodes in a file. And that file,
+the credentials file the tool writes into the nodes, holds the password in its encoded form and
+is not masked, because the kubelet needs it.
 
 The tool masks nothing else. A chart value or a probe header's value is written as it was given,
 so a caller who passes a real secret there keeps the evidence to themselves. GitHub's own masking
