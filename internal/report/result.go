@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"rollproof/internal/mask"
+	"github.com/nzneit/rollproof/internal/mask"
 )
 
 // timeLayout is RFC 3339 with milliseconds; it is used on a time in UTC.

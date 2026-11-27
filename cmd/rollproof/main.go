@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	"rollproof/internal/cluster"
-	"rollproof/internal/probe"
-	"rollproof/internal/run"
+	"github.com/nzneit/rollproof/internal/cluster"
+	"github.com/nzneit/rollproof/internal/probe"
+	"github.com/nzneit/rollproof/internal/run"
 )
 
 // version is the tool's version, set at build time with -ldflags "-X main.version=…".

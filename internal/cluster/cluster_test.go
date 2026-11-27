@@ -38,8 +38,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	kindcluster "sigs.k8s.io/kind/pkg/cluster"
 
-	"rollproof/internal/config"
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // TestMain counts the attempts of kind's Create that step 3 of Create makes: with -v, each

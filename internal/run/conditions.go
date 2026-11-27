@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"strings"
 
-	"rollproof/internal/deploy"
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/deploy"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // kind classifies how a command ended.

@@ -19,7 +19,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"rollproof/internal/mask"
+	"github.com/nzneit/rollproof/internal/mask"
 )
 
 const testKubeconfig = "/run/rollproof-test/kubeconfig"

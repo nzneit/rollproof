@@ -3,7 +3,7 @@ package cluster
 import (
 	"strings"
 
-	"rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/config"
 )
 
 // HostSettings returns the settings file every node needs for entry.Host, by decision 5: the

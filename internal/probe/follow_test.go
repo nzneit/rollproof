@@ -11,7 +11,7 @@ import (
 	"testing/iotest"
 	"time"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 var logStart = time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)

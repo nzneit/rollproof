@@ -11,7 +11,7 @@ import (
 	yaml "go.yaml.in/yaml/v3"
 	"sigs.k8s.io/kind/pkg/apis/config/v1alpha4"
 
-	"rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/config"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files in testdata")

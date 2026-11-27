@@ -11,13 +11,13 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	"rollproof/internal/config"
-	"rollproof/internal/deploy"
-	"rollproof/internal/mask"
-	"rollproof/internal/probe"
-	"rollproof/internal/report"
-	"rollproof/internal/verdict"
-	"rollproof/internal/watch"
+	"github.com/nzneit/rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/deploy"
+	"github.com/nzneit/rollproof/internal/mask"
+	"github.com/nzneit/rollproof/internal/probe"
+	"github.com/nzneit/rollproof/internal/report"
+	"github.com/nzneit/rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/watch"
 )
 
 // Options is what the run command was given. Version is the tool's own, for the

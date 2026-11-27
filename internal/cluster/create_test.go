@@ -22,8 +22,8 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 	kindcluster "sigs.k8s.io/kind/pkg/cluster"
 
-	"rollproof/internal/config"
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // missedLine returns the error of kind's Create when its wait for a node's log line ended, as

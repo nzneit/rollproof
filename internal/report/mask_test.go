@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"rollproof/internal/mask"
+	"github.com/nzneit/rollproof/internal/mask"
 )
 
 // TestWriterMasksWhatItWrites checks that a Writer with a masker hides the

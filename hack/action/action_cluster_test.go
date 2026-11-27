@@ -21,8 +21,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
-	"rollproof/internal/cluster"
-	"rollproof/internal/report"
+	"github.com/nzneit/rollproof/internal/cluster"
+	"github.com/nzneit/rollproof/internal/report"
 )
 
 // The action's script on this machine's engine: the tool's image built from the Dockerfile, pushed

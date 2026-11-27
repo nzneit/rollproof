@@ -291,14 +291,14 @@ func createLine(folder string) string {
 
 func TestTheScriptStartsTheToolInItsPlace(t *testing.T) {
 	r := startingRun(t)
-	r.env["ROLLPROOF_ACTION_CONFIG"] = "projects/rollproof/hack/action/testdata/pass.yaml"
+	r.env["ROLLPROOF_ACTION_CONFIG"] = "hack/action/testdata/pass.yaml"
 	r.env["ROLLPROOF_ACTION_OUT"] = "/tmp/rollproof-action-test/results"
 
 	code, stderr := r.run()
 	if code != 7 {
 		t.Fatalf("exit code %d, want 7, the fake tool's; stderr:\n%s", code, stderr)
 	}
-	wantArgs := []string{"run", "-f", "projects/rollproof/hack/action/testdata/pass.yaml",
+	wantArgs := []string{"run", "-f", "hack/action/testdata/pass.yaml",
 		"--out", "/tmp/rollproof-action-test/results"}
 	if diff := cmp.Diff(wantArgs, r.lines(r.args)); diff != "" {
 		t.Errorf("the tool's arguments (-want +got):\n%s", diff)

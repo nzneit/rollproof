@@ -11,7 +11,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // Engine is the container engine the run uses: its command name, as kind's library would pick

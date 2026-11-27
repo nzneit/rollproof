@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // Event is one thing a running probe reported: an observation, or a fault of the probe with the

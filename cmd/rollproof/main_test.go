@@ -25,13 +25,13 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"rollproof/internal/cluster"
-	"rollproof/internal/config"
-	"rollproof/internal/deploy"
-	"rollproof/internal/probe"
-	"rollproof/internal/run"
-	"rollproof/internal/verdict"
-	"rollproof/internal/watch"
+	"github.com/nzneit/rollproof/internal/cluster"
+	"github.com/nzneit/rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/deploy"
+	"github.com/nzneit/rollproof/internal/probe"
+	"github.com/nzneit/rollproof/internal/run"
+	"github.com/nzneit/rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/watch"
 )
 
 func noEnv(string) string { return "" }

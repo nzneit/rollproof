@@ -33,8 +33,8 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
 
-	"rollproof/internal/cluster"
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/cluster"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files")

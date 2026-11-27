@@ -5,7 +5,7 @@ package deploy
 import (
 	"context"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // Deployer is a deploy driver. Fetch gets everything from outside the cluster that the

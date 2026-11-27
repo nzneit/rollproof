@@ -3,7 +3,7 @@ package report
 import (
 	"reflect"
 
-	"rollproof/internal/mask"
+	"github.com/nzneit/rollproof/internal/mask"
 )
 
 // Mask returns a copy of r in which m has masked every string, those of lists,

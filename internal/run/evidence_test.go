@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"rollproof/internal/verdict"
-	"rollproof/internal/watch"
+	"github.com/nzneit/rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/watch"
 )
 
 func TestWriteTimeline(t *testing.T) {

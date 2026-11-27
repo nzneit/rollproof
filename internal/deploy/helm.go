@@ -16,8 +16,8 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
-	"rollproof/internal/config"
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // CheckHelm checks that a helm command is on the PATH. An error is a Condition with

@@ -17,9 +17,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"rollproof/internal/cluster"
-	"rollproof/internal/images"
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/cluster"
+	"github.com/nzneit/rollproof/internal/images"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // TestMain lets this test binary be the probe's image: started as

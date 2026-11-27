@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // capture is the io.Writer the tests give RunHTTP. It keeps each Write with

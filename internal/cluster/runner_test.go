@@ -15,7 +15,7 @@ import (
 
 	"sigs.k8s.io/kind/pkg/apis/config/defaults"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // Recorded on 2026-11-16: `nerdctl info --format "{{json .}}"` on the developer's machine (rootless
