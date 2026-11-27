@@ -2414,7 +2414,7 @@ A line leaves the list when a fixture shows the tool catching what it names.
 - **No diagnosis.** The report says which pods were starting or stopping when the first failure
   came, and the timeline shows the rest. The tool does not guess the cause.
 - **Workload logs are the workload's own text.** The tool masks registry passwords everywhere it
-  writes but the step's outputs (section 8), the pod logs it copies included, and nothing else
+  writes but for the exceptions of section 8, the pod logs it copies included, and nothing else
   in them. The caller decides whether to upload the evidence.
 
 ## 11. Security
