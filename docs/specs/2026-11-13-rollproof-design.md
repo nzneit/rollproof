@@ -1,7 +1,7 @@
 # rollproof: design
 
 Date: 2026-11-13. Revised on 2026-11-16. Amended and revised on 2026-11-17. Amended on
-2026-11-18, 2026-11-19, 2026-11-20, 2026-11-22, 2026-11-25 and 2026-11-26.
+2026-11-18, 2026-11-19, 2026-11-20, 2026-11-22, 2026-11-25, 2026-11-26 and 2026-11-27.
 
 Status: the design below was agreed section by section in conversation on 2026-11-13. Three
 reviews followed. The first two:
