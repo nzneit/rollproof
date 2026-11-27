@@ -124,8 +124,10 @@ take_binary() {
 # its own variables unset.
 main() {
   local system engine ref dir temp=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
-  system=$(uname -s) || fail "uname -s failed, so the runner's system is not known; the action runs only on Linux"
-  [[ $system == Linux ]] || fail "the runner is not Linux (uname -s printed $system); the action runs only on Linux"
+  # Nothing of uname's own output is printed: a wrapped uname on the PATH could hold a workflow
+  # command, and the runner reads every line until the stop line below.
+  system=$(uname -s 2>/dev/null) || fail "uname -s failed, so the runner's system is not known; the action runs only on Linux"
+  [[ $system == Linux ]] || fail "the runner is not Linux; the action runs only on Linux"
   # From here on a line may hold an input or an engine's output.
   stop_commands
   engine=$(pick_engine) || fail "no container engine that kind supports: KIND_EXPERIMENTAL_PROVIDER names none, and none of docker, nerdctl and podman answers -v"

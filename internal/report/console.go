@@ -108,8 +108,12 @@ func ConsoleLine(text string) string {
 }
 
 func isControl(r rune) bool {
+	// The twelve characters of Unicode's Bidi_Control: the nine explicit
+	// embeddings, overrides and isolates, and the three implicit marks, which
+	// reorder the characters beside them without opening anything.
 	return unicode.Is(unicode.Cc, r) || r == '\u2028' || r == '\u2029' ||
-		(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069')
+		(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069') ||
+		r == '\u200e' || r == '\u200f' || r == '\u061c'
 }
 
 func cleanAll(s []string) []string {

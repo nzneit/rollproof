@@ -1,6 +1,7 @@
 package report
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -352,6 +353,73 @@ func TestMaskKeepsTheVocabulary(t *testing.T) {
 	}
 	if r.Probes[0].Settings[0].Key != "probe.http.rate" {
 		t.Errorf("Probes[0].Settings[0].Key is %q, want probe.http.rate", r.Probes[0].Settings[0].Key)
+	}
+}
+
+// TestMaskMasksMapKeys checks that Mask masks the keys of a map as its values.
+// A custom probe's class is a free string (section 6), and the console, the job
+// summary and result.json print the keys of failed_by_class: a class named after
+// the password, or after the base64 of its credentials, stood in all three
+// (finding P1-1 of the security review). Two keys that mask to one string make
+// one entry, with their counts added, as the console joins classes that clean to
+// one name.
+func TestMaskMasksMapKeys(t *testing.T) {
+	const pw = "s3cret-pass"
+	encoded := base64.StdEncoding.EncodeToString([]byte("ci:" + pw))
+	unpadded := strings.TrimRight(encoded, "=")
+	// The same password under a second username: its base64 has no padding and
+	// masks to the same string as the plain password, so the two keys make one
+	// entry, their counts added.
+	encodedToo := base64.StdEncoding.EncodeToString([]byte("ci2:" + pw))
+	m := mask.New([]mask.Credential{{Username: "ci", Password: pw}, {Username: "ci2", Password: pw}})
+
+	named := func() Run {
+		r := failRun()
+		r.Windows[1].FailedByClass = map[string]int{pw: 198, encoded: 45, encodedToo: 5, "refused": 3}
+		r.Install = &Install{Ready: *at(-21_000), FirstObservation: at(-15_000), Checks: 6, Failed: 6,
+			FailedByClass: map[string]int{pw: 2, encoded: 1, "timeout": 3}, LastFailure: at(-14_900)}
+		return r
+	}
+	filled := named()
+	got := Mask(filled, m)
+
+	// The padding of a base64 is left after its unpadded form is masked, so the
+	// padded one is a key of its own.
+	if want := map[string]int{mask.Replacement: 203, mask.Replacement + "=": 45, "refused": 3}; !reflect.DeepEqual(got.Windows[1].FailedByClass, want) {
+		t.Errorf("Windows[1].FailedByClass is %v, want %v", got.Windows[1].FailedByClass, want)
+	}
+	if want := map[string]int{mask.Replacement: 2, mask.Replacement + "=": 1, "timeout": 3}; !reflect.DeepEqual(got.Install.FailedByClass, want) {
+		t.Errorf("Install.FailedByClass is %v, want %v", got.Install.FailedByClass, want)
+	}
+
+	// The console, the job summary and result.json of the copy hold the
+	// password in none of its forms.
+	w, err := Open(t.TempDir(), func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Final(got); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(w.Dir(), "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, out := range []struct{ name, text string }{
+		{"the console", Console(got)},
+		{"the job summary", Summary(got)},
+		{"result.json", string(b)},
+	} {
+		for _, form := range []string{pw, encoded, unpadded, encodedToo, strings.TrimRight(encodedToo, "=")} {
+			if strings.Contains(out.text, form) {
+				t.Errorf("%s holds the password in the form %q:\n%s", out.name, form, out.text)
+			}
+		}
+	}
+
+	// The record is unchanged after the call.
+	if !reflect.DeepEqual(filled, named()) {
+		t.Error("Mask changed the record it was given")
 	}
 }
 

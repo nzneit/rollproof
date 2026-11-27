@@ -5,6 +5,7 @@ import (
 	"maps"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // withValue sets the value of the setting with the given key.
@@ -633,6 +634,38 @@ func TestClean(t *testing.T) {
 				t.Errorf("clean(%q) = %q, want %q", c.in, got, c.want)
 			}
 		})
+	}
+}
+
+// TestCleanTakesEveryBidiControl checks that clean makes a space of all twelve
+// bidirectional controls, the three implicit marks among them (U+200E, U+200F
+// and U+061C), and that a run whose printed strings hold those three gives a
+// console and a summary that hold none: in a heading and in a fenced block a
+// mark can still reorder the characters beside it (finding P2-6 of the security
+// review).
+func TestCleanTakesEveryBidiControl(t *testing.T) {
+	const marks = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f\u061c"
+	for _, r := range marks {
+		in := "a" + string(r) + "b"
+		if got := clean(in); got != "a b" {
+			t.Errorf("clean(%q) = %q, want %q", in, got, "a b")
+		}
+	}
+
+	const planted = "orders\u200e\u200f\u061c"
+	r := failRun()
+	r.Name = planted
+	r.Reasons[0].Text = planted
+	r.Reasons[0].Detail = []string{planted}
+	r.Warnings = []string{planted}
+	for _, out := range []struct{ name, text string }{
+		{"the console", Console(r)},
+		{"the job summary", Summary(r)},
+	} {
+		if i := strings.IndexAny(out.text, marks); i >= 0 {
+			r, _ := utf8.DecodeRuneInString(out.text[i:])
+			t.Errorf("%s holds U+%04X:\n%s", out.name, r, out.text)
+		}
 	}
 }
 

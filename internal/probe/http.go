@@ -287,9 +287,8 @@ func stamp(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
 func millis(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
 
-// classify names how a request failed. The names come from the file
-// RESEARCH/2026-11-12/L5/src/loadgen/main.go of the host repository, the load generator of the
-// experiment L5; a failed lookup is class other, as section 6 says.
+// classify names how a request failed. The names come from the load generator of the experiment L5
+// (section 3), whose report is not published; a failed lookup is class other, as section 6 says.
 func classify(err error) string {
 	var le lookupError
 	var ne net.Error

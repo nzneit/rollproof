@@ -1,7 +1,7 @@
 # rollproof: design
 
 Date: 2026-11-13. Revised on 2026-11-16. Amended and revised on 2026-11-17. Amended on
-2026-11-18, 2026-11-19, 2026-11-20 and 2026-11-22.
+2026-11-18, 2026-11-19, 2026-11-20, 2026-11-22, 2026-11-25, 2026-11-26 and 2026-11-27.
 
 Status: the design below was agreed section by section in conversation on 2026-11-13. Three
 reviews followed. The first two:
@@ -74,6 +74,18 @@ that costs minutes (point 32). While the plan was built, a reading of the runner
 that the runner reads workflow commands in every line that a step prints, which this text had
 not considered; the maintainer approved a defence the same day (section 8; point 33).
 
+Before the plan for step 7 of the build order, which is graduation, the maintainer and an AI
+session on a GLM-5.4 model agreed its design in conversation on 2026-11-24 and 2026-11-25. The
+session asked one question at a time and proposed the smaller choice; the maintainer answered
+each. Section 13 says the order of the work, and point 34 holds each answer. Before the
+questions the name was checked (point 14; `docs/proofs/p14-name.md`): two background agents on
+the session's default model made the first requests and were stopped by the model service's
+rate limit, and the session read what they had saved and made the rest. A background agent on
+the same model read GitHub's pages on runners and billing on 2026-11-24, and the session
+opened the passages that point 34 rests on and found them as reported (section 16). No agent
+on a Fable model ran. The security review of point 13 was had on 2026-11-25, in the form that
+point 34 gives; its record is `docs/proofs/p13-security-review.md`.
+
 An AI session on a Fable model drafted this document with the maintainer. A separate AI agent on a
 Fable model wrote each of the first two reviews. AI agents on an Opus model gathered the evidence,
 did the two readings, wrote the third review, eight of them with one part of the text each, and
@@ -96,7 +108,10 @@ of section 14, point 29, on a run of 2026-11-19. Sections 6, 9 and 14 also rest 
 the build order's second step, and sections 8 to 10 and 12 on the runs of 2026-11-22. Section 16
 names them all.
 
-`rollproof` is a working name. It has not been checked for collisions.
+`rollproof` is a working name until the first release. It was checked for collisions on
+2026-11-24 (`docs/proofs/p14-name.md`; section 14, point 14), and the maintainer ruled that it
+stays. The trademark databases refuse a script; the maintainer searched them in a browser on
+2026-11-26, and what they showed is in the same record.
 
 ## 1. Purpose
 
@@ -242,6 +257,12 @@ A web search on 2026-11-13 found no reusable tool, action or workflow that does 
 small demonstration repositories that run the same loop once for their own sample application, and
 Helm's chart-testing, whose upgrade test runs `helm test` after an upgrade and sends no traffic
 during it. The search has gaps that its report lists; the verdict is the absence of a finding.
+
+The name check of 2026-11-24 (section 14, point 14) found one repository for this purpose that
+the search had not: `ch0992/rollout-proof`, whose README describes one Go binary that waits for
+a Deployment's new revision while an HTTP probe checks the Service. It was created on
+2026-08-18 and has no release. The maintainer ruled that day that it changes neither this
+design nor the name.
 
 ## 4. What one run does
 
@@ -1424,13 +1445,15 @@ empty string, and a workflow started from a fork gets no secrets at all.
 be a single `${env.NAME}`; a password written in the file is rejected, and the text that rejects
 any configuration never quotes a value. The tool masks every such password in everything it
 writes, in its plain form and in the encoded form in which the nodes' credentials file holds it.
-That includes the output of commands and the pod logs that it copies into the evidence. Two
+That includes the output of commands and the pod logs that it copies into the evidence. Three
 things it does not mask. The step's outputs on GitHub hold a word of the verdict's vocabulary
 and the results folder's absolute path, which the tool makes from the caller's `--out` or
 chooses itself, and the first of them is written before the configuration is read. And the log
 that the Kubernetes client library writes on standard error (section 10, "Console") does not
 pass through the tool's masker: it holds the API server's warnings, and nothing that the tool
-sends to the API server holds the password, which goes to the nodes in a file.
+sends to the API server holds the password, which goes to the nodes in a file. And that file,
+the credentials file the tool writes into the nodes, holds the password in its encoded form and
+is not masked, because the kubelet needs it.
 
 The tool masks nothing else. A chart value or a probe header's value is written as it was given,
 so a caller who passes a real secret there keeps the evidence to themselves. GitHub's own masking
@@ -2391,7 +2414,7 @@ A line leaves the list when a fixture shows the tool catching what it names.
 - **No diagnosis.** The report says which pods were starting or stopping when the first failure
   came, and the timeline shows the rest. The tool does not guess the cause.
 - **Workload logs are the workload's own text.** The tool masks registry passwords everywhere it
-  writes but the step's outputs (section 8), the pod logs it copies included, and nothing else
+  writes but for the exceptions of section 8, the pod logs it copies included, and nothing else
   in them. The caller decides whether to upload the evidence.
 
 ## 11. Security
@@ -2407,27 +2430,44 @@ A line leaves the list when a fixture shows the tool catching what it names.
 - **What leaves the runner through the tool.** The nodes' pulls: to the mirrors that the
   configuration lists in place of their hosts, to the other hosts it lists, and to the hosts of
   images that no entry names, each with its entry's credentials when it has them, and the token
-  services that those hosts name. Helm's pulls, with the caller's own logins. Nothing else.
+  services that those hosts name. Helm's pulls, with the caller's own logins. The action's pull of
+  the tool's own image, with the runner's engine login. The engine's pull of the node image, to
+  the image's own host with the runner's engine login and not to the mirrors the configuration
+  lists. The engine's pull of the run's registry image, to the image's own host with the runner's
+  engine login as well. Nothing else.
 - A registry password arrives only through an environment variable. It is masked, in its plain
   and its encoded form, in everything the tool writes but the step's outputs on GitHub, which
   hold no value of the configuration, and the client library's log on standard error, which
-  holds the API server's warnings (section 8). Nothing else is masked. This rule has not had a
-  security review (section 14).
+  holds the API server's warnings (section 8). Nothing else is masked. A name the caller gives,
+  such as a workload's, is written as it was given where it names a file of the evidence, as a
+  chart value or a probe header is. The credentials file that the tool writes into the nodes is
+  not masked either: it holds the password in its encoded form, because the kubelet needs it.
+  The security review of 2026-11-25 (section 14, point 13) found 1 thing that this rule does not
+  cover; it is documented in `docs/proofs/p13-security-review.md`.
 - On GitHub the tool's first lines, and the action's, stop the runner from reading a workflow
   command in what they print, so that text from a chart, a command or the API server cannot
   become one (section 8). Two things stay open where a step of the caller's own script runs
   the tool: a line on standard error just before the tool's end can still be read (section
   10), and after a run that ends at once the runner may read no later command of that script,
-  an `::add-mask::` among them (section 8). This has not had a security review either (section
-  14, point 13).
+  an `::add-mask::` among them (section 8). The line on standard error can be the failure of a
+  results folder that cannot be opened, which holds the folder's path as the caller gave it,
+  unescaped: a path that holds a workflow command could then be read as one, so a caller gives a
+  results folder's path that holds none. A third place is no matter of order: a caller's script
+  that redirects or captures the tool's standard output, as `rollproof run > run.log` does, sends
+  the resume line where the runner does not read it, and the runner then reads no command of that
+  script again; such a script must leave the tool's standard output connected. The security
+  review of 2026-11-25 (section 14, point 13) found 2 things that this rule does not cover; they
+  are accepted or documented in `docs/proofs/p13-security-review.md`.
 - The credentials file mounted into the nodes holds only the hosts the configuration lists. It
   lives in the run's folder and is removed with the cluster. While the cluster lives, every pod
   in it can read the file (section 9), so the credentials should be able to read only, and
   should expire soon.
 - A registry entry's credentials go to the entry's mirror when it has one, and to its host
   otherwise, and to a token service that the mirror's or host's challenge names. A mirror
-  replaces its host, so the real host never sees credentials meant for the mirror. A chart's own
-  pull secrets for a host with a mirror go to the mirror as well (section 9).
+  replaces its host, so the real host never sees credentials meant for the mirror. A mirror that
+  answers a redirect sends them on to the place it names, such as another port of itself, or
+  another host, which asks and then receives them: a caller trusts a mirror with that. A chart's
+  own pull secrets for a host with a mirror go to the mirror as well (section 9).
 - The built-in probe does not verify a server's certificate. It sends nothing secret, unless the
   caller put a credential into a header, and a header's value is not masked.
 - The tool does not read, copy or change the runner's Helm logins, its container engine's logins
@@ -2698,9 +2738,12 @@ The action's test starts by hand only, as the suite and the mirror job do (secti
 fixture, and its catch counts for the broken ones, as the second experiment did. A false failure
 is a run of the first fixture that ends other than pass; the statement gives the fails and the
 not verified apart. It carries its date, the versions and the runner's size it was measured with.
-The default rate rests on a runner with 2 CPUs, so the bound is measured on one of that size. It
-is the bound of that fixture on that runner: a small service whose handler sleeps. It is measured
-again when something that affects it changes: the built-in probe, a timing default, the fixture,
+The default rate rests on a runner with 2 CPUs, but the bound is measured on the new repository's
+runners, which have 4 (section 14, point 34). The statement therefore says that a private
+repository's runner, of 2 CPUs, is not measured, and that the rate on it is known from the second
+experiment alone (section 3). It is the bound of that fixture on that runner: a small service
+whose handler sleeps. It is measured again when something that affects it changes: the built-in
+probe, a timing default, the fixture,
 the linked kind release, the Helm major, or the runner's image or size. A release in between
 carries the last statement forward. The first release carries a statement. How many runs is set
 when the project has a public repository, and every series waits for the maintainer's word.
@@ -2761,10 +2804,41 @@ During incubation:
 Graduation:
 
 - **When.** The cluster suite, the mirror job and the action's own test are green on GitHub.
-- **How.** Split the directory with its history into a new public repository, move the workflows,
-  and cut a first release with its image and binaries. Each step waits for the maintainer's word.
+- **How.** Split the directory with its history into a new public repository and move the
+  workflows. The first release, with its image and binaries, is designed and planned in the new
+  repository, with the fixture series of section 12 and the automation of kind's updates. Each
+  waits for the maintainer's word.
 - **Before.** Check the name for collisions, and have the security review of section 14,
-  point 13.
+  point 13. The name was checked on 2026-11-24 (`docs/proofs/p14-name.md`). Its trademark half was
+  searched on 2026-11-26 (the same record).
+
+Graduation happens in this order. Where a step says the maintainer's word, nothing in it is done
+until that word is given (section 14, point 34):
+
+1. In the incubating repository, on one branch and in one pull request, whose pushes wait for
+   the maintainer's word as in every step: the security review of point 13, the maintainer's
+   ruling on each finding, a fix round and a second reader on the fixes; hand edits that take
+   the host repository's name, its decision row and its research paths out of the files as they
+   are; and the maintainer's own search of the trademark databases.
+2. On a throwaway clone, the split. It keeps the project and the five workflow files and nothing
+   else, moves the project to the root, replaces the same strings in every old version and drops
+   the commits that become empty. An audit of the clone searches every version of every file
+   and every commit message for what may not be published. Nothing is pushed.
+3. The maintainer's word, then the new repository is created private and the clone is pushed.
+4. There, one pull request moves the project in: the module path, the workflows' paths, one
+   paragraph of the README and a commit map. The unit tests pass on it.
+5. The maintainer's word, then the repository is made public.
+6. The maintainer's word, then the action's test, the mirror job and the suite run once each in
+   the new repository, and a record of the runs is written.
+7. The maintainer's word, then the incubating repository's last pull request for the project: a
+   row that amends the row of its incubation, its README's line on the folder, and the directory
+   and the five workflows removed.
+
+Graduation is done when the new repository is public and holds the project at its root with its
+history; the audit found nothing and the commit map is there; the unit tests and the three hosted
+workflows are green there; the record of the security review is there, with every finding and the
+maintainer's ruling; and the incubating repository's log says that the project left. Its plan is
+`docs/plans/2026-11-25-step7/`.
 
 ### Build order
 
@@ -2814,6 +2888,12 @@ list in `docs/plans/2026-11-19-step4/README.md`, and its rulings are in point 29
 rulings before its plan are in points 30 and 31, and step 6's in point 32, with point 33 for a
 ruling made while its plan was built.
 
+Step 7 is two designs. Graduation is designed and planned in the incubating repository, before
+the split; its rulings are in point 34 and its plan is `docs/plans/2026-11-25-step7/`. The
+series, the first release and the automation of kind's updates are designed and planned in the
+new repository, on facts that exist only there. Point 34 holds the rulings that were made for
+them now, so that no plan decides them again.
+
 ## 14. Open points for the plan
 
 The plan settles each open point with a test or a reading before anything is built on what it
@@ -2831,8 +2911,9 @@ step 4. The proofs of step 5 settled points 2 and 19, and points 30 and 31 recor
 2026-11-20 before the plan for step 5. The runs of step 6, on 2026-11-22, settled points 3, 4 and
 20, point 8 for Docker, and what point 24 left open for Docker and Podman; point 32 records the
 rulings of that day before the plan for step 6, and point 33 the ruling on the runner's workflow
-commands, made while that plan was built. The build order of section 13 says which step proves
-which point.
+commands, made while that plan was built. The name was checked on 2026-11-24, and point 14 holds
+the result. Point 34 holds the decisions of 2026-11-24 and 2026-11-25 for graduation, and one
+that was made for the series. The build order of section 13 says which step proves which point.
 
 1. **Registry order in the nodes.** That a node tries the run's registry first for a host and then
    falls back to the real registry is what the container runtime's documentation and source say
@@ -2952,13 +3033,24 @@ which point.
     job's power, every pod in the cluster can read the nodes' credentials, a registry entry's
     credentials reach its mirror and the token service that a challenge names, a chart's own pull
     secrets for a host with a mirror reach the mirror, and the value of a probe header is not
-    masked.
+    masked. The review was had on 2026-11-25, in the form that point 34 gives. Its record is
+    `docs/proofs/p13-security-review.md`, with every finding and the maintainer's ruling.
 14. **The name.** The probe's namespace and label carry it (section 6). So do the prefix of every
     cluster's name and the registry host `rollproof.test` (section 9), the command itself, the
-    default file name `rollproof.yaml`, and the names of the workflow files (section 13).
+    default file name `rollproof.yaml`, and the names of the workflow files (section 13). It was
+    checked on 2026-11-24 against the maintainer's definition of a collision
+    (`docs/proofs/p14-name.md`): no account, action, package, image, chart or plugin of the name
+    does the tool's work, and the name is free under the maintainer's account. One repository of
+    the name is an attendance application, one company of the name sells a car protector, and
+    `ch0992/rollout-proof` is a project for the tool's purpose with no release (section 3). The
+    maintainer ruled that the name stays. The trademark databases refuse a script; the
+    maintainer searched them in a browser on 2026-11-26, before anything was pushed, and found no
+    mark for software in the nice classes 9 and 42 (`docs/proofs/p14-name.md`).
 15. **Prior art.** The search could not read GitHub Marketplace in full text and did not open
     several tools. Finding an existing tool later would change the project's reason to exist, not
-    this design.
+    this design. One was found on 2026-11-24, by the name check: `ch0992/rollout-proof`
+    (section 3). The maintainer ruled the same day that the project goes on and the name stays
+    (point 14).
 16. **A large image.** The experiments' image was 5.5 MB. Every node keeps its own copy of an
     image, and kind turns off the kubelet's clean-up of images and its eviction on a full disk,
     so a full disk is not recovered. A hosted runner has a 14 GB disk. The tool pulls the listed
@@ -3555,6 +3647,99 @@ which point.
     Actions**, so that the runner reads one stream in the tool's own order and nothing is left
     open: it takes the tool's errors out of a file to which a caller's script sent standard
     error, and puts them, with both lines, into a file to which it sent standard output.
+34. **Graduation, and the series' runner: decisions of 2026-11-24 and 2026-11-25.** Before the
+    plan for step 7 of the build order, the maintainer and an AI session agreed the design of
+    graduation in conversation. The session asked one question at a time and proposed the
+    smaller choice; the maintainer answered each. They are recorded so that no plan decides
+    them again. Section 13 says the order of the work.
+    - **Two designs for step 7.** Graduation is designed and planned in the incubating
+      repository, now. The series, the first release and the automation of kind's updates are
+      designed and planned in the new repository, because they rest on facts that exist only
+      there: the repository's owner and runners, and its workflows at the root. What lost:
+      **one design and one plan for all of step 7**, which would decide a release before its
+      facts exist; and **graduation alone**, which would leave the series' runner undecided,
+      although its answer could have put a hosted run before the split.
+    - **The owner and the name.** The new repository belongs to a personal account of the
+      maintainer's and is named `rollproof`. What lost: **an organization**, which the
+      maintainer did not want; and **another name**, since nothing that blocks was found
+      (point 14).
+    - **What counts as a collision.** Something that would block or seriously mislead: a
+      repository, action, package or image called `rollproof`, `roll-proof` or `roll_proof`
+      that does similar work; a package or an account of the name where a release could
+      publish; or a trademark for software, the nice classes 9 and 42. Any other use of the
+      word is noted. What lost: **any software of that name, whatever it does**; and **any use
+      of the word in any field**, which a shop of the name would have failed.
+    - **The security review's form.** One reviewer for each of the four parts of point 13.
+      Each reads the design's rule for its part and the code, then tries to break the rule
+      with throwaway tests that plant hostile input wherever text or a secret enters the
+      tool. A try is a finding only with its test and its observed output. The session
+      re-runs each finding's test; one it cannot reproduce is recorded as a reading, with
+      both outcomes. The maintainer rules on each finding: fix it, document it, or accept it
+      with a reason. Each fix is built test-first in the incubating repository, and one more
+      reviewer then reads the whole change cold. The record is
+      `docs/proofs/p13-security-review.md`, in the form of the proofs. What lost: **a
+      reading of the code without tries**, which shows what a reviewer thought of and not
+      what the rule holds against.
+    - **Who reviews.** Four AI agents on DeepSeek V4.1 Flash with thinking at its maximum,
+      two at a time; the maintainer chose the model, and the second reader of the fixes is on
+      it too. What lost: **the session's own model**, on which two background agents had been
+      stopped by a rate limit on 2026-11-24; **a larger model of the same family**, at about
+      four times the price; **a review run by the maintainer where other models are available**;
+      and **the maintainer's own reading against a checklist**.
+    - **After a fix that changes code a run executes,** the whole suite and the mirror job run
+      once on the developer's machine before the split, as step 6's last task ran them: the
+      unit tests and the four vets do not show that a run is whole. What lost: **the hosted
+      workflows before the split**, which are billed in the incubating repository and run
+      free in the new one once it is public.
+    - **What may be published.** Nothing published may name the incubating repository, quote
+      its decision log or cite its research files. Generic mentions of the host repository
+      and of its rule files by name may stay. The rule covers the files as they are, which
+      are fixed by hand in one commit, and every old version, which the split fixes by
+      replacing the same strings from a fixed list. An audit of the throwaway clone searches
+      every version of every file and every commit message before anything is pushed;
+      anything found stops the split. A commit map in the new repository,
+      `docs/commit-map.md`, gives each carried commit's old and new short hash, because a
+      split with history changes every hash and the documents cite 28 commits by hash. What
+      lost: **naming the repository where it is cited**, which would make its name public;
+      **publishing the research reports with the project**, which would need an audit of
+      their own and reverses section 16; and **fixing only the files as they are**, under
+      which the older versions keep the same lines.
+    - **Private before public.** The security review and its fixes come first, in the
+      incubating repository. The split is made on a throwaway clone and audited, and nothing
+      is pushed until the audit is clean. The repository is created private; one pull
+      request moves the project in and the unit tests pass there; and only then, at the
+      maintainer's word, is it made public. The hosted workflows run there once they are
+      free. Last, the incubating repository's own pull request records the graduation. What
+      lost: **splitting straight into a public repository**, which has no step at which a
+      fault in the history or in the moved workflows can still be undone; and **publishing
+      first and reviewing in the new repository**, which publishes the code before its
+      review and reverses the order of section 13.
+    - **The tool of the split.** `git-filter-repo`, run through `uv`, which is on the
+      developer's machine, at a version the plan names. What lost: **a new history of one
+      commit that holds the files as they are**, which carries none of the reasons in about
+      300 commit messages.
+    - **The incubating repository afterwards.** A row that amends the row of the incubation:
+      its rule stands for a later project, and the sentence that names this project is
+      withdrawn. The README's line on the folder changes, and the directory and the five
+      workflows are removed. The research reports stay, and so does the history, through
+      which an old hash of the commit map can still be resolved. The maintainer agrees the
+      row's text before the task starts. What lost: **keeping a mirror of the public
+      repository**, which would drift from it.
+    - **Adoption stays a separate decision,** with a row of its own, once a release exists.
+    - **The series' runner, a ruling for the release design.** The false-failure bound is
+      measured on the new repository's runners, which have 4 CPUs, and the statement says
+      that a private repository's runners, of 2 CPUs, are not measured (section 12). Why:
+      GitHub's pages give larger runners only to organizations and enterprises on two plans,
+      so a personal account's public repository has no Linux runner of 2 CPUs; the
+      incubating repository, a private one, has them until the split (section 16). What
+      lost: **a private repository of the maintainer's that exists only to run the series on
+      2 CPUs**, a second repository to keep and to pay for; **keeping the incubating
+      repository as the place of the series**, which keeps a workflow of a project that
+      left; and **one series there before the split and none after**, which could not
+      measure the bound again when a default changes. The cost of the ruling: a user in a
+      private repository gets a statement that does not cover the runner that the
+      repository gives, and the rate on a 2-CPU runner is known from the second experiment
+      alone.
 
 ## 15. Not in the first release
 
@@ -3632,15 +3817,15 @@ which point.
 
 ## 16. Sources
 
-Paths in the first table are from the host repository's root. Those files stay behind at
-graduation.
+The first table's sources are research reports of the incubating repository. They are not published
+and stay behind at graduation. Each is named by what it is and by the date of its folder.
 
 | Source | What this design takes from it |
 | --- | --- |
-| `RESEARCH/2026-11-12/L5-kind-rollout.md` | The experiment on a workstation: the variants, the two-signal gate, the effect of the client's connections, the failures that went on after a rollout had finished (its section 5, item 6), the time a cluster takes to delete, the test service and the load generator that the fixture and the built-in probe are copied from, the kernel key quota on a rootless engine |
-| `RESEARCH/2026-11-12/L6-kind-rollout-on-actions.md` | The 160 jobs on hosted runners: the false-failure bound, the job time, 200 requests a second on 2 CPUs, the digest trials and the registry's set-up time, the slowest successful request |
-| `RESEARCH/2026-11-12/W16-shift-left-rollout-confidence.md` | That `kubectl rollout status` does not wait for terminating pods, and the share of failed requests that began after it returned (section 7 of that report) |
-| `RESEARCH/2026-11-13/W18-rollout-test-prior-art.md` | The prior-art search and its limits |
+| Experiment L5, on a workstation: its report of 2026-11-12 | The experiment on a workstation: the variants, the two-signal gate, the effect of the client's connections, the failures that went on after a rollout had finished (its section 5, item 6), the time a cluster takes to delete, the test service and the load generator that the fixture and the built-in probe are copied from, the kernel key quota on a rootless engine |
+| Experiment L6, on hosted runners: its report of 2026-11-12 | The 160 jobs on hosted runners: the false-failure bound, the job time, 200 requests a second on 2 CPUs, the digest trials and the registry's set-up time, the slowest successful request |
+| The reading W16: its report of 2026-11-12 | That `kubectl rollout status` does not wait for terminating pods, and the share of failed requests that began after it returned (section 7 of that report) |
+| The search W18: its report of 2026-11-13 | The prior-art search and its limits |
 
 Pages read on 2026-11-13 from local clones of the projects' documentation:
 
@@ -3897,3 +4082,21 @@ of the settings file and no mirror. The runs of step 6, on 2026-11-22, showed tw
 this list named: that kind creates the cluster through Docker, and that a node of Docker or of
 Podman takes the setting of section 14, point 24 (`docs/proofs/p08-kind-library.md`,
 `docs/proofs/p24-hosted-runner.md`).
+
+Read on 2026-11-24 by a background agent on the session's default model from GitHub Docs, for
+section 14, point 34. The session opened the passages quoted below and found them as reported.
+Nothing was run.
+
+| Source | What this design takes from it |
+| --- | --- |
+| GitHub Docs, "GitHub-hosted runners" (reference), `https://docs.github.com/en/actions/reference/runners/github-hosted-runners` | "Use of the standard GitHub-hosted runners is free and unlimited on public repositories." The Linux x64 rows of its two tables: 4 CPU and 16 GB in a public repository and 2 CPU and 8 GB in a private one, for `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04` and `ubuntu-26.04`. "Larger runners are available for organizations and enterprises on GitHub Team and GitHub Enterprise Cloud plans." |
+| GitHub Docs, "Running jobs on larger runners", `https://docs.github.com/en/actions/how-tos/manage-runners/larger-runners/use-larger-runners` | "Larger runners are only available for organizations and enterprises using the GitHub Team or GitHub Enterprise Cloud plans." |
+| GitHub Docs, "About billing for GitHub Actions", `https://docs.github.com/en/billing/concepts/product-billing/github-actions` | "Larger runners are billed for public repositories." The included compute usage of GitHub Free is $12 a month, and "The included compute usage is expressed as a monetary amount, not a fixed number of minutes or other usage units." |
+| GitHub Docs, "Limits", `https://docs.github.com/en/actions/reference/limits` | "Each job in a workflow can run for up to 6 hours of execution time." |
+
+Read on 2026-11-25 by the session from the manual of `git-filter-repo`,
+`Documentation/git-filter-repo.txt` at the `main` branch of its repository, for point 34:
+
+| Source | What this design takes from it |
+| --- | --- |
+| The manual of `git-filter-repo` | That the tool aborts unless it is run in a fresh clone, and that a clone of a repository on the local file system is made with `--no-local`. That `--path` takes exact paths and that several give a union; that `--path-rename` renames the paths the filters select and selects none; that `--replace-text` replaces literal text by default, with `regex:` and `glob:` prefixes and a replacement written after `==>`. That a commit which becomes empty is pruned, and a merge commit which becomes empty and degenerate. That the tool writes a map of every commit's old and new hash under `.git/filter-repo/`. |
