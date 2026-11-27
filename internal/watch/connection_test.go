@@ -18,7 +18,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // steeredStream is the first watch stream of pods: it passes the fake

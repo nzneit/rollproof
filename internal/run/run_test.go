@@ -23,13 +23,13 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 
-	"rollproof/internal/config"
-	"rollproof/internal/deploy"
-	"rollproof/internal/mask"
-	"rollproof/internal/probe"
-	"rollproof/internal/report"
-	"rollproof/internal/verdict"
-	"rollproof/internal/watch"
+	"github.com/nzneit/rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/deploy"
+	"github.com/nzneit/rollproof/internal/mask"
+	"github.com/nzneit/rollproof/internal/probe"
+	"github.com/nzneit/rollproof/internal/report"
+	"github.com/nzneit/rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/watch"
 )
 
 // resultFile is the part of result.json that these tests read.

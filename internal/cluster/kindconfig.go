@@ -8,7 +8,7 @@ import (
 
 	"sigs.k8s.io/kind/pkg/apis/config/v1alpha4"
 
-	"rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/config"
 )
 
 // Spec is what Create needs. Empty image names mean the default; Namespace is

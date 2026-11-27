@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/config"
 )
 
 func TestSetupRunsInOrder(t *testing.T) {

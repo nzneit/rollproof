@@ -11,7 +11,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // readyAt2 is a Tracker that was told the release of base() at +1 s and found its install,

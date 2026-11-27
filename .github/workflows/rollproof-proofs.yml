@@ -70,7 +70,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: projects/rollproof/proofs
+        working-directory: proofs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -78,7 +78,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.27"
-          cache-dependency-path: projects/rollproof/proofs/go.sum
+          cache-dependency-path: proofs/go.sum
       - name: kind as a library, on Docker
         run: go run ./p08-kind-library
       - name: The registry order in the nodes, on Docker
@@ -679,7 +679,6 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: projects/rollproof
     env:
       CGO_ENABLED: "0"
       KIND_EXPERIMENTAL_PROVIDER: docker
@@ -690,7 +689,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.27"
-          cache-dependency-path: projects/rollproof/go.sum
+          cache-dependency-path: go.sum
       - name: The cluster tests, on Docker
         run: go test -tags cluster -p 1 -count=1 -v -timeout 35m ./internal/cluster/ ./internal/images/ ./internal/probe/ ./internal/watch/
 
@@ -709,7 +708,6 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: projects/rollproof
     env:
       CGO_ENABLED: "0"
       KIND_EXPERIMENTAL_PROVIDER: docker
@@ -720,7 +718,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.27"
-          cache-dependency-path: projects/rollproof/go.sum
+          cache-dependency-path: go.sum
       - name: Helm and kubectl
         run: go run ./hack/fetchhelm
       - name: The first fixture under both Helm majors
@@ -754,7 +752,6 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: projects/rollproof
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -762,7 +759,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.27"
-          cache-dependency-path: projects/rollproof/go.sum
+          cache-dependency-path: go.sum
       - name: The modules, as this user
         run: go mod download
       - name: Rootful Podman, and an alias for kind's node image

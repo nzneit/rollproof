@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // at is t0 plus s seconds.

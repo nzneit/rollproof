@@ -13,15 +13,15 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 
-	"rollproof/internal/cluster"
-	"rollproof/internal/config"
-	"rollproof/internal/deploy"
-	"rollproof/internal/images"
-	"rollproof/internal/probe"
-	"rollproof/internal/report"
-	"rollproof/internal/run"
-	"rollproof/internal/verdict"
-	"rollproof/internal/watch"
+	"github.com/nzneit/rollproof/internal/cluster"
+	"github.com/nzneit/rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/deploy"
+	"github.com/nzneit/rollproof/internal/images"
+	"github.com/nzneit/rollproof/internal/probe"
+	"github.com/nzneit/rollproof/internal/report"
+	"github.com/nzneit/rollproof/internal/run"
+	"github.com/nzneit/rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/watch"
 )
 
 // realUnits joins the real units into the steps of a run. keep is

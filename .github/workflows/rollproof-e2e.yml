@@ -16,7 +16,6 @@ permissions:
 defaults:
   run:
     shell: bash
-    working-directory: projects/rollproof
 
 jobs:
   cluster:
@@ -32,7 +31,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.27"
-          cache-dependency-path: projects/rollproof/go.sum
+          cache-dependency-path: go.sum
       - name: The tests under the build tag cluster
         run: go test -tags cluster -p 1 -count=1 -v -timeout 35m ./internal/cluster/ ./internal/images/ ./internal/probe/ ./internal/watch/ ./hack/action/
 
@@ -51,7 +50,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.27"
-          cache-dependency-path: projects/rollproof/go.sum
+          cache-dependency-path: go.sum
       - name: Helm and kubectl
         run: go run ./hack/fetchhelm
       - name: The suite under Helm 3
@@ -83,7 +82,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.27"
-          cache-dependency-path: projects/rollproof/go.sum
+          cache-dependency-path: go.sum
       - name: Helm and kubectl
         run: go run ./hack/fetchhelm
       - name: The suite under Helm 4

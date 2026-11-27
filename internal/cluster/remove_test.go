@@ -13,7 +13,7 @@ import (
 
 	kindcluster "sigs.k8s.io/kind/pkg/cluster"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // remove refuses a name without the prefix and a run folder that is not named after the cluster,

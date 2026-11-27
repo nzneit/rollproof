@@ -17,7 +17,6 @@ permissions:
 defaults:
   run:
     shell: bash
-    working-directory: projects/rollproof
 
 jobs:
   action:
@@ -32,7 +31,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.27"
-          cache-dependency-path: projects/rollproof/go.sum
+          cache-dependency-path: go.sum
       - name: The job's registry
         run: docker run -d --name rollproof-action-registry -p 127.0.0.1:5000:5000 docker.io/library/registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
       - name: Wait until the job's registry answers
@@ -70,11 +69,11 @@ jobs:
 
       - name: A pass, with a variable that only the step's env sets
         id: pass
-        uses: ./projects/rollproof
+        uses: ./
         env:
           ROLLPROOF_ACTION_TEST_RELEASE: orders
         with:
-          config: projects/rollproof/hack/action/testdata/pass.yaml
+          config: hack/action/testdata/pass.yaml
           image: ${{ steps.image.outputs.ref }}
           out: ${{ runner.temp }}/results-pass
       - name: Check the pass
@@ -89,10 +88,10 @@ jobs:
 
       - name: A fail, read by a later step
         id: fail
-        uses: ./projects/rollproof
+        uses: ./
         continue-on-error: true
         with:
-          config: projects/rollproof/hack/action/testdata/fail.yaml
+          config: hack/action/testdata/fail.yaml
           image: ${{ steps.image.outputs.ref }}
           out: ${{ runner.temp }}/results-fail
       - name: Check the fail
@@ -106,11 +105,11 @@ jobs:
 
       - name: A run cut short by the step's time limit
         id: cut
-        uses: ./projects/rollproof
+        uses: ./
         continue-on-error: true
         timeout-minutes: 2
         with:
-          config: projects/rollproof/hack/action/testdata/cut.yaml
+          config: hack/action/testdata/cut.yaml
           image: ${{ steps.image.outputs.ref }}
           out: ${{ runner.temp }}/results-cut
       - name: Check the run cut short

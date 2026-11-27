@@ -17,7 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // evidenceFiles records what a Watcher writes through Options.Evidence. One lock guards every file.

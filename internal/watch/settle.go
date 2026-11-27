@@ -6,7 +6,7 @@ import (
 	"slices"
 	"time"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // Settling is the install from ready until it settled under the probe. First is the probe's first

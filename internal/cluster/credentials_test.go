@@ -3,7 +3,7 @@ package cluster
 import (
 	"testing"
 
-	"rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/config"
 )
 
 func TestCredentialsGolden(t *testing.T) {

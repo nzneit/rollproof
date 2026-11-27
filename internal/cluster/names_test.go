@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 func TestContractNames(t *testing.T) {

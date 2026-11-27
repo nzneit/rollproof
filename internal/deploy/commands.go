@@ -6,8 +6,8 @@ import (
 	"context"
 	"time"
 
-	"rollproof/internal/config"
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // CommandsOptions is what the commands driver needs: the configuration's commands, as Resolve

@@ -9,7 +9,6 @@ permissions:
 defaults:
   run:
     shell: bash
-    working-directory: projects/rollproof
 
 jobs:
   mirror:
@@ -26,7 +25,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.27"
-          cache-dependency-path: projects/rollproof/go.sum
+          cache-dependency-path: go.sum
       - name: Helm and kubectl
         run: go run ./hack/fetchhelm
       - name: The mirror job

@@ -6,7 +6,7 @@ import (
 	"io"
 	"syscall"
 
-	"rollproof/internal/report"
+	"github.com/nzneit/rollproof/internal/report"
 )
 
 // newStopToken gives the token of one run's lines for GitHub's workflow commands:

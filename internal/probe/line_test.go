@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 func TestParseLine(t *testing.T) {

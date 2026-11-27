@@ -17,8 +17,8 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"go.yaml.in/yaml/v3"
 
-	"rollproof/internal/config"
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 const (

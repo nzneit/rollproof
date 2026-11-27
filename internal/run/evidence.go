@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"rollproof/internal/verdict"
-	"rollproof/internal/watch"
+	"github.com/nzneit/rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/watch"
 )
 
 // completionLimit bounds the listing of the events after the verdict, also

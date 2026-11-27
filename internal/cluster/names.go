@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // ProbeNamespace is the namespace of every probe pod.

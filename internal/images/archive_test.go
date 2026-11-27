@@ -20,9 +20,9 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
-	"rollproof/internal/cluster"
-	"rollproof/internal/config"
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/cluster"
+	"github.com/nzneit/rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // archiveRegistry starts a registry in the process and returns a Cluster whose run's registry it is.

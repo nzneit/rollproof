@@ -13,7 +13,7 @@ import (
 	"time"
 	"unicode"
 
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // Kind is what one line of a probe's output is: Observed (it carries ok), Text (log text),

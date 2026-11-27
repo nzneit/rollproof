@@ -30,8 +30,8 @@ import (
 	"sigs.k8s.io/kind/pkg/cluster/nodes"
 	"sigs.k8s.io/kind/pkg/cluster/nodeutils"
 
-	"rollproof/internal/config"
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // namePrefix begins the name of every cluster, registry and run's folder that the tool makes, and

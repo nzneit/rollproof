@@ -1,4 +1,4 @@
-module rollproof
+module github.com/nzneit/rollproof
 
 go 1.27
 

@@ -16,8 +16,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
-	"rollproof/internal/cluster"
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/cluster"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // Started is a probe that has started. First is when its first observation was

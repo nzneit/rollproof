@@ -8,9 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"rollproof/internal/cluster"
-	"rollproof/internal/config"
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/cluster"
+	"github.com/nzneit/rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // storeLocal puts the engine's image local, NAME:TAG, into the run's registry by digest, under

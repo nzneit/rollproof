@@ -13,12 +13,12 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"k8s.io/apimachinery/pkg/types"
 
-	"rollproof/internal/config"
-	"rollproof/internal/deploy"
-	"rollproof/internal/probe"
-	"rollproof/internal/report"
-	"rollproof/internal/verdict"
-	"rollproof/internal/watch"
+	"github.com/nzneit/rollproof/internal/config"
+	"github.com/nzneit/rollproof/internal/deploy"
+	"github.com/nzneit/rollproof/internal/probe"
+	"github.com/nzneit/rollproof/internal/report"
+	"github.com/nzneit/rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/watch"
 )
 
 var t0 = time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)

@@ -15,8 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 
-	"rollproof/internal/cluster"
-	"rollproof/internal/verdict"
+	"github.com/nzneit/rollproof/internal/cluster"
+	"github.com/nzneit/rollproof/internal/verdict"
 )
 
 // clusterDomain is the domain of the clusters the tool creates; the tool does not change it.
