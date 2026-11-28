@@ -1,5 +1,5 @@
 // Command actioncheck checks one run of the action in the action's own test
-// (.github/workflows/rollproof-action.yml in the host repository): the step's two outputs, the
+// (.github/workflows/rollproof-action.yml in this repository): the step's two outputs, the
 // results folder's result.json, and the step's job summary, read in the runner's masked copy. It
 // prints one line for each fault and exits 1, or exits 0 when every check holds; a flag it cannot
 // read exits 2.

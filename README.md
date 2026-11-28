@@ -1,6 +1,6 @@
 # rollproof
 
-`rollproof` is a working name.
+`rollproof` is a working name until the first release. It was checked for collisions on 2026-11-24 (`docs/proofs/p14-name.md`), and the maintainer ruled that it stays.
 
 It tests, in a CI job or on a laptop, whether deploying a new version of a Kubernetes workload, and rolling it back, causes downtime.
 
@@ -18,7 +18,7 @@ It cannot yet be used from another repository: nothing is released, so the actio
 
     - run: docker build -t orders:candidate .
     - id: rollproof
-      uses: OWNER/rollproof@COMMIT
+      uses: nzneit/rollproof@COMMIT
       env:
         PREVIOUS_VERSION: 1.4.2
     - if: always() && steps.rollproof.outputs.out != ''
