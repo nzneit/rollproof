@@ -4,7 +4,7 @@
 
 It tests, in a CI job or on a laptop, whether deploying a new version of a Kubernetes workload, and rolling it back, causes downtime.
 
-Nothing is released; the design is docs/specs/2026-11-13-rollproof-design.md.
+Nothing is released; the design is docs/specs/2026-11-13-rollproof-design.md. The documents under `docs/` cite commits by the hash they had in the repository the project left before the split of 2026-11-27; `docs/commit-map.md` gives, for each commit the split carried, that hash and the one it has here.
 
 What works now, on Linux: `rollproof run` creates its own kind cluster; deploys through Helm, with or without a previous release (a run with none tests a restart), or through the commands driver; runs the `setup` commands; judges with the built-in HTTP probe or with a custom probe that `docs/probe-contract.md` describes; takes images from the engine or from an archive; and writes `result.json`, the console report and the evidence folder, and, on GitHub Actions, the step's outputs and its job summary. The whole suite has run on rootless nerdctl. On Docker, on GitHub's hosted runners, the tests under the build tag `cluster` of five packages, the whole suite under both Helm majors, the mirror job and the action's own test have run (`docs/proofs/p24-hosted-runner.md`, `docs/proofs/p32-step6-workflows.md`, `docs/proofs/p34-graduation-runs.md`). Podman is not promised: one test has run through it.
 
