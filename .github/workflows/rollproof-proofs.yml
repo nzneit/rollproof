@@ -97,7 +97,7 @@ jobs:
   #     parent line that names Runner.Worker (the recorder was the step's first process);
   #   - the run page renders the table, fenced code, <details> and raw HTML of "masking and
   #     Markdown" (a person looks), with S6SECRETVALUE shown as ***.
-  # If "jt" has not started before the timeout, raise timeout-minutes to 2 (one more billed minute).
+  # If "jt" has not started before the timeout, raise timeout-minutes to 2 (one more minute).
   # ---------------------------------------------------------------------------------------------
   files-then-job-timeout:
     if: inputs.part == 'all' || inputs.part == 'runner-files-and-timeouts'

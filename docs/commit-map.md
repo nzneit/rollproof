@@ -2,7 +2,7 @@
 
 `rollproof` incubated in a folder of another repository and was split out of it with its history on 2026-11-27. The split changed every commit's hash. The documents under `docs/` cite commits by the hash they had there; this table gives, for each commit the split carried, that hash and the one it has here. An older hash resolves only in the repository the project left.
 
-The table was made from the map that `git-filter-repo` 2.47.0 wrote, with the short hashes git prints for this repository. 328 commits were carried. 65 were left out: each changed nothing the split kept, or was a merge that lost a parent.
+The table was made from the map that `git-filter-repo` 2.47.0 wrote, with the short hashes git prints for this repository. 328 commits were carried. 65 were left out: each changed nothing the split kept, or was a merge that lost a parent. One of the 65 is cited by a document and has no row: `dd44bab`, a merge that `docs/plans/2026-11-17-install-window/README.md` cites. In the repository the project left, its tree is that of one of its parents, `79ea311`, which the split carried as `f652851`. So each difference that document names is read here with the file's path at the root: the first, from that merge to `d895b92` (here `a596fba`), as `git diff f652851 a596fba -- docs/specs/2026-11-13-rollproof-design.md`; the second, from `54566ed` to `c1c39fa` there (here `28ccbbe` to `0fd0f2d`), as `git diff 28ccbbe 0fd0f2d -- docs/specs/2026-11-13-rollproof-design.md`.
 
 | There | Here |
 | --- | --- |

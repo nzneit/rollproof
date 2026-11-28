@@ -3,8 +3,10 @@ name: rollproof e2e suite
 # The suite of rollproof's design, section 12, on Docker, started by hand only. First the tests
 # under the build tag cluster; then, when they have passed, the suite under Helm 3 on ubuntu-24.04
 # and under Helm 4 on ubuntu-26.04, side by side. The harness takes the Helm major from
-# ROLLPROOF_E2E_HELM and runs the fourteenth row's control in both jobs. Each go test has a limit
-# below its job's, so that its report is not cut off. A Helm job that fails uploads the results
+# ROLLPROOF_E2E_HELM and runs the fourteenth row's control in both jobs. Each Helm job's go test
+# has a limit below its job's, so that its report is not cut off. The cluster job's go test has a
+# limit of 35 minutes for each of its five packages, one after another, in a job of 45 minutes, so
+# the job's limit can cut off a later package's report. A Helm job that fails uploads the results
 # folders that the harness keeps, for three days; a job that passes uploads nothing.
 
 on:
